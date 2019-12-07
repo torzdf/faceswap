@@ -24,6 +24,7 @@ from lib.model.losses import (DSSIMObjective, PenalizedLoss, gradient_loss, mask
                               generalized_loss, l_inf_norm, gmsd_loss, gaussian_blur)
 from lib.model.nn_blocks import NNBlocks
 from lib.model.optimizers import Adam
+from lib.model.session import KSession
 from lib.utils import deprecation_warning, FaceswapError
 from plugins.train._config import Config
 
@@ -36,6 +37,7 @@ class ModelBase():
     def __init__(self,
                  model_dir,
                  gpus=1,
+                 allow_growth=False,
                  configfile=None,
                  snapshot_interval=0,
                  no_logs=False,
@@ -52,16 +54,17 @@ class ModelBase():
                  memory_saving_gradients=False,
                  optimizer_savings=False,
                  predict=False):
-        logger.debug("Initializing ModelBase (%s): (model_dir: '%s', gpus: %s, configfile: %s, "
-                     "snapshot_interval: %s, no_logs: %s, warp_to_landmarks: %s, augment_color: "
-                     "%s, no_flip: %s, training_image_size, %s, alignments_paths: %s, "
-                     "preview_scale: %s, input_shape: %s, encoder_dim: %s, trainer: %s, "
-                     "pingpong: %s, memory_saving_gradients: %s, optimizer_savings: %s, "
-                     "predict: %s)",
-                     self.__class__.__name__, model_dir, gpus, configfile, snapshot_interval,
-                     no_logs, warp_to_landmarks, augment_color, no_flip, training_image_size,
-                     alignments_paths, preview_scale, input_shape, encoder_dim, trainer, pingpong,
-                     memory_saving_gradients, optimizer_savings, predict)
+        logger.debug("Initializing ModelBase (%s): (model_dir: '%s', gpus: %s, allow_growth: %s, "
+                     "configfile: %s, snapshot_interval: %s, no_logs: %s, warp_to_landmarks: %s, "
+                     "augment_color: %s, no_flip: %s, training_image_size, %s, "
+                     "alignments_paths: %s, preview_scale: %s, input_shape: %s, encoder_dim: %s, "
+                     "trainer: %s, pingpong: %s, memory_saving_gradients: %s, "
+                     "optimizer_savings: %s, predict: %s)",
+                     self.__class__.__name__, model_dir, gpus, allow_growth, configfile,
+                     snapshot_interval, no_logs, warp_to_landmarks, augment_color, no_flip,
+                     training_image_size, alignments_paths, preview_scale, input_shape,
+                     encoder_dim, trainer, pingpong, memory_saving_gradients, optimizer_savings,
+                     predict)
 
         self.predict = predict
         self.model_dir = model_dir
@@ -69,6 +72,7 @@ class ModelBase():
 
         self.backup = Backup(self.model_dir, self.name)
         self.gpus = gpus
+        self.allow_growth = allow_growth
         self.configfile = configfile
         self.input_shape = input_shape
         self.encoder_dim = encoder_dim
@@ -831,7 +835,14 @@ class NNMeta():
         fullpath = fullpath if fullpath else self.filename
         logger.debug("Loading model: '%s'", fullpath)
         try:
-            network = load_model(self.filename, custom_objects=get_custom_objects())
+            session = KSession(self.name,
+                               self.filename,
+                               model_kwargs=None,
+                               allow_growth=self.allow_growth,
+                               gpus=self.gpus)
+            session.load_model()
+            network = session._model
+            # network = load_model(self.filename, custom_objects=get_custom_objects())
         except ValueError as err:
             if str(err).lower().startswith("cannot create group in read only mode"):
                 self.convert_legacy_weights()

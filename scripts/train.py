@@ -10,7 +10,6 @@ from time import sleep
 
 import cv2
 import tensorflow as tf
-from keras.backend.tensorflow_backend import set_session
 
 from lib.image import read_image
 from lib.keypress import KBHit
@@ -208,8 +207,6 @@ class Train():
             logger.debug("Commencing Training")
             logger.info("Loading data, this may take a while...")
 
-            if self._args.allow_growth:
-                self._set_tf_allow_growth()
             model = self._load_model()
             trainer = self._load_trainer(model)
             self._run_training_cycle(model, trainer)
@@ -239,6 +236,7 @@ class Train():
         model = PluginLoader.get_model(self.trainer_name)(
             model_dir,
             gpus=self._args.gpus,
+            allow_growth=self._args.allow_growth,
             configfile=configfile,
             snapshot_interval=self._args.snapshot_interval,
             no_logs=self._args.no_logs,
@@ -386,20 +384,6 @@ class Train():
         keypress.set_normal_term()
         logger.debug("Closed Monitor")
         return err
-
-    @staticmethod
-    def _set_tf_allow_growth():
-        """ Allow TensorFlow to manage VRAM growth.
-
-        Enables the Tensorflow allow_growth option if requested in the command line arguments
-        """
-        # pylint: disable=no-member
-        logger.debug("Setting Tensorflow 'allow_growth' option")
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        config.gpu_options.visible_device_list = "0"
-        set_session(tf.Session(config=config))
-        logger.debug("Set Tensorflow 'allow_growth' option")
 
     def _show(self, image, name=""):
         """ Generate the preview and write preview file output.

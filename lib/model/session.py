@@ -38,11 +38,12 @@ class KSession():
         Tensorflow from allocating all of the GPU VRAM, but can lead to higher fragmentation and "
         slower performance. Default: False
     """
-    def __init__(self, name, model_path, model_kwargs=None, allow_growth=False):
+    def __init__(self, name, model_path, model_kwargs=None, allow_growth=False, gpus=1):
         logger.trace("Initializing: %s (name: %s, model_path: %s, model_kwargs: %s, "
-                     "allow_growth: %s)",
-                     self.__class__.__name__, name, model_path, model_kwargs, allow_growth)
+                     "allow_growth: %s, gpus: %s)",
+                     self.__class__.__name__, name, model_path, model_kwargs, allow_growth, gpus)
         self._name = name
+        self._gpus = gpus
         self._session = self._set_session(allow_growth)
         self._model_path = model_path
         self._model_kwargs = model_kwargs
@@ -114,7 +115,7 @@ class KSession():
         config = tf.ConfigProto()
         if get_backend() == "nvidia":
             num_cores = psutil.cpu_count(logical=False)
-            gpu_str = "" if gpus < 1 else str(range(gpus))
+            gpu_str = "" if self._gpus < 1 else ','.join(list(range(self._gpus - 1)))
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             os.environ["CUDA_VISIBLE_DEVICES"] = gpu_str
 

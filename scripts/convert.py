@@ -11,7 +11,6 @@ from time import sleep
 from cv2 import imwrite  # pylint:disable=no-name-in-module
 import numpy as np
 import tensorflow as tf
-from keras.backend.tensorflow_backend import set_session
 from tqdm import tqdm
 
 from scripts.fsmedia import Alignments, Images, PostProcess, Utils
@@ -425,9 +424,6 @@ class Predict():
         self.faces_count = 0
         self.verify_output = False
 
-        if arguments.allow_growth:
-            self.set_tf_allow_growth()
-
         self.model = self.load_model()
         self.output_indices = {"face": self.model.largest_face_index,
                                "mask": self.model.largest_mask_index}
@@ -475,18 +471,6 @@ class Predict():
         logger.debug("Got batchsize: %s", batchsize)
         return batchsize
 
-    @staticmethod
-    def set_tf_allow_growth():
-        """ Allow TensorFlow to manage VRAM growth """
-        # pylint: disable=no-member
-        # TODO Move this temporary fix somewhere more appropriate
-        logger.debug("Setting Tensorflow 'allow_growth' option")
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        config.gpu_options.visible_device_list = "0"
-        set_session(tf.Session(config=config))
-        logger.debug("Set Tensorflow 'allow_growth' option")
-
     def load_model(self):
         """ Load the model requested for conversion """
         logger.debug("Loading Model")
@@ -494,8 +478,11 @@ class Predict():
         if not model_dir:
             raise FaceswapError("{} does not exist.".format(self.args.model_dir))
         trainer = self.get_trainer(model_dir)
-        gpus = 1 if not hasattr(self.args, "gpus") else self.args.gpus
-        model = PluginLoader.get_model(trainer)(model_dir, gpus, predict=True)
+        #gpus = 1 if not hasattr(self.args, "gpus") else self.args.gpus
+        model = PluginLoader.get_model(trainer)(model_dir,
+                                                gpus=self.args.gpus,
+                                                allow_growth=self.args.allow_growth,
+                                                predict=True)
         logger.debug("Loaded Model")
         return model
 
