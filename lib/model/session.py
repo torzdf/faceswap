@@ -3,6 +3,8 @@
 
 import logging
 
+import os
+import psutil
 import tensorflow as tf
 from keras.layers import Activation
 from tensorflow.python import errors_impl as tf_error  # pylint:disable=no-name-in-module
@@ -110,8 +112,18 @@ class KSession():
 
         self.graph = tf.Graph()
         config = tf.ConfigProto()
-        if allow_growth and get_backend() == "nvidia":
-            config.gpu_options.allow_growth = True
+        if get_backend() == "nvidia":
+            num_cores = psutil.cpu_count(logical=False)
+            gpu_str = "" if gpus < 1 else str(range(gpus))
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_str
+
+            gpu_options = tf.GPUOptions(allow_growth=allow_growth,
+                                        visible_device_list=gpu_str)
+            config = tf.ConfigProto(gpu_options=gpu_options,
+                                    intra_op_parallelism_threads=num_cores,
+                                    inter_op_parallelism_threads=2,
+                                    allow_soft_placement=True)
         try:
             session = tf.Session(graph=tf.Graph(), config=config)
         except tf_error.InternalError as err:
