@@ -334,7 +334,7 @@ def count_frames(filename, fast=False):
             logger.debug("frame line: %s", output)
             if not init_tqdm:
                 logger.debug("Initializing tqdm")
-                pbar = tqdm(desc="Counting Video Frames", total=duration, unit="secs")
+                pbar = tqdm(desc="Counting Video Frames", leave=False, total=duration, unit="secs")
                 init_tqdm = True
             time_idx = output.find("time=") + len("time=")
             frame_idx = output.find("frame=") + len("frame=")
@@ -567,7 +567,7 @@ class ImagesLoader(ImageIO):
         """
         if self._is_video:
             self._count = int(count_frames(self.location, fast=fast_count))
-            self._file_list = [self._dummy_video_framename(i + 1) for i in range(self.count)]
+            self._file_list = [self._dummy_video_framename(i) for i in range(self.count)]
         else:
             if isinstance(self.location, (list, tuple)):
                 self._file_list = self.location
@@ -620,24 +620,29 @@ class ImagesLoader(ImageIO):
                 continue
             # Convert to BGR for cv2 compatibility
             frame = frame[:, :, ::-1]
-            filename = self._dummy_video_framename(idx + 1)
+            filename = self._dummy_video_framename(idx)
             logger.trace("Loading video frame: '%s'", filename)
             yield filename, frame
         reader.close()
 
-    def _dummy_video_framename(self, frame_no):
+    def _dummy_video_framename(self, index):
         """ Return a dummy filename for video files
 
         Parameters
         ----------
-        frame_no: int
-            The frame number for the video frame
+        index: int
+            The index number for the frame in the video file
+
+        Notes
+        -----
+        Indexes start at 0, frame numbers start at 1, so index is incremented by 1
+        when creating the filename
 
         Returns
         -------
         str: A dummied filename for a video frame """
         vidname = os.path.splitext(os.path.basename(self.location))[0]
-        return "{}_{:06d}.png".format(vidname, frame_no + 1)
+        return "{}_{:06d}.png".format(vidname, index + 1)
 
     def _from_folder(self):
         """ Generator for loading images from a folder
