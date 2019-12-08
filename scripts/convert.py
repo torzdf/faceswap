@@ -478,9 +478,9 @@ class Predict():
         if not model_dir:
             raise FaceswapError("{} does not exist.".format(self.args.model_dir))
         trainer = self.get_trainer(model_dir)
-        #gpus = 1 if not hasattr(self.args, "gpus") else self.args.gpus
+        gpus = 1 if not hasattr(self.args, "gpus") else self.args.gpus
         model = PluginLoader.get_model(trainer)(model_dir,
-                                                gpus=self.args.gpus,
+                                                gpus=gpus,
                                                 allow_growth=self.args.allow_growth,
                                                 predict=True)
         logger.debug("Loaded Model")
