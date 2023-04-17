@@ -37,6 +37,17 @@ _Models: dict[str, ClipConfig] = { # Each model has a different set of parameter
 
 
 def build_model(model_name: str, visual: bool = True, text: bool = True) -> keras.Model:
+        """
+        Builds and returns a CLIP model
+
+        Args:
+            @param model_name (str): The name of the model configuration to use It takes one of these Model types %s % _Models
+            visual (bool): Whether to build the visual CLIP model. Defaults to True.
+            text (bool): Whether to build the text CLIP model. Defaults to True.
+
+        Returns:
+            keras.Model: The CLIP model with the specified configuration and weights loaded.
+        """
     config = _Models[model_name]
 
     model = CLIP(config.embed_dim, config.image_resolution, config.vision_layers, config.vision_width, config.vision_patch_size,
@@ -53,6 +64,15 @@ def build_model(model_name: str, visual: bool = True, text: bool = True) -> kera
     return model
 
 def build_visual_model(model_name: str) -> keras.Model:
+        """
+        Builds and returns the visual CLIP model.
+
+        Args:
+            @param model_name (str): The name of the model configuration to use It takes one of these Model types %s % _Models
+
+        Returns:
+            keras.Model: The visual CLIP model with the specified configuration.
+        """
     config = _Models[model_name]
     model = VisualTransformer(
                 input_resolution=config.image_resolution,
