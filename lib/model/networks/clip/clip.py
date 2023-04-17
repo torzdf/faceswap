@@ -173,8 +173,8 @@ class CLIP(keras.Model):
         Builds an attention mask tensor for the CLIP model.
 
         Returns:
-            A tensor of shape (batch_size, context_length, context_length) with boolean values
-            indicating which tokens should be attended to.
+            tf.Tensor: of shape [batch_size, context_length, context_length] with boolean values
+                indicating which tokens should be attended to.
         """
         n_dest = self.context_length
         n_src = self.context_length
@@ -194,10 +194,10 @@ class CLIP(keras.Model):
     @property
     def dtype(self):
         """
-        Returns the data type of the weights.
+        Returns the dtype of the weights.
 
         Returns:
-            The data type.
+            tf.Tensor: The dtype of the weights.
         """
         return self.visual.conv1.weight.dtype
 
@@ -222,10 +222,10 @@ class CLIP(keras.Model):
         Encodes the input text using the pretrained model.
 
         Args:
-            text: A tensor of shape [batch_size, n_ctx], containing the tokenized text.
+            text (tf.Tensor): of shape [batch_size, n_ctx], containing the tokenized text.
 
         Returns:
-            A tensor of shape [batch_size, embed_size], containing the encoded representation
+            tf.Tensor: of shape [batch_size, embed_size], containing the encoded representation
             of the input text.
         """
         var_x = tf.nn.embedding_lookup(self.token_embedding, text)

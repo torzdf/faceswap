@@ -37,9 +37,6 @@ class Bottleneck(klayers.Layer):
             planes (int): The number of output channels.
             stride (int): The stride of the bottleneck block.
             name (str): The name of the bottleneck block.
-
-        Returns:
-            None.
         """
         super().__init__(name=name)
 
@@ -77,7 +74,7 @@ class Bottleneck(klayers.Layer):
         Returns the configuration dictionary for a Bottleneck block.
 
         Returns:
-            A dictionary containing the configuration of a Bottleneck block.
+            dict: containing the configuration of a Bottleneck block.
         """
         return {
             "inplanes": self.inplanes,
@@ -95,7 +92,7 @@ class Bottleneck(klayers.Layer):
             config (dict): The configuration dictionary for the Bottleneck block.
 
         Returns:
-            A Bottleneck block created from the configuration dictionary.
+            klayers.Layer: A Bottleneck block class created from the configuration dictionary.
         """
         return cls(**config)
 
@@ -107,7 +104,7 @@ class Bottleneck(klayers.Layer):
             x (tf.Tensor): The input tensor to the Bottleneck block.
 
         Returns:
-            The output tensor of the Bottleneck block.
+            tf.Tensor: The result of the forward pass through the Bottleneck block.
         """
         identity = x
 
@@ -158,9 +155,6 @@ class AttentionPool2d(klayers.Layer):
             num_heads (int): The number of attention heads.
             output_dim (int): The output dimensionality of the attention layer. If None, it defaults to embed_dim.
             name (str): The name of the layer.
-
-        Returns:
-            None
         """
         super().__init__(name=name)
 
@@ -190,7 +184,7 @@ class AttentionPool2d(klayers.Layer):
         Returns the configuration dictionary for an AttentionPool2d layer.
 
         Returns:
-            A dictionary containing the configuration of an AttentionPool2d layer.
+            dict: containing the configuration of an AttentionPool2d layer.
         """
         return {
             "spatial_dim": self.spatial_dim,
@@ -209,7 +203,7 @@ class AttentionPool2d(klayers.Layer):
             config (dict): The configuration dictionary for the AttentionPool2d layer.
 
         Returns:
-            An AttentionPool2d layer created from the configuration dictionary.
+            klayers.Layer: An AttentionPool2d layer created from the configuration dictionary.
         """
         return cls(**config)
 
@@ -221,7 +215,7 @@ class AttentionPool2d(klayers.Layer):
             training (bool, optional): Whether the layer is in training mode. Defaults to None.
 
         Returns:
-            A tensor representing the attention pooled representation of the input tensor, of shape (batch_size, output_dim)."""
+            tf.Tensor: The result of the attention pooling operation."""
         x_shape = tf.shape(x)
         x = tf.reshape(x, (x_shape[0], x_shape[1] * x_shape[2], x_shape[3]))  # NHWC -> N(HW)C
 
@@ -298,15 +292,16 @@ class ModifiedResNet(keras.Model):
             self.attnpool = AttentionPool2d(input_resolution // 32, embed_dim, heads, output_dim, name="attnpool")
 
     def get_config(self):
-            """
-            Returns a dictionary containing the configuration of the ModifiedResNet model. This dictionary includes the following key-value pairs:
+        """
+        Returns a dictionary containing the configuration of the ModifiedResNet model containing
+            the following key-value pairs:
             - "layers": the configuration of layers
             - "output_dim": the output dimension
             - "heads": the number of heads for the QKV attention
             - "input_resolution": the input resolution of the model
             - "width": the width of the model
             - "name": the name of the model
-            """
+        """
         return {
             "layers": self.layers_config,
             "output_dim": self.output_dim,
@@ -341,6 +336,26 @@ class ModifiedResNet(keras.Model):
                 layers.append(Bottleneck(self._inplanes, planes, name=name + f"/{i}"))
 
             return keras.Sequential(layers, name="bla")
+        
+    def stem(self, x):
+        """
+        Applies the stem operation to the input tensor, which consists of 3 convolutional
+            layers with BatchNormalization and ReLU activation, followed by an average pooling layer.
+
+        Args:
+            x(tf.Tensor): The input tensor of shape (batch_size, height, width, channels).
+
+        Returns:
+            tf.Tensor: The output tensor after applying the stem operation.
+        """
+        for conv_pad, conv, bn in [
+            (self.conv1_padding, self.conv1, self.bn1),
+            (self.conv2_padding, self.conv2, self.bn2),
+            (self.conv3_padding, self.conv3, self.bn3)
+        ]:
+            x = self.relu(bn(conv(conv_pad(x))))
+        x = self.avgpool(x)
+        return x
 
     def call(self, x):
         """
@@ -352,24 +367,6 @@ class ModifiedResNet(keras.Model):
         Returns:
             tf.Tensor: The output tensor after passing through the ModifiedResNet model.
         """
-        def stem(x):
-            """
-            Applies the stem operation to the input tensor, which consists of 3 convolutional layers with BatchNormalization and ReLU activation, followed by an average pooling layer.
-
-            Args:
-                x(tf.Tensor): The input tensor of shape (batch_size, height, width, channels).
-
-            Returns:
-                tf.Tensor: The output tensor after applying the stem operation.
-            """
-            for conv_pad, conv, bn in [
-                (self.conv1_padding, self.conv1, self.bn1),
-                (self.conv2_padding, self.conv2, self.bn2),
-                (self.conv3_padding, self.conv3, self.bn3)
-            ]:
-                x = self.relu(bn(conv(conv_pad(x))))
-            x = self.avgpool(x)
-            return x
 
         # x = x.type(self.conv1.weight.dtype)
         x = stem(x)
