@@ -14,30 +14,53 @@ from .visual_transformer import VisualTransformer
 class CLIP(keras.Model):
     """
     A Convolutional Language-Image Pre-Training (CLIP) model that encodes images and text into a shared latent space.
-    Args:
-        embed_dim (int): Dimensionality of the final shared embedding space.
-        image_resolution (int): Spatial resolution of the input images.
-        vision_layers (Union[Tuple[int, int, int, int], int]): Number of layers in the visual encoder, or a tuple of
-            layer configurations for a custom ResNet visual encoder.
-        vision_width (int): Width of the visual encoder layers.
-        vision_patch_size (int): Size of the patches to be extracted from the images.
-        context_length (int): Length of the input text sequences.
-        vocab_size (int): Size of the vocabulary.
-        transformer_width (int): Width of the transformer layers.
-        transformer_heads (int): Number of heads in the transformer attention mechanism.
-        transformer_layers (int): Number of transformer layers.
+
+    Parameters
+    ----------
+        embed_dim: int 
+            Dimensionality of the final shared embedding space.
+        image_resolution: int 
+            Spatial resolution of the input images.
+        vision_layers: Union[Tuple[int, int, int, int], int] 
+            Number of layers in the visual encoder, or a tuple of
+                layer configurations for a custom ResNet visual encoder.
+        vision_width: int 
+            Width of the visual encoder layers.
+        vision_patch_size: int 
+            Size of the patches to be extracted from the images.
+        context_length: int 
+            Length of the input text sequences.
+        vocab_size :int 
+            Size of the vocabulary.
+        transformer_width: int 
+            Width of the transformer layers.
+        transformer_heads: int 
+            Number of heads in the transformer attention mechanism.
+        transformer_layers: int 
+            Number of transformer layers.
 
     Attributes:
-        image_resolution (int): Spatial resolution of the input images.
-        context_length (int): Length of the input text sequences.
-        visual (keras.Model): Visual encoder module.
-        transformer (Transformer): Transformer module for the text encoder.
-        vocab_size (int): Size of the vocabulary.
-        token_embedding (tf.Variable): Embedding layer for the text encoder.
-        positional_embedding (tf.Variable): Positional encoding layer for the text encoder.
-        ln_final (keras.layers.LayerNormalization): Layer normalization for the final transformer output.
-        text_projection (tf.Variable): Projection layer for the final text embedding.
-        logit_scale (tf.Variable): Scaling factor for the final cosine similarity scores.
+    ---------- 
+        image_resolution: int 
+            Spatial resolution of the input images.
+        context_length: int 
+            Length of the input text sequences.
+        visual: keras.Model 
+            Visual encoder module.
+        transformer: Transformer 
+            Transformer module for the text encoder.
+        vocab_size: int 
+            Size of the vocabulary.
+        token_embedding: tf.Variable 
+            Embedding layer for the text encoder.
+        positional_embedding: tf.Variable 
+            Positional encoding layer for the text encoder.
+        ln_final: keras.layers.LayerNormalization 
+            Layer normalization for the final transformer output.
+        text_projection: tf.Variable 
+            Projection layer for the final text embedding.
+        logit_scale: tf.Variable 
+            Scaling factor for the final cosine similarity scores.
 
     """
     def __init__(self,
@@ -57,20 +80,32 @@ class CLIP(keras.Model):
         """
         Initializes the CLIP model.
 
-        Args:
-            embed_dim (int): Dimensionality of the final shared embedding space.
-            image_resolution (int): Spatial resolution of the input images.
-            vision_layers (Union[Tuple[int, int, int, int], int]): Number of layers in the visual 
-                encoder, or a tuple of layer configurations for a custom ResNet visual encoder.
-            vision_width (int): Width of the visual encoder layers.
-            vision_patch_size (int): Size of the patches to be extracted from the images.
-            context_length (int): Length of the input text sequences.
-            vocab_size (int): Size of the vocabulary.
-            transformer_width (int): Width of the transformer layers.
-            transformer_heads (int): Number of heads in the transformer attention mechanism.
-            transformer_layers (int): Number of transformer layers.
+        Parameters
+        ----------
+            embed_dim: int 
+                Dimensionality of the final shared embedding space.
+            image_resolution: int 
+                Spatial resolution of the input images.
+            vision_layers: Union[Tuple[int, int, int, int], int] 
+                Number of layers in the visual 
+                    encoder, or a tuple of layer configurations for a custom ResNet visual encoder.
+            vision_width: int 
+                Width of the visual encoder layers.
+            vision_patch_size: int 
+                Size of the patches to be extracted from the images.
+            context_length: int 
+                Length of the input text sequences.
+            vocab_size: int 
+                Size of the vocabulary.
+            transformer_width: int 
+                Width of the transformer layers.
+            transformer_heads: int 
+                Number of heads in the transformer attention mechanism.
+            transformer_layers: int 
+                Number of transformer layers.
 
         Returns:
+        -------
             None
         """
         super().__init__()
@@ -125,6 +160,7 @@ class CLIP(keras.Model):
         Initializes the parameters of the CLIP model.
 
         Returns:
+        -------
             None.
         """
         # TODO: convert to tf, for model initialization (not needed for pretrained weights)
@@ -173,6 +209,7 @@ class CLIP(keras.Model):
         Builds an attention mask tensor for the CLIP model.
 
         Returns:
+        -------
             tf.Tensor: of shape [batch_size, context_length, context_length] with boolean values
                 indicating which tokens should be attended to.
         """
@@ -197,6 +234,7 @@ class CLIP(keras.Model):
         Returns the dtype of the weights.
 
         Returns:
+        -------
             tf.Tensor: The dtype of the weights.
         """
         return self.visual.conv1.weight.dtype
@@ -206,12 +244,15 @@ class CLIP(keras.Model):
         """
         Encodes an image tensor using the visual function.
 
-        Args:
-            image (tf.Tensor): A tensor of shape [batch_size, image_resolution, image_resolution, channels]
-                (Note: Channels could be 1 -monochrome or 3 -RGB color)
-                containing the image to be encoded.
+        Parameters
+        ----------
+            image: tf.Tensor 
+                A tensor of shape [batch_size, image_resolution, image_resolution, channels]
+                    (Note: Channels could be 1 -monochrome or 3 -RGB color)
+                        containing the image to be encoded.
 
         Returns:
+        -------
             tf.Tensor: A tensor of shape[batch_size, embed_size] containing the encoded representation of the image.
         """
         return self.visual(image)
@@ -221,10 +262,13 @@ class CLIP(keras.Model):
         """
         Encodes the input text using the pretrained model.
 
-        Args:
-            text (tf.Tensor): of shape [batch_size, n_ctx], containing the tokenized text.
+        Parameters
+        ----------
+            text: (tf.Tensor) 
+                of shape [batch_size, n_ctx], containing the tokenized text.
 
         Returns:
+        -------
             tf.Tensor: of shape [batch_size, embed_size], containing the encoded representation
             of the input text.
         """
@@ -253,12 +297,16 @@ class CLIP(keras.Model):
         """
         Finds the embeddings for a batch of images and texts and then computes the
             cosine similarity between the embeddings.
-        Args:
-            input (Tuple[tf.Tensor, tf.Tensor]): A tuple of two tensors containing the input
-                images and texts. The image tensor should have shape [batch_size,
-                image_resolution, image_resolution, channels], and the text tensor should have
-                shape [batch_size, sequence_length].
+
+        Parameters
+        ----------
+            input: Tuple[tf.Tensor, tf.Tensor] 
+                A tuple of two tensors containing the input
+                    images and texts. The image tensor should have shape [batch_size,
+                        image_resolution, image_resolution, channels], and the text tensor should have
+                            shape [batch_size, sequence_length].
         Returns:
+        -------
             Tuple[tf.Tensor, tf.Tensor]: A tuple of two tensors containing the logits for the
                 image and text inputs. Both tensors will have shape [batch_size, embed_dim].
         """

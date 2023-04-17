@@ -11,6 +11,19 @@ class Transformer():
     """
     A class representing a Transformer model with attention mechanism and residual connections.
 
+    Parameters
+    ----------
+    width : int
+        The dimension of the input and output vectors.
+    layers : int
+        The number of layers in the Transformer.
+    heads : int
+        The number of attention heads.
+    attn_mask : tf.Tensor, optional
+        The attention mask, by default None.
+    name : str, optional
+        The name of the Transformer model, by default "transformer".
+
     Attributes
     ----------
     width : int
@@ -38,19 +51,6 @@ class Transformer():
     def __init__(self, width: int, layers: int, heads: int, attn_mask: tf.Tensor = None, name="transformer"):
         """
         Initializes a new instance of the Transformer class.
-
-        Parameters
-        ----------
-        width : int
-            The dimension of the input and output vectors.
-        layers : int
-            The number of layers in the Transformer.
-        heads : int
-            The number of attention heads.
-        attn_mask : tf.Tensor, optional
-            The attention mask, by default None.
-        name : str, optional
-            The name of the Transformer model, by default "transformer".
         """
         self.width = width
         self.num_layers = layers
