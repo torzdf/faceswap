@@ -246,7 +246,9 @@ class TrainerBase():
         model_inputs, model_targets = self._feeder.get_batch()
 
         try:
-            loss: list[float] = self._model.model.train_on_batch(model_inputs, y=model_targets)
+            loss: dict[str, float] = self._model.model.train_on_batch(model_inputs,
+                                                                      y=model_targets,
+                                                                      return_dict=True)
         except OutOfMemoryError as err:
             msg = ("You do not have enough GPU memory available to train the selected model at "
                    "the selected settings. You can try a number of things:"
@@ -259,39 +261,36 @@ class TrainerBase():
                    "(in config) if it has one.")
             raise FaceswapError(msg) from err
         self._log_tensorboard(loss)
-        #loss = self._collate_and_store_loss(loss[1:])  # TODO
-        #self._print_loss(loss)  # TODO
-        print(loss)
+        loss = self._collate_and_store_loss(loss)
+        self._print_loss(loss)
         if do_snapshot:
             self._model.io.snapshot()
         self._update_viewers(viewer, timelapse_kwargs)
 
-    def _log_tensorboard(self, loss: list[float]) -> None:
+    def _log_tensorboard(self, loss: dict[str, float]) -> None:
         """ Log current loss to Tensorboard log files
 
         Parameters
         ----------
-        loss: list
-            The list of loss ``floats`` output from the model
+        loss: dict[str, float]
+            The dictionary od loss per output
         """
         if not self._tensorboard:
             return
         logger.trace("Updating TensorBoard log")  # type: ignore
-        logs = {log[0]: log[1]
-                for log in zip(self._model.state.loss_names, loss)}
 
         # Bug in TF 2.8/2.9/2.10 where batch recording got deleted.
         # ref: https://github.com/keras-team/keras/issues/16173
         with tf.summary.record_if(True), self._tensorboard._train_writer.as_default():  # noqa:E501  pylint:disable=protected-access,not-context-manager
-            for name, value in logs.items():
+            for name, value in loss.items():
                 tf.summary.scalar(
                     "batch_" + name,
                     value,
                     step=self._tensorboard._train_step)  # pylint:disable=protected-access
         # TODO revert this code if fixed in tensorflow
-        # self._tensorboard.on_train_batch_end(self._model.iterations, logs=logs)
+        # self._tensorboard.on_train_batch_end(self._model.iterations, logs=loss)
 
-    def _collate_and_store_loss(self, loss: list[float]) -> list[float]:
+    def _collate_and_store_loss(self, loss: dict[str, float]) -> dict[str, float]:
         """ Collate the loss into totals for each side.
 
         The losses are summed into a total for each side. Loss totals are added to
@@ -301,14 +300,13 @@ class TrainerBase():
 
         Parameters
         ----------
-        loss: list
-            The list of loss ``floats`` for each side this iteration (excluding total combined
-            loss)
+        loss: dict[str, float]
+            The loss keys per output with the loss ``floats`` for each key)
 
         Returns
         -------
-        list
-            List of 2 ``floats`` which is the total loss for each side (eg sum of face + mask loss)
+        dict[str, float]
+            The combined loss for each side of the model
 
         Raises
         ------
@@ -316,28 +314,28 @@ class TrainerBase():
             If a NaN is detected, a :class:`FaceswapError` will be raised
         """
         # NaN protection
-        if self._config["nan_protection"] and not all(np.isfinite(val) for val in loss):
+        if self._config["nan_protection"] and not all(np.isfinite(val) for val in loss.values()):
             logger.critical("NaN Detected. Loss: %s", loss)
             raise FaceswapError("A NaN was detected and you have NaN protection enabled. Training "
                                 "has been terminated.")
 
-        split = len(loss) // 2
-        combined_loss = [sum(loss[:split]), sum(loss[split:])]
-        self._model.add_history(combined_loss)
-        logger.trace("original loss: %s, combined_loss: %s", loss, combined_loss)  # type: ignore
+        a_loss = [v for k, v in loss.items() if k.endswith("_a")]
+        b_loss = [v for k, v in loss.items() if k.endswith("_b")]
+        combined_loss = {"loss_a": sum(a_loss), "loss_b": sum(b_loss)}
+        self._model.add_history(list(loss.values()))
+        logger.debug("original loss: %s, combined_loss: %s", loss, combined_loss)  # type: ignore
         return combined_loss
 
-    def _print_loss(self, loss: list[float]) -> None:
+    def _print_loss(self, loss: dict[str, float]) -> None:
         """ Outputs the loss for the current iteration to the console.
 
         Parameters
         ----------
-        loss: list
+        loss: dict[str, float]
             The loss for each side. List should contain 2 ``floats`` side "a" in position 0 and
             side "b" in position `.
          """
-        output = ", ".join([f"Loss {side}: {side_loss:.5f}"
-                            for side, side_loss in zip(("A", "B"), loss)])
+        output = ", ".join([f"{' '.join(k.split('_')).title()}: {v:.5f}" for k, v in loss.items()])
         timestamp = time.strftime("%H:%M:%S")
         output = f"[{timestamp}] [#{self._model.iterations:05d}] {output}"
         try:

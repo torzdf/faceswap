@@ -10,7 +10,7 @@ from keras.layers import Dense, Flatten, Reshape, Input
 from keras.models import Model as KModel
 
 from lib.model.nn_blocks import Conv2DOutput, Conv2DBlock, UpscaleBlock
-from ._base import ModelBase
+from ._base import ModelBase, FSModel
 
 
 class Model(ModelBase):
@@ -74,11 +74,14 @@ class Model(ModelBase):
 
         Returns
         -------
-        :class:`keras.models.Model`
-            See Keras documentation for the correct
-            structure, but note that parameter :attr:`name` is a required rather than an optional
-            argument in Faceswap. You should assign this to the attribute ``self.name`` that is
-            automatically generated from the plugin's filename.
+        :class:`~plugins.train.model._base.model.FSModel`
+            See Keras documentation for the correct structure, but note that parameter
+            :attr:`name` is a required rather than an optional argument in Faceswap.
+            You should assign this to the attribute ``self.name`` that is automatically generated
+            from the plugin's filename.
+
+            You must use the :class:`~plugins.train.model._base.model.FSModel` class, as it
+            contains a custom training loop that is required for Faceswap
         """
         input_a = inputs[0]
         input_b = inputs[1]
@@ -89,7 +92,7 @@ class Model(ModelBase):
 
         outputs = self.decoder("a")(encoder_a) + self.decoder("b")(encoder_b)
 
-        autoencoder = KModel(inputs, outputs, name=self.model_name)
+        autoencoder = FSModel(inputs, outputs, name=self.model_name)
         return autoencoder
 
     def encoder(self):

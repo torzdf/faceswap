@@ -10,12 +10,15 @@ import os
 import sys
 import time
 import typing as T
+import warnings
 
 from collections import OrderedDict
 
 import numpy as np
 import keras
-import keras.backend as K
+from keras.trainers.data_adapters import data_adapter_utils
+from keras import backend, ops
+import torch
 
 from lib.serializer import get_serializer
 from lib.model.nn_blocks import set_config as set_nnblock_config
@@ -32,6 +35,160 @@ if T.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 _CONFIG: dict[str, ConfigValueType] = {}
+
+
+
+def fs_compile_loss_call(self, y_true, y_pred, sample_weight=None):
+    """ Override keras CompileLoss.call to do return the loss for each output, rather than the
+    summed loss for all outputs
+    """
+    if not self.built:
+        self.build(y_true, y_pred)
+
+    y_true = self._flatten_y(y_true)
+    y_pred = self._flatten_y(y_pred)
+
+    if sample_weight is not None:
+        sample_weight = self._flatten_y(sample_weight)
+        # For multi-outputs, repeat sample weights for n outputs.
+        if len(sample_weight) < len(y_true):
+            sample_weight = [sample_weight[0] for _ in range(len(y_true))]
+    else:
+        sample_weight = [None for _ in y_true]
+
+    loss_values = []
+    for loss, y_t, y_p, loss_weight, sample_weight in zip(
+        self.flat_losses,
+        y_true,
+        y_pred,
+        self.flat_loss_weights,
+        sample_weight,
+    ):
+        if loss:
+            value = loss_weight * ops.cast(
+                loss(y_t, y_p, sample_weight), dtype=backend.floatx()
+            )
+            loss_values.append(value)
+    if loss_values:
+        return loss_values
+        # original code is next 2 lines
+        #total_loss = sum(loss_values)
+        #return total_loss
+    return None
+
+
+setattr(keras.trainers.compile_utils.CompileLoss, "call", fs_compile_loss_call)
+
+
+class FSModel(keras.models.Model):
+    """ Overriden Keras model with custom training code """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._models: dict[T.Literal["a", "b"], keras.models.Model] = {}
+
+    @property
+    def metrics(self) -> list[keras.metrics.Metric]:
+        """list[:class:`keras.metrics.Metric] The list of metrics for the model
+
+        As we have patched :attr:`_loss_tracker` to be a list, we also need to patch metrics
+        to return correctly
+        """
+        metrics = self._loss_tracker if self.compiled else []
+        metrics.extend(self._metrics[:])
+        if self.compiled and self._compile_metrics is not None:
+            metrics += [self._compile_metrics]
+        return metrics
+
+    def _patched_loss_handler(self, all_loss: list[torch.Tensor]) -> None:
+        """ Keras only outputs and tracks a single loss scalar. We need to handle loss for each
+        output.
+
+        On first call we remove the :attr:`_loss_tracker` and replace it with a list. A Mean
+        metrics handler is then added to the list for each model output/loss. These are then
+        used for tracking going forwards
+
+        Backprop is run for each loss output to accumulate gradients for each loss function
+        along its correct path
+
+        Parameters
+        ----------
+        all_loss: list[:class:`torch.Tensor`]
+            The list of loss for each output
+        """
+        patch_loss_tracker = not isinstance(self._loss_tracker, list)
+
+        if patch_loss_tracker:
+            logger.debug("Patching loss tracker for all outputs")
+            del self._loss_tracker
+            self._loss_tracker = []
+
+        for idx, (loss, output_name) in enumerate(zip(all_loss, self.output_names)):
+
+            if patch_loss_tracker:
+                loss_name = f"loss_{output_name.split('_', maxsplit=1)[-1]}"  # TODO make sure works with multi-out
+                tracker = keras.metrics.Mean(name=loss_name)
+                logger.debug("Adding loss tracker: %s", tracker)
+                self._loss_tracker.append(tracker)
+                self._metrics.remove(tracker)  # Loss shouldn't be added to metrics
+
+            self._loss_tracker[idx].update_state(loss)
+
+            if self.optimizer is not None:
+                loss = self.optimizer.scale_loss(loss)
+
+            # Compute gradients
+            if self.trainable_weights:
+                # Call torch.Tensor.backward() on the loss to compute gradients
+                # for the weights.
+                loss.backward()
+
+
+    def train_step(self, data: tuple[list[list[np.ndarray]], list[list[np.ndarray]], None]
+                   ) -> dict[str, float]:
+        """ Original keras train_step code, but with loss split out for A and B to perform 2
+        backprops
+
+        Parameters
+        ----------
+        data: tuple[list[list[class:`numpy.ndarray`]], list[list[class:`numpy.ndarray`]], None]
+            The training data for a train step
+
+        Returns
+        -------
+        dict[str, float]
+            The loss output from the train step
+        """
+        x, y, sample_weight = data_adapter_utils.unpack_x_y_sample_weight(data)
+
+        # Compute predictions
+        if self._call_has_training_arg:
+            y_pred = self(x, training=True)
+        else:
+            y_pred = self(x)
+
+        # Call torch.nn.Module.zero_grad() to clear the leftover gradients
+        # for the weights from the previous train step.
+        self.zero_grad()
+
+        loss = self.compute_loss(x=x,  # Updated function to return all loss outputs
+                                 y=y,
+                                 y_pred=y_pred,
+                                 sample_weight=sample_weight)
+
+        self._patched_loss_handler(loss)
+
+        # Apply gradients
+        if self.trainable_weights:
+            trainable_weights = self.trainable_weights[:]
+            gradients = [v.value.grad for v in trainable_weights]
+
+            # Update weights
+            with torch.no_grad():
+                self.optimizer.apply(gradients, trainable_weights)
+        else:
+            warnings.warn("The model does not have any trainable weights.")
+
+        return self.compute_metrics(x, y, y_pred, sample_weight=sample_weight)
 
 
 class ModelBase():
@@ -260,7 +417,7 @@ class ModelBase():
                 inputs = self._get_inputs()
                 if not self._settings.use_mixed_precision and not is_summary:
                     # Store layer names which can be switched to mixed precision
-                    
+
                     # TODO Re-enable mixed precision switching
                     self._model = self.build_model(inputs)
                     #model, mp_layers = self._settings.get_mixed_precision_layers(self.build_model,
@@ -362,13 +519,13 @@ class ModelBase():
 
     def _summary_to_log(self, summary: str, line_break: bool) -> None:
         """ Function to output Keras model summary to log file at verbose log level
-        
+
         Parameters
         ----------
         summary, str
             The model summary output from keras
-        
-        line_breal: bool
+
+        line_break: bool
             Unused, but required by Keras for print_fn as of keras 3.0.5
         """
         for line in summary.splitlines():
