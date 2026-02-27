@@ -505,8 +505,9 @@ class Loss(GlobalSection):
             "faces. The mask model has been trained by community members and will need "
             "testing for further description. Profile faces may result in sub-par "
             "performance."),
-        choices=PluginLoader.get_available_extractors("mask",
-                                                      add_none=True, extend_plugin=True),
+        choices=list(sorted(["extended", "components"] + PluginLoader.get_available_extractors(
+            "mask",
+            add_none=True, extend_plugin=True))),
         gui_radio=True)
     mask_dilation = ConfigItem(
         datatype=float,

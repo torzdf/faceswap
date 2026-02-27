@@ -70,10 +70,10 @@ mask package
 .. automodapi:: plugins.extract.mask.vgg_obstructed
    :include-all-objects:
 
-recognition package
-===================
+identity package
+================
 
-.. automodapi:: plugins.extract.recognition.vgg_face2
+.. automodapi:: plugins.extract.identity.vgg_face2
    :include-all-objects:
 
 extract package

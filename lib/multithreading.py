@@ -51,6 +51,65 @@ def _get_name(name: str) -> str:
         return real_name
 
 
+class ErrorState:
+    """ An object for tracking error state across threads
+
+    The "set" method should be called from within a thread to set the thread error traceback
+
+    The "check_and_raise" method should be called from the main thread to check for and re-raise
+    any errors
+    """
+    _lock = threading.Lock()
+    _err = None
+
+    @classmethod
+    def set(cls, exc_info: tuple[type[BaseException],
+                                 BaseException,
+                                 TracebackType] | tuple[T.Any, T.Any, T.Any]) -> None:
+        """ Set the error traceback information to the error state object, only if an error has not
+        already been recorded
+
+        Parameters
+        ----------
+        exc_info : tuple[type[BaseException], BaseException, TracebackType] | tuple[T.Any, T.Any, T.Any]
+            The traceback error information to set
+        """  # pylint:disable=line-too-long  # noqa[E501]
+        with cls._lock:
+            if cls._err is not None:
+                logger.debug("Not setting error state as an error already exists. New error: %s",
+                             exc_info)
+                return
+            logger.debug("Recording error state: %s", exc_info)
+            cls._err = exc_info
+
+    @classmethod
+    def has_error(cls) -> bool:
+        """ Check whether any running FSThread thread has an error.
+
+        Returns
+        -------
+        bool
+            ``True`` if an FSThread has an error
+        """
+        with cls._lock:
+            return cls._err is not None
+
+    @classmethod
+    def check_and_raise(cls) -> None:
+        """ Check if a thread error is stored and re-raise it if so. Should be called from main
+        thread """
+        if not cls._err:
+            return
+        logger.debug("Thread error caught: %s", cls._err)
+        raise cls._err[1].with_traceback(cls._err[2])  # pylint:disable=unsubscriptable-object
+
+    @classmethod
+    def clear(cls) -> None:
+        """ Clear any stored errors """
+        with cls._lock:
+            cls._err = None
+
+
 class FSThread(threading.Thread):
     """ Subclass of thread that passes errors back to parent
 
@@ -100,9 +159,11 @@ class FSThread(threading.Thread):
         try:
             if self._target is not None:
                 self._target(*self._args, **self._kwargs)
-        except Exception as err:  # pylint:disable=broad-except
-            self.err = sys.exc_info()
-            logger.debug("Error in thread (%s): %s", self._name, str(err))
+        except Exception:  # pylint:disable=broad-except
+            exc_info = sys.exc_info()
+            self.err = exc_info
+            ErrorState.set(exc_info)
+            logger.critical("Error in thread (%s): %s", self._name, self.err[0])
         finally:
             # Avoid a refcycle if the thread is running a function with
             # an argument that has a member that points to the thread.

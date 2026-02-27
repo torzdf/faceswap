@@ -441,7 +441,12 @@ class Converter():  # pylint:disable=too-many-instance-attributes
         """
         logger.trace("Getting mask. Image shape: %s", new_face.shape)  # type: ignore[attr-defined]
         mask_centering: CenteringType
-        if self._args.mask_type not in ("none", "predicted"):
+        lm_mask = None
+        if self._args.mask_type in ("components", "extended"):
+            mask_centering = reference_face.centering
+            m_type = "face" if self._args.mask_type == "components" else "face_extended"
+            lm_mask = reference_face.get_landmark_mask(m_type, dilation=0.0)
+        elif self._args.mask_type not in ("none", "predicted"):
             mask_centering = detected_face.mask[self._args.mask_type].stored_centering
         else:
             mask_centering = "face"  # Unused but requires a valid value
@@ -450,6 +455,7 @@ class Converter():  # pylint:disable=too-many-instance-attributes
                                                     reference_face.pose.offset[mask_centering],
                                                     reference_face.pose.offset[self._centering],
                                                     self._centering,
+                                                    landmarks_mask=lm_mask,
                                                     predicted_mask=predicted_mask)
         logger.trace("Adding mask to alpha channel")  # type: ignore[attr-defined]
         new_face = np.concatenate((new_face, mask), -1)

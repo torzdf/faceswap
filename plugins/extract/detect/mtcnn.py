@@ -2,133 +2,140 @@
 """ MTCNN Face detection plugin """
 from __future__ import annotations
 import logging
-import typing as T
 
 import cv2
 import numpy as np
 
-from keras.models import Model
-from keras.layers import Conv2D, Dense, Flatten, Input, MaxPooling2D, Permute, PReLU
+import torch
+from torch import nn
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects
-from ._base import BatchType, Detector
+from lib.utils import get_module_objects, GetModel
+from plugins.extract.base import ExtractPlugin
+
 from . import mtcnn_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
 
 
-class Detect(Detector):
+class MTCNN(ExtractPlugin):
     """ MTCNN detector for face recognition. """
-    def __init__(self, **kwargs) -> None:
-        git_model_id = 2
-        model_filename = ["mtcnn_det_v2.1.h5", "mtcnn_det_v2.2.h5", "mtcnn_det_v2.3.h5"]
-        super().__init__(git_model_id=git_model_id, model_filename=model_filename, **kwargs)
-        self.name = "MTCNN"
-        self.model: MTCNN
-        self.input_size = 640
-        self.vram = 128 if not cfg.cpu() else 0  # 66 in testing
-        self.vram_per_batch = 64 if not cfg.cpu() else 0  # ~50 in testing
-        self.batchsize = cfg.batch_size()
-        self._kwargs = self._validate_kwargs()
-        self.color_format = "RGB"
+    def __init__(self) -> None:
+        super().__init__(input_size=640,
+                         batch_size=cfg.batch_size(),
+                         is_rgb=True,
+                         dtype="float32",
+                         scale=(-1, 1),
+                         force_cpu=cfg.cpu())
+        self.model: MTCNNModel
+        self._validate_config()
+        self._model_path = self._get_weights_path()
 
-    def _validate_kwargs(self) -> dict[T.Literal["minsize", "threshold", "factor", "input_size"],
-                                       int | float | list[float]]:
+    def _validate_config(self) -> None:
         """ Validate that config options are correct. If not reset to default """
-        valid = True
+        if cfg.minsize() < 10:
+            logger.warning("Invalid MTCNN config value 'minsize': %s. Reset to %s",
+                           cfg.minsize(), cfg.minsize.default)
+            cfg.minsize.set(cfg.minsize.default)
+
+        for idx, threshold in enumerate((cfg.threshold_1, cfg.threshold_2, cfg.threshold_3)):
+            if not 0.0 < threshold() <= 1.0:
+                logger.warning("Invalid MTCNN config value 'threshold_%s': %s. Reset to %s",
+                               idx + 1, threshold(), threshold.default)
+                threshold.set(threshold.default)
+
+        if not 0.0 < cfg.scalefactor() < 1.0:
+            logger.warning("Invalid MTCNN config value 'scalefactor': %s. Reset to %s",
+                           cfg.scalefactor(), cfg.scalefactor.default)
+            cfg.scalefactor.set(cfg.scalefactor.default)
+
+    def _get_weights_path(self) -> list[str]:
+        """ Download the weights, if required, and return the path to the weights files
+
+        Returns
+        -------
+        list[str]
+            The paths to the downloaded MTCNN weights files
+        """
+        model = GetModel(
+            model_filename=["mtcnn_det_v3.1.pt", "mtcnn_det_v3.2.pt", "mtcnn_det_v3.3.pt"],
+            git_model_id=2)
+        model_path = model.model_path
+        assert isinstance(model_path, list)
+        return model_path
+
+    def load_model(self):
+        """ Load the model """
         threshold = [cfg.threshold_1(), cfg.threshold_2(), cfg.threshold_3()]
-        kwargs: dict[T.Literal["minsize", "threshold", "factor", "input_size"],
-                     int | float | list[float]] = {"minsize": cfg.minsize(),
-                                                   "threshold": threshold,
-                                                   "factor": cfg.scalefactor(),
-                                                   "input_size": self.input_size}
+        self.model = MTCNNModel(self._model_path,
+                                self.device,
+                                input_size=self.input_size,
+                                min_size=cfg.minsize(),
+                                threshold=threshold,
+                                factor=cfg.scalefactor())
 
-        assert isinstance(kwargs["input_size"], int)
-        assert isinstance(kwargs["minsize"], int)
-        assert isinstance(kwargs["threshold"], list)
-        assert isinstance(kwargs["factor"], float)
-
-        if kwargs["minsize"] < 10:
-            valid = False
-        elif not all(0.0 < threshold <= 1.0 for threshold in kwargs['threshold']):
-            valid = False
-        elif not 0.0 < kwargs['factor'] < 1.0:
-            valid = False
-
-        if not valid:
-            kwargs = {}
-            logger.warning("Invalid MTCNN options in config. Running with defaults")
-
-        logger.debug("Using mtcnn kwargs: %s", kwargs)
-        return kwargs
-
-    def init_model(self) -> None:
-        """ Initialize MTCNN Model. """
-        assert isinstance(self.model_path, list)
-        placeholder_shape = (self.batchsize, self.input_size, self.input_size, 3)
+        placeholder_shape = (self.batch_size, self.input_size, self.input_size, 3)
         placeholder = np.zeros(placeholder_shape, dtype="float32")
 
-        assert isinstance(self._kwargs["input_size"], int)
-        assert isinstance(self._kwargs["minsize"], int)
-        assert isinstance(self._kwargs["threshold"], list)
-        assert isinstance(self._kwargs["factor"], float)
+        self.model.detect_faces(placeholder)
+        logger.debug("[%s] Loaded model", self.name)
 
-        with self.get_device_context(cfg.cpu()):
-            self.model = MTCNN(self.model_path,
-                               self.batchsize,
-                               input_size=self._kwargs["input_size"],
-                               minsize=self._kwargs["minsize"],
-                               threshold=self._kwargs["threshold"],
-                               factor=self._kwargs["factor"])
-            self.model.detect_faces(placeholder)
-
-    def process_input(self, batch: BatchType) -> None:
-        """ Compile the detection image(s) for prediction
+    def pre_process(self, batch: np.ndarray) -> np.ndarray:
+        """ Compile the detection image(s) for prediction. No further pre-processing required for
+        MTCNN
 
         Parameters
         ----------
-        batch: :class:`~plugins.extract.detect._base.DetectorBatch`
-            Contains the batch that is currently being passed through the plugin process
-        """
-        batch.feed = (np.array(batch.image, dtype="float32") - 127.5) / 127.5
+        batch : :class:`numpy.ndarray`
+            The input batch of images at model input size in the correct color order
 
-    def predict(self, feed: np.ndarray) -> np.ndarray:
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The batch of images ready for feeding the model
+        """
+        return batch
+
+    def process(self, batch: np.ndarray) -> np.ndarray:
         """ Run model to get predictions
 
         Parameters
         ----------
-        batch: :class:`~plugins.extract.detect._base.DetectorBatch`
-            Contains the batch to pass through the MTCNN model
+        batch : :class:`numpy.ndarray`
+            A batch of images ready to feed the model
 
         Returns
         -------
-        dict
-            The batch with the predictions added to the dictionary
+        :class:`numpy.ndarray`
+            The batch of detection results from the model
         """
-        assert isinstance(self.model, MTCNN)
-        with self.get_device_context(cfg.cpu()):
-            prediction, points = self.model.detect_faces(feed)
+        prediction, points = self.model.detect_faces(batch)
         logger.trace("prediction: %s, mtcnn_points: %s",  # type:ignore[attr-defined]
                      prediction, points)
         return prediction
 
-    def process_output(self, batch: BatchType) -> None:
-        """ MTCNN performs no post processing so the original batch is returned
+    def post_process(self, batch: np.ndarray) -> np.ndarray:
+        """ Remove confidences from output
 
         Parameters
         ----------
-        batch: :class:`~plugins.extract.detect._base.DetectorBatch`
-            Contains the batch to apply postprocessing to
+        batch: :class:`numpy.ndarray`
+            The detection results for the model
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The processed detection bounding box from the model at model input size
         """
-        return
+        return np.array([p[..., :4] for p in batch], dtype="object")
 
 
 # MTCNN Detector
-# Code adapted from: https://github.com/xiangrufan/keras-mtcnn
+# Code adapted from: https://github.com/xiangrufan/keras-mtcnn and
+# https://github.com/timesler/facenet-pytorch/blob/master/models/mtcnn.py
 #
-# Keras implementation of the face detection / alignment algorithm
+# Keras implementation of the face detection / alignment algorithm also
 # found at
 # https://github.com/kpzhang93/MTCNN_face_detection_alignment
 #
@@ -155,32 +162,80 @@ class Detect(Detector):
 # SOFTWARE.
 
 
-class PNet():
-    """ Keras P-Net model for MTCNN
+class PNet(nn.Module):
+    """ PyTorch P-Net model for MTCNN
 
     Parameters
     ----------
-    weights_path: str
+    weights_path : str
         The path to the keras model file
-    batch_size: int
-        The batch size to feed the model
-    input_size: int
+    """
+    def __init__(self, weights_path: str) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 10, 3)
+        self.prelu1 = nn.PReLU(10)
+        self.pool1 = nn.MaxPool2d(2, 2, ceil_mode=True)
+        self.conv2 = nn.Conv2d(10, 16, 3)
+        self.prelu2 = nn.PReLU(16)
+        self.conv3 = nn.Conv2d(16, 32, 3)
+        self.prelu3 = nn.PReLU(32)
+        self.conv4_1 = nn.Conv2d(32, 2, 1)
+        self.softmax4_1 = nn.Softmax(dim=1)
+        self.conv4_2 = nn.Conv2d(32, 4, 1)
+        self.load_state_dict(torch.load(weights_path, map_location="cpu"))
+
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """ PyTorch P-Network Definition for MTCNN
+
+        Parameters
+        ----------
+        inputs : :class:`torch.Tensor`
+            The input tensor to PNet
+
+        Returns
+        -------
+        classifier : :class:`torch.Tensor`
+           The result from PNet classifier
+        bbox_regress : :class:`torch.Tensor`
+            The result from PNet bbox regression
+        """
+        var_x = self.pool1(self.prelu1(self.conv1(inputs)))
+        var_x = self.prelu2(self.conv2(var_x))
+        var_x = self.prelu3(self.conv3(var_x))
+
+        classifier = self.softmax4_1(self.conv4_1(var_x))
+        bbox_regress = self.conv4_2(var_x)
+
+        return classifier, bbox_regress
+
+
+class PNetRunner():
+    """ Runner for PyTorch P-Net model for MTCNN
+
+    Parameters
+    ----------
+    weights_path : str
+        The path to the keras model file
+    device : :class:`torch.device`
+        The device to use for model inference
+    input_size : int
         The input size of the model
-    minsize: int, optional
+    min_size : int
         The minimum size of a face to accept as a detection. Default: `20`
-    threshold: list, optional
+    threshold : float
         Threshold for P-Net
     """
     def __init__(self,
                  weights_path: str,
-                 batch_size: int,
+                 device: torch.device,
                  input_size: int,
                  min_size: int,
                  factor: float,
                  threshold: float) -> None:
         logger.debug(parse_class_init(locals()))
-        self._batch_size = batch_size
-        self._model = self._load_model(weights_path)
+        self._model = PNet(weights_path)
+        self._model.to(device)
+        self.device = device
 
         self._input_size = input_size
         self._threshold = threshold
@@ -191,46 +246,14 @@ class PNet():
         self._pnet_input: list[np.ndarray] | None = None
         logger.debug("Initialized: %s", self.__class__.__name__)
 
-    @staticmethod
-    def _load_model(weights_path: str) -> Model:
-        """ Keras P-Network Definition for MTCNN
-
-        Parameters
-        ----------
-        weights_path: str
-            Full path to the model's weights
-
-        Returns
-        -------
-        :class:`keras.models.Model`
-            The p-net model
-        """
-        input_ = Input(shape=(None, None, 3))
-        var_x = Conv2D(10, (3, 3), strides=1, padding='valid', name='conv1')(input_)
-        var_x = PReLU(shared_axes=[1, 2], name='PReLU1')(var_x)
-        var_x = MaxPooling2D(pool_size=2)(var_x)
-        var_x = Conv2D(16, (3, 3), strides=1, padding='valid', name='conv2')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='PReLU2')(var_x)
-        var_x = Conv2D(32, (3, 3), strides=1, padding='valid', name='conv3')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='PReLU3')(var_x)
-        classifier = Conv2D(2, (1, 1), activation='softmax', name='conv4-1')(var_x)
-        bbox_regress = Conv2D(4, (1, 1), name='conv4-2')(var_x)
-
-        retval = Model(input_, [classifier, bbox_regress])
-        retval.load_weights(weights_path)
-        retval.make_predict_function()
-        return retval
-
-    def _calculate_scales(self,
-                          minsize: int,
-                          factor: float) -> list[float]:
+    def _calculate_scales(self, min_size: int, factor: float) -> list[float]:
         """ Calculate multi-scale
 
         Parameters
         ----------
-        minsize: int
+        min_size : int
             Minimum size for a face to be accepted
-        factor: float
+        factor : float
             Scaling factor
 
         Returns
@@ -239,7 +262,7 @@ class PNet():
             List of scale floats
         """
         factor_count = 0
-        var_m = 12.0 / minsize
+        var_m = 12.0 / min_size
         minl = self._input_size * var_m
         # create scale pyramid
         scales = []
@@ -259,18 +282,18 @@ class PNet():
 
         Parameters
         ----------
-        class_probabilities: :class:`numpy.ndarray`
+        class_probabilities : :class:`numpy.ndarray`
             softmax feature map for face classify
-        roi: :class:`numpy.ndarray`
+        roi : :class:`numpy.ndarray`
             feature map for regression
-        size: int
+        size : int
             feature map's largest size
-        scale: float
+        scale : float
             current input image scale in multi-scales
 
         Returns
         -------
-        list
+        tuple[:class:`ndarray`, :class:`ndarray`]
             Calibrated face candidates
         """
         in_side = 2 * size + 11
@@ -294,17 +317,17 @@ class PNet():
 
         return nms(rects, scores, 0.3, "iou")
 
-    def __call__(self, images: np.ndarray) -> list[np.ndarray]:
+    def __call__(self, images: np.ndarray) -> list[np.ndarray]:  # pylint:disable=too-many-locals
         """ first stage - fast proposal network (p-net) to obtain face candidates
 
         Parameters
         ----------
-        images: :class:`numpy.ndarray`
+        images : :class:`numpy.ndarray`
             The batch of images to detect faces in
 
         Returns
         -------
-        List
+        List[:class:`numpy.ndarray`]
             List of face candidates from P-Net
         """
         batch_size = images.shape[0]
@@ -318,13 +341,15 @@ class PNet():
         for scale, batch, (rheight, rwidth) in zip(self._pnet_scales,
                                                    self._pnet_input,
                                                    self._pnet_sizes):
-            _ = [cv2.resize(images[idx], (rwidth, rheight), dst=batch[idx])
-                 for idx in range(batch_size)]
-            cls_prob, roi = self._model.predict(batch, verbose=0, batch_size=self._batch_size)
-            cls_prob = cls_prob[..., 1]
+            for idx in range(batch_size):
+                cv2.resize(images[idx], (rwidth, rheight), dst=batch[idx])
+
+            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+            with torch.no_grad():
+                cls_prob, roi = (t.cpu().numpy() for t in self._model(feed))
+            cls_prob = cls_prob[:, 1]
             out_side = max(cls_prob.shape[1:3])
             cls_prob = np.swapaxes(cls_prob, 1, 2)
-            roi = np.swapaxes(roi, 1, 3)
             for idx in range(batch_size):
                 # first index 0 = class score, 1 = one hot representation
                 rect, score = self._detect_face_12net(cls_prob[idx, ...],
@@ -338,69 +363,82 @@ class PNet():
                 for rect, score in zip(rectangles, scores)]
 
 
-class RNet():
-    """ Keras R-Net model Definition for MTCNN
+class RNet(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """ PyTorch R-Net model Definition for MTCNN
 
     Parameters
     ----------
-    weights_path: str
-        The path to the keras model file
-    batch_size: int
-        The batch size to feed the model
-    input_size: int
-        The input size of the model
-    threshold: list, optional
-        Threshold for R-Net
-
+    weights_path : str
+        The path to the torch weights file
     """
-    def __init__(self,
-                 weights_path: str,
-                 batch_size: int,
-                 input_size: int,
-                 threshold: float) -> None:
-        logger.debug(parse_class_init(locals()))
-        self._batch_size = batch_size
-        self._model = self._load_model(weights_path)
-        self._input_size = input_size
-        self._threshold = threshold
-        logger.debug("Initialized: %s", self.__class__.__name__)
+    def __init__(self, weights_path: str) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 28, 3)
+        self.prelu1 = nn.PReLU(28)
+        self.pool1 = nn.MaxPool2d(3, 2, ceil_mode=True)
+        self.conv2 = nn.Conv2d(28, 48, 3)
+        self.prelu2 = nn.PReLU(48)
+        self.pool2 = nn.MaxPool2d(3, 2, ceil_mode=True)
+        self.conv3 = nn.Conv2d(48, 64, 2)
+        self.prelu3 = nn.PReLU(64)
+        self.dense4 = nn.Linear(576, 128)
+        self.prelu4 = nn.PReLU(128)
+        self.dense5_1 = nn.Linear(128, 2)
+        self.softmax5_1 = nn.Softmax(dim=1)
+        self.dense5_2 = nn.Linear(128, 4)
+        self.load_state_dict(torch.load(weights_path, map_location="cpu"))
 
-    @staticmethod
-    def _load_model(weights_path: str) -> Model:
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """ Keras R-Network Definition for MTCNN
 
         Parameters
         ----------
-        weights_path: str
-            Full path to the model's weights
+        inputs : :class:`torch.Tensor`
+            The input to RNet
 
         Returns
         -------
-        :class:`keras.models.Model`
-            The r-net model
+        classifier : :class:`torch.Tensor`
+           The result from RNet classifier
+        bbox_regress : :class:`torch.Tensor`
+            The result from RNet bbox regression
         """
-        input_ = Input(shape=(24, 24, 3))
-        var_x = Conv2D(28, (3, 3), strides=1, padding='valid', name='conv1')(input_)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu1')(var_x)
-        var_x = MaxPooling2D(pool_size=3, strides=2, padding='same')(var_x)
+        var_x = self.pool1(self.prelu1(self.conv1(inputs)))
+        var_x = self.pool2(self.prelu2(self.conv2(var_x)))
+        var_x = self.prelu3(self.conv3(var_x))
+        var_x = var_x.permute(0, 3, 2, 1).contiguous()
+        var_x = self.prelu4(self.dense4(var_x.view(var_x.shape[0], -1)))
+        classifier = self.softmax5_1(self.dense5_1(var_x))
+        bbox_regress = self.dense5_2(var_x)
+        return classifier, bbox_regress
 
-        var_x = Conv2D(48, (3, 3), strides=1, padding='valid', name='conv2')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu2')(var_x)
-        var_x = MaxPooling2D(pool_size=3, strides=2)(var_x)
 
-        var_x = Conv2D(64, (2, 2), strides=1, padding='valid', name='conv3')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu3')(var_x)
-        var_x = Permute((3, 2, 1))(var_x)
-        var_x = Flatten()(var_x)
-        var_x = Dense(128, name='conv4')(var_x)
-        var_x = PReLU(name='prelu4')(var_x)
-        classifier = Dense(2, activation='softmax', name='conv5-1')(var_x)
-        bbox_regress = Dense(4, name='conv5-2')(var_x)
+class RNetRunner():
+    """ Runner for PyTorch R-Net for MTCNN
 
-        retval = Model(input_, [classifier, bbox_regress])
-        retval.load_weights(weights_path)
-        retval.make_predict_function()
-        return retval
+    Parameters
+    ----------
+    weights_path : str
+        The path to the keras model file
+    device : :class:`torch.device`
+        The device to run inference on
+    input_size : int
+        The input size of the model
+    threshold : float
+        Threshold for R-Net
+    """
+    def __init__(self,
+                 weights_path: str,
+                 device: torch.device,
+                 input_size: int,
+                 threshold: float) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._model = RNet(weights_path)
+        self._model.to(device)
+        self.device = device
+        self._input_size = input_size
+        self._threshold = threshold
+        logger.debug("Initialized: %s", self.__class__.__name__)
 
     def _filter_face_24net(self,
                            class_probabilities: np.ndarray,
@@ -411,16 +449,16 @@ class RNet():
 
         Parameters
         ----------
-        class_probabilities: class:`np.ndarray`
+        class_probabilities : :class:`numpy.ndarray`
             Softmax feature map for face classify
-        roi: :class:`numpy.ndarray`
+        roi : :class:`numpy.ndarray`
             Feature map for regression
-        rectangles: list
+        rectangles : :class:`numpy.ndarray`
             12net's predict
 
         Returns
         -------
-        list
+        :class:`numpy.ndarray`
             rectangles in the format [[x, y, x1, y1, score]]
         """
         prob = class_probabilities[:, 1]
@@ -443,15 +481,15 @@ class RNet():
 
         Parameters
         ----------
-        images: :class:`numpy.ndarray`
+        images : :class:`numpy.ndarray`
             The batch of images to detect faces in
-        rectangle_batch:
-            List of :class:`numpy.ndarray` face candidates from P-Net
+        rectangle_batch : list[:class:`numpy.ndarray`]
+            face candidates from P-Net
 
         Returns
         -------
-        List
-            List of :class:`numpy.ndarray` refined face candidates from R-Net
+        list[:class:`numpy.ndarray`]
+            Refined face candidates from R-Net
         """
         ret: list[np.ndarray] = []
         for idx, (rectangles, image) in enumerate(zip(rectangle_batch, images)):
@@ -459,84 +497,103 @@ class RNet():
                 ret.append(np.array([]))
                 continue
 
-            feed_batch = np.empty((rectangles.shape[0], 24, 24, 3), dtype="float32")
+            batch = np.empty((rectangles.shape[0], 24, 24, 3), dtype="float32")
 
-            _ = [cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]],
-                            (24, 24),
-                            dst=feed_batch[idx])
-                 for idx, rect in enumerate(rectangles)]
+            for idx, rect in enumerate(rectangles):
+                cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]], (24, 24), dst=batch[idx])
 
-            cls_prob, roi_prob = self._model.predict(feed_batch,
-                                                     verbose=0,
-                                                     batch_size=self._batch_size)
+            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+            with torch.no_grad():
+                cls_prob, roi_prob = (t.cpu().numpy() for t in self._model(feed))
+
             ret.append(self._filter_face_24net(cls_prob, roi_prob, rectangles))
         return ret
 
 
-class ONet():
+class ONet(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """ PyTorch O-Net model Definition for MTCNN
+
+    Parameters
+    ----------
+    weights_path : str
+        The path to the torch weights file
+    """
+    def __init__(self, weights_path: str) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, 3)
+        self.prelu1 = nn.PReLU(32)
+        self.pool1 = nn.MaxPool2d(3, 2, ceil_mode=True)
+        self.conv2 = nn.Conv2d(32, 64, 3)
+        self.prelu2 = nn.PReLU(64)
+        self.pool2 = nn.MaxPool2d(3, 2, ceil_mode=True)
+        self.conv3 = nn.Conv2d(64, 64, 3)
+        self.prelu3 = nn.PReLU(64)
+        self.pool3 = nn.MaxPool2d(2, 2, ceil_mode=True)
+        self.conv4 = nn.Conv2d(64, 128, 2)
+        self.prelu4 = nn.PReLU(128)
+        self.dense5 = nn.Linear(1152, 256)
+        self.prelu5 = nn.PReLU(256)
+        self.dense6_1 = nn.Linear(256, 2)
+        self.softmax6_1 = nn.Softmax(dim=1)
+        self.dense6_2 = nn.Linear(256, 4)
+        self.dense6_3 = nn.Linear(256, 10)
+        self.load_state_dict(torch.load(weights_path, map_location="cpu"))
+
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """ Keras O-Network Definition for MTCNN
+
+        Parameters
+        ----------
+        inputs : :class:`torch.Tensor`
+            The input to ONet
+
+        Returns
+        -------
+        classifier : :class:`torch.Tensor`
+           The result from ONet classifier
+        bbox_regress : :class:`torch.Tensor`
+            The result from ONet bbox regression
+        landmark_regress : :class:`torch.Tensor`
+            The result from ONet landmark regression
+        """
+        var_x = self.pool1(self.prelu1(self.conv1(inputs)))
+        var_x = self.pool2(self.prelu2(self.conv2(var_x)))
+        var_x = self.pool3(self.prelu3(self.conv3(var_x)))
+        var_x = self.prelu4(self.conv4(var_x))
+        var_x = var_x.permute(0, 3, 2, 1).contiguous()
+        var_x = self.prelu5(self.dense5(var_x.view(var_x.shape[0], -1)))
+        classifier = self.softmax6_1(self.dense6_1(var_x))
+        bbox_regress = self.dense6_2(var_x)
+        landmark_regress = self.dense6_3(var_x)
+        return classifier, bbox_regress, landmark_regress
+
+
+class ONetRunner():
     """ Keras O-Net model for MTCNN
 
     Parameters
     ----------
-    weights_path: str
+    weights_path : str
         The path to the keras model file
-    batch_size: int
-        The batch size to feed the model
-    input_size: int
+    device : :class:`torch.device`
+        The device to run inference on
+    input_size : int
         The input size of the model
-    threshold: list, optional
+    threshold : float
         Threshold for O-Net
     """
     def __init__(self,
                  weights_path: str,
-                 batch_size: int,
+                 device: torch.device,
                  input_size: int,
                  threshold: float) -> None:
         logger.debug(parse_class_init(locals()))
-        self._batch_size = batch_size
-        self._model = self._load_model(weights_path)
+        self._model = ONet(weights_path)
+        self._model.to(device)
+        self.device = device
         self._input_size = input_size
         self._threshold = threshold
         logger.debug("Initialized: %s", self.__class__.__name__)
-
-    @staticmethod
-    def _load_model(weights_path: str) -> Model:
-        """ Keras P-Network Definition for MTCNN
-
-        Parameters
-        ----------
-        weights_path: str
-            Full path to the model's weights
-
-        Returns
-        -------
-        :class:`keras.models.Model`
-            The p-net model
-        """
-        input_ = Input(shape=(48, 48, 3))
-        var_x = Conv2D(32, (3, 3), strides=1, padding='valid', name='conv1')(input_)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu1')(var_x)
-        var_x = MaxPooling2D(pool_size=3, strides=2, padding='same')(var_x)
-        var_x = Conv2D(64, (3, 3), strides=1, padding='valid', name='conv2')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu2')(var_x)
-        var_x = MaxPooling2D(pool_size=3, strides=2)(var_x)
-        var_x = Conv2D(64, (3, 3), strides=1, padding='valid', name='conv3')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu3')(var_x)
-        var_x = MaxPooling2D(pool_size=2)(var_x)
-        var_x = Conv2D(128, (2, 2), strides=1, padding='valid', name='conv4')(var_x)
-        var_x = PReLU(shared_axes=[1, 2], name='prelu4')(var_x)
-        var_x = Permute((3, 2, 1))(var_x)
-        var_x = Flatten()(var_x)
-        var_x = Dense(256, name='conv5')(var_x)
-        var_x = PReLU(name='prelu5')(var_x)
-
-        classifier = Dense(2, activation='softmax', name='conv6-1')(var_x)
-        bbox_regress = Dense(4, name='conv6-2')(var_x)
-        landmark_regress = Dense(10, name='conv6-3')(var_x)
-        retval = Model(input_, [classifier, bbox_regress, landmark_regress])
-        retval.load_weights(weights_path)
-        retval.make_predict_function()
-        return retval
 
     def _filter_face_48net(self, class_probabilities: np.ndarray,
                            roi: np.ndarray,
@@ -608,62 +665,61 @@ class ONet():
                 ret.append((np.empty((0, 5)), np.empty(0)))
                 continue
             image = images[idx]
-            feed_batch = np.empty((rectangles.shape[0], 48, 48, 3), dtype="float32")
+            batch = np.empty((rectangles.shape[0], 48, 48, 3), dtype="float32")
 
-            _ = [cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]],
-                            (48, 48),
-                            dst=feed_batch[idx])
-                 for idx, rect in enumerate(rectangles)]
+            for i, rect in enumerate(rectangles):
+                cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]], (48, 48), dst=batch[i])
 
-            cls_probs, roi_probs, pts_probs = self._model.predict(feed_batch,
-                                                                  verbose=0,
-                                                                  batch_size=self._batch_size)
+            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+            with torch.no_grad():
+                cls_probs, roi_probs, pts_probs = (t.cpu().numpy()
+                                                   for t in self._model(feed))
             ret.append(self._filter_face_48net(cls_probs, roi_probs, pts_probs, rectangles))
         return ret
 
 
-class MTCNN():
+class MTCNNModel():
     """ MTCNN Detector for face alignment
 
     Parameters
     ----------
-    weights_path: list
+    weights_path : list[str]
         List of paths to the 3 MTCNN subnet weights
-    batch_size: int
-        The batch size to feed the model
-    input_size: int, optional
+    device : :class:`torch.device`
+        The device to run inference on
+    input_size : int, optional
         The height, width input size to the model. Default: 640
-    minsize: int, optional
+    min_size : int, optional
         The minimum size of a face to accept as a detection. Default: `20`
-    threshold: list, optional
+    threshold : list, optional
         List of floats for the three steps, Default: `[0.6, 0.7, 0.7]`
-    factor: float, optional
+    factor : float, optional
         The factor used to create a scaling pyramid of face sizes to detect in the image.
         Default: `0.709`
     """
     def __init__(self,
                  weights_path: list[str],
-                 batch_size: int,
+                 device: torch.device,
                  input_size: int = 640,
-                 minsize: int = 20,
+                 min_size: int = 20,
                  threshold: list[float] | None = None,
                  factor: float = 0.709) -> None:
         logger.debug(parse_class_init(locals()))
         threshold = [0.6, 0.7, 0.7] if threshold is None else threshold
-        self._pnet = PNet(weights_path[0],
-                          batch_size,
-                          input_size,
-                          minsize,
-                          factor,
-                          threshold[0])
-        self._rnet = RNet(weights_path[1],
-                          batch_size,
-                          input_size,
-                          threshold[1])
-        self._onet = ONet(weights_path[2],
-                          batch_size,
-                          input_size,
-                          threshold[2])
+        self._pnet = PNetRunner(weights_path[0],
+                                device,
+                                input_size,
+                                min_size,
+                                factor,
+                                threshold[0])
+        self._rnet = RNetRunner(weights_path[1],
+                                device,
+                                input_size,
+                                threshold[1])
+        self._onet = ONetRunner(weights_path[2],
+                                device,
+                                input_size,
+                                threshold[2])
         logger.debug("Initialized: %s", self.__class__.__name__)
 
     def detect_faces(self, batch: np.ndarray) -> tuple[np.ndarray, tuple[np.ndarray]]:

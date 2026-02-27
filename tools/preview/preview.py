@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Tool to preview swaps and tweak configuration prior to running a convert """
+"""Tool to preview swaps and tweak configuration prior to running a convert """
 from __future__ import annotations
 import gettext
 import logging
@@ -18,13 +18,13 @@ import numpy as np
 from lib.align import DetectedFace
 from lib.cli.args_extract_convert import ConvertArgs
 from lib.gui.utils import get_images, get_config, initialize_config, initialize_images
+from lib.infer.objects import ExtractMedia
 from lib.convert import Converter
-from lib.utils import get_module_objects, FaceswapError, handle_deprecated_cliopts
+from lib.utils import get_module_objects, FaceswapError, handle_deprecated_cli_opts
 from lib.queue_manager import queue_manager
+# TODO this is the last reference to Images. Remove if possible:
 from scripts.fsmedia import Alignments, Images
 from scripts.convert import Predict, ConvertItem
-
-from plugins.extract import ExtractMedia
 
 from .control_panels import ActionFrame, ConfigTools, OptionsBook
 from .viewer import FacesDisplay, ImagesCanvas
@@ -42,7 +42,7 @@ _ = _LANG.gettext
 
 
 class Preview(tk.Tk):
-    """ This tool is part of the Faceswap Tools suite and should be called from
+    """This tool is part of the Faceswap Tools suite and should be called from
     ``python tools.py preview`` command.
 
     Loads up 5 semi-random face swaps and displays them, cropped, in place in the final frame.
@@ -51,7 +51,7 @@ class Preview(tk.Tk):
 
     Parameters
     ----------
-    arguments: :class:`argparse.Namespace`
+    arguments
         The :mod:`argparse` arguments as passed in from :mod:`tools.py`
     """
     _w: str
@@ -59,7 +59,7 @@ class Preview(tk.Tk):
     def __init__(self, arguments: Namespace) -> None:
         logger.debug("Initializing %s: (arguments: '%s'", self.__class__.__name__, arguments)
         super().__init__()
-        arguments = handle_deprecated_cliopts(arguments)
+        arguments = handle_deprecated_cli_opts(arguments)
         self._config_tools = ConfigTools(arguments.configfile)
         self._lock = Lock()
         self._dispatcher = Dispatcher(self)
@@ -75,43 +75,39 @@ class Preview(tk.Tk):
 
     @property
     def config_tools(self) -> "ConfigTools":
-        """ :class:`ConfigTools`: The object responsible for parsing configuration options and
-        updating to/from the GUI """
+        """The object responsible for parsing configuration options and updating to/from the GUI"""
         return self._config_tools
 
     @property
     def dispatcher(self) -> "Dispatcher":
-        """ :class:`Dispatcher`: The object responsible for triggering events and variables and
-        handling global GUI state """
+        """Responsible for triggering events and variables and handling global GUI state"""
         return self._dispatcher
 
     @property
     def display(self) -> FacesDisplay:
-        """ :class:`~tools.preview.viewer.FacesDisplay`: The object that holds the sample,
-        converted and patched faces """
+        """The object that holds the sample, converted and patched faces"""
         return self._display
 
     @property
     def lock(self) -> Lock:
-        """ :class:`threading.Lock`: The threading lock object for the Preview GUI """
+        """The threading lock object for the Preview GUI"""
         return self._lock
 
     @property
     def progress_bar(self) -> BusyProgressBar:
-        """ :class:`~tools.preview.control_panels.BusyProgressBar`: The progress bar that indicates
-        a swap/patch thread is running """
+        """The progress bar that indicates a swap/patch thread is running"""
         assert self._cli_frame is not None
         return self._cli_frame.busy_progress_bar
 
     def update_display(self):
-        """ Update the images in the canvas and redraw """
+        """Update the images in the canvas and redraw"""
         if not hasattr(self, "_image_canvas"):  # On first call object not yet created
             return
         assert self._image_canvas is not None
         self._image_canvas.reload()
 
     def _initialize_tkinter(self) -> None:
-        """ Initialize a standalone tkinter instance. """
+        """Initialize a standalone tkinter instance."""
         logger.debug("Initializing tkinter")
         initialize_config(self, None, None)
         initialize_images()
@@ -125,7 +121,7 @@ class Preview(tk.Tk):
         logger.debug("Initialized tkinter")
 
     def process(self) -> None:
-        """ The entry point for the Preview tool from :file:`lib.tools.cli`.
+        """The entry point for the Preview tool from :file:`lib.tools.cli`.
 
         Launch the tkinter preview Window and run main loop.
         """
@@ -133,11 +129,11 @@ class Preview(tk.Tk):
         self.mainloop()
 
     def _refresh(self, *args) -> None:
-        """ Patch faces with current convert settings.
+        """Patch faces with current convert settings.
 
         Parameters
         ----------
-        *args: tuple
+        *args
             Unused, but required for tkinter callback.
         """
         logger.debug("Patching swapped faces. args: %s", args)
@@ -151,7 +147,7 @@ class Preview(tk.Tk):
         logger.debug("Patched swapped faces")
 
     def _build_ui(self) -> None:
-        """ Build the elements for displaying preview images and options panels. """
+        """Build the elements for displaying preview images and options panels."""
         container = ttk.PanedWindow(self,
                                     orient=tk.VERTICAL)
         container.pack(fill=tk.BOTH, expand=True)
@@ -170,12 +166,12 @@ class Preview(tk.Tk):
 
 
 class Dispatcher():
-    """ Handles the app level tk.Variables and the threading events. Dispatches events to the
+    """Handles the app level tk.Variables and the threading events. Dispatches events to the
     correct location and handles GUI state whilst events are handled
 
     Parameters
     ----------
-    app: :class:`Preview`
+    app
         The main tkinter Preview app
     """
     def __init__(self, app: Preview):
@@ -189,13 +185,13 @@ class Dispatcher():
 
     @property
     def needs_patch(self) -> Event:
-        """:class:`threading.Event`. Set by the parent and cleared by the child. Informs the child
-        patching thread that a run needs to be processed """
+        """Set by the parent and cleared by the child. Informs the child patching thread that a
+        run needs to be processed"""
         return self._evnt_needs_patch
 
     # TKInter Variables
     def set_busy(self) -> None:
-        """ Set the tkinter busy variable to ``True`` and display the busy progress bar """
+        """Set the tkinter busy variable to ``True`` and display the busy progress bar"""
         if self._tk_busy.get():
             logger.debug("Busy event is already set. Doing nothing")
             return
@@ -209,7 +205,7 @@ class Dispatcher():
         self._app.update_idletasks()
 
     def _unset_busy(self) -> None:
-        """ Set the tkinter busy variable to ``False`` and hide the busy progress bar """
+        """Set the tkinter busy variable to ``False`` and hide the busy progress bar"""
         self._is_updating = False
         if not self._tk_busy.get():
             logger.debug("busy unset when already unset. Doing nothing")
@@ -221,8 +217,8 @@ class Dispatcher():
 
     # Threading Events
     def _wait_for_patch(self) -> None:
-        """ Wait for a patch thread to complete before triggering a display refresh and unsetting
-        the busy indicators """
+        """Wait for a patch thread to complete before triggering a display refresh and unsetting
+        the busy indicators"""
         logger.debug("Checking for patch completion...")
         if self._evnt_needs_patch.is_set():
             logger.debug("Samples not patched. Waiting...")
@@ -241,8 +237,8 @@ class Dispatcher():
             return
 
     def set_needs_patch(self) -> None:
-        """ Sends a trigger to the patching thread that it needs to be run. Waits for the patching
-        to complete prior to triggering a display refresh and unsetting the busy indicators """
+        """Sends a trigger to the patching thread that it needs to be run. Waits for the patching
+        to complete prior to triggering a display refresh and unsetting the busy indicators"""
         if self._is_updating:
             logger.debug("Request to run patch when it is already running. Adding stacked event.")
             self._stacked_event = True
@@ -254,7 +250,7 @@ class Dispatcher():
 
 
 class Samples():
-    """ The display samples.
+    """The display samples.
 
     Obtains and holds :attr:`sample_size` semi random test faces for displaying in the
     preview GUI.
@@ -265,11 +261,11 @@ class Samples():
 
     Parameters
     ----------
-    app: :class:`Preview`
+    app
         The main tkinter Preview app
-    arguments: :class:`argparse.Namespace`
+    arguments
         The :mod:`argparse` arguments as passed in from :mod:`tools.py`
-    sample_size: int
+    sample_size
         The number of samples to take from the input video/images
     """
 
@@ -282,14 +278,10 @@ class Samples():
         self._predicted_images: list[tuple[ConvertItem, np.ndarray]] = []
 
         self._images = Images(arguments)
-        self._alignments = Alignments(arguments,
+        self._alignments = Alignments(arguments.alignments_path,
+                                      arguments.input_dir,
                                       is_extract=False,
                                       input_is_video=self._images.is_video)
-        if self._alignments.version == 1.0:
-            logger.error("The alignments file format has been updated since the given alignments "
-                         "file was generated. You need to update the file to proceed.")
-            logger.error("To do this run the 'Alignments Tool' > 'Extract' Job.")
-            sys.exit(1)
 
         if not self._alignments.have_alignments_file:
             logger.error("Alignments file not found at: '%s'", self._alignments.file)
@@ -311,7 +303,7 @@ class Samples():
 
     @property
     def available_masks(self) -> list[str]:
-        """ list: The mask names that are available for every face in the alignments file """
+        """The mask names that are available for every face in the alignments file"""
         retval = [key
                   for key, val in self.alignments.mask_summary.items()
                   if val == self.alignments.faces_count]
@@ -319,33 +311,33 @@ class Samples():
 
     @property
     def sample_size(self) -> int:
-        """ int: The number of samples to take from the input video/images """
+        """The number of samples to take from the input video/images"""
         return self._sample_size
 
     @property
     def predicted_images(self) -> list[tuple[ConvertItem, np.ndarray]]:
-        """ list: The predicted faces output from the Faceswap model """
+        """The predicted faces output from the Faceswap model"""
         return self._predicted_images
 
     @property
     def alignments(self) -> Alignments:
-        """ :class:`~lib.align.Alignments`: The alignments for the preview faces """
+        """The alignments for the preview faces"""
         return self._alignments
 
     @property
     def predictor(self) -> Predict:
-        """ :class:`~scripts.convert.Predict`: The Predictor for the Faceswap model """
+        """The Predictor for the Faceswap model"""
         return self._predictor
 
     @property
     def _random_choice(self) -> list[int]:
-        """ list: Random indices from the :attr:`_indices` group """
+        """Random indices from the :attr:`_indices` group"""
         retval = [random.choice(indices) for indices in self._indices]
         logger.debug(retval)
         return retval
 
     def _get_filelist(self) -> list[str]:
-        """ Get a list of files for the input, filtering out those frames which do
+        """Get a list of files for the input, filtering out those frames which do
         not contain faces.
 
         Returns
@@ -374,15 +366,14 @@ class Samples():
         return retval
 
     def _get_indices(self) -> list[list[int]]:
-        """ Get indices for each sample group.
+        """Get indices for each sample group.
 
         Obtain :attr:`self.sample_size` evenly sized groups of indices
         pertaining to the filtered :attr:`self._file_list`
 
         Returns
         -------
-        list
-            list of indices relating to the filtered file list, split into groups
+        list of indices relating to the filtered file list, split into groups
         """
         # Remove start and end values to get a list divisible by self.sample_size
         no_files = len(self._filelist)
@@ -400,7 +391,7 @@ class Samples():
         return retval
 
     def generate(self) -> None:
-        """ Generate a sample set.
+        """Generate a sample set.
 
         Selects :attr:`sample_size` random faces. Runs them through prediction to obtain the
         swap, then trigger the patch event to run the faces through patching.
@@ -413,7 +404,7 @@ class Samples():
         logger.debug("Generated new random samples")
 
     def _load_frames(self) -> None:
-        """ Load a sample of random frames.
+        """Load a sample of random frames.
 
         * Picks a random face from each indices group.
 
@@ -439,7 +430,7 @@ class Samples():
                      [frame.inbound.filename for frame in self._input_images])
 
     def _predict(self) -> None:
-        """ Predict from the loaded frames.
+        """Predict from the loaded frames.
 
         With a threading lock (to prevent stacking), run the selected faces through the Faceswap
         model predict function and add the output to :attr:`predicted`
@@ -464,21 +455,21 @@ class Samples():
 
 
 class Patch():
-    """ The Patch pipeline
+    """The Patch pipeline
 
     Runs in it's own thread. Takes the output from the Faceswap model predictor and runs the faces
     through the convert pipeline using the currently selected options.
 
     Parameters
     ----------
-    app: :class:`Preview`
+    app
         The main tkinter Preview app
-    arguments: :class:`argparse.Namespace`
+    arguments
         The :mod:`argparse` arguments as passed in from :mod:`tools.py`
 
     Attributes
     ----------
-    converter_arguments: dict
+    converter_arguments
         The currently selected converter command line arguments for the patch queue
     """
     def __init__(self, app: Preview, arguments: Namespace) -> None:
@@ -509,26 +500,25 @@ class Patch():
 
     @property
     def converter(self) -> Converter:
-        """ :class:`lib.convert.Converter`: The converter to use for patching the images. """
+        """The converter to use for patching the images."""
         return self._converter
 
     @staticmethod
     def _generate_converter_arguments(arguments: Namespace,
                                       available_masks: list[str]) -> Namespace:
-        """ Add the default converter arguments to the initial arguments. Ensure the mask selection
+        """Add the default converter arguments to the initial arguments. Ensure the mask selection
         is available.
 
         Parameters
         ----------
-        arguments: :class:`argparse.Namespace`
+        arguments
             The :mod:`argparse` arguments as passed in from :mod:`tools.py`
         available_masks: list
             The masks that are available for convert
+
         Returns
         ----------
-        arguments: :class:`argparse.Namespace`
-            The :mod:`argparse` arguments as passed in with converter default
-            arguments added
+        The :mod:`argparse` arguments as passed in with converter default arguments added
         """
         valid_masks = available_masks + ["none"]
         converter_arguments = ConvertArgs(None, "convert").get_optional_arguments()  # type: ignore
@@ -553,18 +543,18 @@ class Patch():
                  patch_queue_in: EventQueue,
                  trigger_event: Event,
                  samples: Samples) -> None:
-        """ The face patching process.
+        """The face patching process.
 
         Runs in a thread, and waits for an event to be set. Once triggered, runs a patching
         cycle and sets the :class:`Display` destination images.
 
         Parameters
         ----------
-        patch_queue_in: :class:`~lib.queue_manager.EventQueue`
+        patch_queue_in
             The input queue for the patching process
-        trigger_event: :class:`threading.Event`
+        trigger_event
             The event that indicates a patching run needs to be processed
-        samples: :class:`Samples`
+        samples
             The Samples for display.
         """
         logger.debug("Launching patch process thread: (patch_queue_in: %s, trigger_event: %s, "
@@ -590,7 +580,7 @@ class Patch():
         logger.debug("Closed patch process thread")
 
     def _update_converter_arguments(self) -> None:
-        """ Update the converter arguments to the currently selected values. """
+        """Update the converter arguments to the currently selected values."""
         logger.debug("Updating Converter cli arguments")
         if self.converter_arguments is None:
             logger.debug("No arguments to update")
@@ -602,13 +592,13 @@ class Patch():
 
     @staticmethod
     def _feed_swapped_faces(patch_queue_in: EventQueue, samples: Samples) -> None:
-        """ Feed swapped faces to the converter's in-queue.
+        """Feed swapped faces to the converter's in-queue.
 
         Parameters
         ----------
-        patch_queue_in: :class:`~lib.queue_manager.EventQueue`
+        patch_queue_in
             The input queue for the patching process
-        samples: :class:`Samples`
+        samples
             The Samples for display.
         """
         logger.debug("feeding swapped faces to converter")
@@ -623,21 +613,20 @@ class Patch():
                      queue_in: EventQueue,
                      queue_out: EventQueue,
                      sample_size: int) -> list[np.ndarray]:
-        """ Patch faces.
+        """Patch faces.
 
         Run the convert process on the swapped faces and return the patched faces.
 
-        patch_queue_in: :class:`~lib.queue_manager.EventQueue`
+        patch_queue_in
             The input queue for the patching process
-        queue_out: :class:`~lib.queue_manager.EventQueue`
+        queue_out
             The output queue from the patching process
-        sample_size: int
+        sample_size
             The number of samples to be displayed
 
         Returns
         -------
-        list
-            The swapped faces patched with the selected convert settings
+        The swapped faces patched with the selected convert settings
         """
         logger.debug("Patching faces")
         self._converter.process(queue_in, queue_out)

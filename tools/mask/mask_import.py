@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Import mask processing for faceswap's mask tool """
+"""Import mask processing for faceswap's mask tool"""
 from __future__ import annotations
 
 import logging
@@ -18,7 +18,7 @@ from lib.utils import get_image_paths, get_module_objects
 if T.TYPE_CHECKING:
     import numpy as np
     from .loader import Loader
-    from plugins.extract import ExtractMedia
+    from lib.infer.objects import ExtractMedia
     from lib import align
     from lib.align import DetectedFace
     from lib.align.aligned_face import CenteringType
@@ -27,23 +27,23 @@ logger = logging.getLogger(__name__)
 
 
 class Import:
-    """ Import masks from disk into an Alignments file
+    """Import masks from disk into an Alignments file
 
     Parameters
     ----------
-    import_path: str
+    import_path
         The path to the input images
-    centering: Literal["face", "head", "legacy"]
+    centering
         The centering to store the mask at
-    storage_size: int
+    storage_size
         The size to store the mask at
-    input_is_faces: bool
+    input_is_faces
         ``True`` if the input is aligned faces otherwise ``False``
-    loader: :class:`~tools.mask.loader.Loader`
+    loader
         The source file loader object
-    alignments: :class:`~lib.align.alignments.Alignments` | None
+    alignments
         The alignments file object for the faces, if provided
-    mask_type: str
+    mask_type
         The mask type to update to
     """
     def __init__(self,
@@ -76,22 +76,22 @@ class Import:
 
     @property
     def skip_count(self) -> int:
-        """ int: Number of masks that were skipped as they do not exist for given faces """
+        """Number of masks that were skipped as they do not exist for given faces"""
         return self._counts["skip"]
 
     @property
     def update_count(self) -> int:
-        """ int: Number of masks that were skipped as they do not exist for given faces """
+        """Number of masks that were skipped as they do not exist for given faces"""
         return self._counts["update"]
 
     @classmethod
     def _validate_mask_type(cls, mask_type: str) -> None:
-        """ Validate that the mask type is 'custom' to ensure user does not accidentally overwrite
+        """Validate that the mask type is 'custom' to ensure user does not accidentally overwrite
         existing masks they may have editted
 
         Parameters
         ----------
-        mask_type: str
+        mask_type
             The mask type that has been selected
         """
         if mask_type == "custom":
@@ -102,17 +102,16 @@ class Import:
 
     @classmethod
     def _get_file_list(cls, path: str) -> list[str]:
-        """ Check the nask folder exists and obtain the list of images
+        """Check the nask folder exists and obtain the list of images
 
         Parameters
         ----------
-        path: str
+        path
             Full path to the location of mask images to be imported
 
         Returns
         -------
-        list[str]
-            list of full paths to all of the images in the mask folder
+        List of full paths to all of the images in the mask folder
         """
         if not os.path.isdir(path):
             logger.error("Mask path: '%s' is not a folder", path)
@@ -124,12 +123,12 @@ class Import:
         return paths
 
     def _warn_extra_masks(self, file_list: list[str]) -> None:
-        """ Generate a warning for each mask that exists that does not correspond to a match in the
+        """Generate a warning for each mask that exists that does not correspond to a match in the
         source input
 
         Parameters
         ----------
-        file_list: list[str]
+        file_list
             List of mask files that could not be mapped to a source image
         """
         if not file_list:
@@ -143,17 +142,16 @@ class Import:
                        "(see above)", len(file_list))
 
     def _file_list_to_frame_number(self, file_list: list[str]) -> dict[int, str]:
-        """ Extract frame numbers from mask file names and return as a dictionary
+        """Extract frame numbers from mask file names and return as a dictionary
 
         Parameters
         ----------
-        file_list: list[str]
+        file_list
             List of full paths to masks to extract frame number from
 
         Returns
         -------
-        dict[int, str]
-            Dictionary of frame numbers to filenames
+        Dictionary of frame numbers to filenames
         """
         retval: dict[int, str] = {}
         for filename in file_list:
@@ -179,20 +177,19 @@ class Import:
         return retval
 
     def _map_video(self, file_list: list[str], source_files: list[str]) -> dict[str, str]:
-        """ Generate the mapping between the source data and the masks to be imported for
+        """Generate the mapping between the source data and the masks to be imported for
         video sources
 
         Parameters
         ----------
-        file_list: list[str]
+        file_list
             List of full paths to masks to be imported
-        source_files: list[str]
+        source_files
             list of filenames withing the source file
 
         Returns
         -------
-        dict[str, str]
-            Source filenames mapped to full path location of mask to be imported
+        Source filenames mapped to full path location of mask to be imported
         """
         retval = {}
         unmapped = []
@@ -216,20 +213,19 @@ class Import:
         return retval
 
     def _map_images(self, file_list: list[str], source_files: list[str]) -> dict[str, str]:
-        """ Generate the mapping between the source data and the masks to be imported for
+        """Generate the mapping between the source data and the masks to be imported for
         folder of image sources
 
         Parameters
         ----------
-        file_list: list[str]
+        file_list
             List of full paths to masks to be imported
-        source_files: list[str]
+        source_files
             list of filenames withing the source file
 
         Returns
         -------
-        dict[str, str]
-            Source filenames mapped to full path location of mask to be imported
+        Source filenames mapped to full path location of mask to be imported
         """
         mask_count = len(file_list)
         retval = {}
@@ -255,19 +251,18 @@ class Import:
         return retval
 
     def _generate_mapping(self, import_path: str, loader: Loader) -> dict[str, str]:
-        """ Generate the mapping between the source data and the masks to be imported
+        """Generate the mapping between the source data and the masks to be imported
 
         Parameters
         ----------
-        import_path: str
+        import_path
             The path to the input images
-        loader: :class:`~tools.mask.loader.Loader`
+        loader
             The source file loader object
 
         Returns
         -------
-        dict[str, str]
-            Source filenames mapped to full path location of mask to be imported
+        Source filenames mapped to full path location of mask to be imported
         """
         file_list = self._get_file_list(import_path)
         if loader.is_video:
@@ -278,13 +273,13 @@ class Import:
         return retval
 
     def _store_mask(self, face: DetectedFace, mask: np.ndarray) -> None:
-        """ Store the mask to the given DetectedFace object
+        """Store the mask to the given DetectedFace object
 
         Parameters
         ----------
-        face: :class:`~lib.align.detected_face.DetectedFace`
+        face
             The detected face object to store the mask to
-        mask: :class:`numpy.ndarray`
+        mask
             The mask to store
         """
         aligned = AlignedFace(face.landmarks_xy,
@@ -292,24 +287,22 @@ class Import:
                               centering=self._centering,
                               size=self._size,
                               is_aligned=self._is_faces,
-                              dtype="float32")
+                              dtype="uint8")
         assert aligned.face is not None
         face.add_mask(f"custom_{self._centering}",
-                      aligned.face / 255.,
+                      aligned.face,
                       aligned.adjusted_matrix,
-                      aligned.interpolators[1],
                       storage_size=self._size,
                       storage_centering=self._centering)
 
     def _store_mask_face(self, media: ExtractMedia, mask: np.ndarray) -> None:
-        """ Store the mask when the input is aligned faceswap faces
+        """Store the mask when the input is aligned faceswap faces
 
         Parameters
         ----------
-        media: :class:`~plugins.extract.extract_media.ExtractMedia`
+        media
             The extract media object containing the face(s) to import the mask for
-
-        mask: :class:`numpy.ndarray`
+        mask
             The mask loaded from disk
         """
         assert self._saver is not None
@@ -335,19 +328,18 @@ class Import:
 
     @classmethod
     def _resize_mask(cls, mask: np.ndarray, dims: tuple[int, int]) -> np.ndarray:
-        """ Resize a mask to the given dimensions
+        """Resize a mask to the given dimensions
 
         Parameters
         ----------
-        mask: :class:`numpy.ndarray`
+        mask
             The mask to resize
-        dims: tuple[int, int]
+        dims
             The (height, width) target size
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The resized mask, or the original mask if no resizing required
+        The resized mask, or the original mask if no resizing required
         """
         if mask.shape[:2] == dims:
             return mask
@@ -358,14 +350,14 @@ class Import:
         return mask
 
     def _store_mask_frame(self, media: ExtractMedia, mask: np.ndarray) -> None:
-        """ Store the mask when the input is frames
+        """Store the mask when the input is frames
 
         Parameters
         ----------
-        media: :class:`~plugins.extract.extract_media.ExtractMedia`
+        media
             The extract media object containing the face(s) to import the mask for
 
-        mask: :class:`numpy.ndarray`
+        mask
             The mask loaded from disk
         """
         assert self._alignments is not None
@@ -381,11 +373,11 @@ class Import:
                                          face.to_alignment())
 
     def import_mask(self, media: ExtractMedia) -> None:
-        """ Import the mask for the given Extract Media object
+        """Import the mask for the given Extract Media object
 
         Parameters
         ----------
-        media: :class:`~plugins.extract.extract_media.ExtractMedia`
+        media
             The extract media object containing the face(s) to import the mask for
         """
         mask_file = self._mapping.get(os.path.basename(media.filename))

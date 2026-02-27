@@ -24,12 +24,12 @@ class LandmarkType(Enum):
     LM_3D_26 = 4
 
     @classmethod
-    def from_shape(cls, shape: tuple[int, ...]) -> LandmarkType:
+    def from_shape(cls, shape: tuple[int, int]) -> LandmarkType:
         """ The landmark type for a given shape
 
         Parameters
         ----------
-        shape: tuple[int, ...]
+        shape: tuple[int, int]
             The shape to get the landmark type for
 
         Returns
@@ -42,7 +42,7 @@ class LandmarkType(Enum):
         ValueError
             If the requested shape is not valid
         """
-        shapes: dict[tuple[int, ...], LandmarkType] = {(4, 2): cls.LM_2D_4,
+        shapes: dict[tuple[int, int], LandmarkType] = {(4, 2): cls.LM_2D_4,
                                                        (51, 2): cls.LM_2D_51,
                                                        (68, 2): cls.LM_2D_68,
                                                        (26, 3): cls.LM_3D_26}
@@ -99,18 +99,33 @@ MEAN_FACE: dict[LandmarkType, np.ndarray] = {
 for aligning faces """
 
 LANDMARK_PARTS: dict[LandmarkType, dict[str, tuple[int, int, bool]]] = {
-            LandmarkType.LM_2D_68: {"mouth_outer": (48, 60, True),
-                                    "mouth_inner": (60, 68, True),
-                                    "right_eyebrow": (17, 22, False),
-                                    "left_eyebrow": (22, 27, False),
-                                    "right_eye": (36, 42, True),
-                                    "left_eye": (42, 48, True),
-                                    "nose": (27, 36, False),
-                                    "jaw": (0, 17, False),
-                                    "chin": (8, 11, False)},
-            LandmarkType.LM_2D_4: {"face": (0, 4, True)}}
+    LandmarkType.LM_2D_68: {"mouth_outer": (48, 60, True),
+                            "mouth_inner": (60, 68, True),
+                            "right_eyebrow": (17, 22, False),
+                            "left_eyebrow": (22, 27, False),
+                            "right_eye": (36, 42, True),
+                            "left_eye": (42, 48, True),
+                            "nose": (27, 36, False),
+                            "jaw": (0, 17, False),
+                            "chin": (8, 11, False)},
+    LandmarkType.LM_2D_4: {"face": (0, 4, True)}
+}
 """dict[:class:`LandmarkType`, dict[str, tuple[int, int, bool]]: For each landmark type, stores
 the (start index, end index, is polygon) information about each part of the face. """
+
+
+LANDMARK_MASK_PARTS: dict[LandmarkType, dict[str, list[tuple[int, int]]]] = {
+    LandmarkType.LM_2D_68: {"right_jaw": [(0, 9), (17, 18)],
+                            "left_jaw": [(8, 17), (26, 27)],
+                            "right_cheek": [(17, 20), (8, 9)],
+                            "left_cheek": [(24, 27), (8, 9)],
+                            "nose_ridge": [(19, 25), (8, 9)],
+                            "right_eye": [(17, 22), (27, 28), (31, 36), (8, 9)],
+                            "left_eye": [(22, 27), (27, 28), (31, 36), (8, 9)],
+                            "nose": [(27, 31), (31, 36)]}
+}
+"""dict[:class:`LandmarkType`, dict[str, list[tuple[int, int]]]: For each landmark type, stores
+the (start index, end index) information about each part of the face that makes a face mask. """
 
 
 __all__ = get_module_objects(__name__)

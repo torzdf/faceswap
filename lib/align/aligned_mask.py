@@ -11,13 +11,15 @@ import cv2
 import numpy as np
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects
+from lib.utils import FaceswapError, get_module_objects
 
+from .aligned_utils import get_adjusted_center, get_centered_size
 from .alignments import MaskAlignmentsFileDict
-from . import get_adjusted_center, get_centered_size
+from .constants import LandmarkType, LANDMARK_PARTS, LANDMARK_MASK_PARTS
 
 if T.TYPE_CHECKING:
     from collections.abc import Callable
+    import numpy.typing as npt
     from .aligned_face import CenteringType
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,13 @@ class Mask():  # pylint:disable=too-many-instance-attributes
 
         self.set_blur_and_threshold()
         logger.trace("Initialized: %s", self.__class__.__name__)  # type:ignore[attr-defined]
+
+    def __repr__(self) -> str:
+        """ Pretty print for logging """
+        params = {k.replace("stored", "storage"): v for k, v in self.__dict__.items()
+                  if k in ("stored_size", "stored_centering")}
+        sparams = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
+        return f"{self.__class__.__name__}({sparams})"
 
     @property
     def mask(self) -> np.ndarray:
@@ -168,7 +177,7 @@ class Mask():  # pylint:disable=too-many-instance-attributes
                      "mask max: %s", mask.shape, mask.dtype, mask.min(), mask.max())
         return mask
 
-    def add(self, mask: np.ndarray, affine_matrix: np.ndarray, interpolator: int) -> None:
+    def add(self, mask: npt.NDArray[np.uint8], affine_matrix: npt.NDArray[np.float32]) -> T.Self:
         """ Add a Faceswap mask to this :class:`Mask`.
 
         The mask should be the original output from  :mod:`plugins.extract.mask`
@@ -176,33 +185,45 @@ class Mask():  # pylint:disable=too-many-instance-attributes
         Parameters
         ----------
         mask: :class:`numpy.ndarray`
-            The mask that is to be added as output from :mod:`plugins.extract.mask`
-            It should be in the range 0.0 - 1.0 ideally with a ``dtype`` of ``float32``
+            The mask that is to be added as output from :mod:`plugins.extract.mask` as a UINT8
+            image
         affine_matrix: :class:`numpy.ndarray`
-            The transformation matrix required to transform the mask to the original frame.
-        interpolator, int:
-            The CV2 interpolator required to transform this mask to it's original frame
+            The normalized transformation matrix required to transform the mask from (0, 1) to the
+            original frame.
+
+        Returns
+        -------
+        :class:`lib.align.aligned_mask.Mask`
+            This mask object
         """
         logger.trace("mask shape: %s, mask dtype: %s, mask min: %s, "  # type:ignore[attr-defined]
-                     "mask max: %s, affine_matrix: %s, interpolator: %s)",
-                     mask.shape, mask.dtype, mask.min(), affine_matrix, mask.max(), interpolator)
+                     "mask max: %s, affine_matrix: %s)",
+                     mask.shape, mask.dtype, mask.min(), affine_matrix, mask.max())
         self._affine_matrix = self._adjust_affine_matrix(mask.shape[0], affine_matrix)
-        self._interpolator = interpolator
+        scale = (self._affine_matrix[0, 0] ** 2 + self._affine_matrix[1, 0] ** 2) ** 0.5
+        self._interpolator = cv2.INTER_LINEAR if scale < 1.0 else cv2.INTER_AREA
         self.replace_mask(mask)
+        return self
 
-    def replace_mask(self, mask: np.ndarray) -> None:
+    def replace_mask(self, mask: npt.NDArray[np.uint8]) -> None:
         """ Replace the existing :attr:`_mask` with the given mask.
 
         Parameters
         ----------
         mask: :class:`numpy.ndarray`
-            The mask that is to be added as output from :mod:`plugins.extract.mask`.
-            It should be in the range 0.0 - 1.0 ideally with a ``dtype`` of ``float32``
+            The mask that is to be added as output from :mod:`plugins.extract.mask` as a UINT8
+            image
         """
-        mask = (cv2.resize(mask * 255.0,
-                           (self.stored_size, self.stored_size),
-                           interpolation=cv2.INTER_AREA)).astype("uint8")
-        self._mask = compress(mask.tobytes())
+        assert mask.dtype == np.uint8
+        size = mask.shape[0]
+        if size == self.stored_size:
+            new_mask = mask
+        else:
+            interp = cv2.INTER_AREA if self.stored_size < size else cv2.INTER_LINEAR
+            new_mask = cv2.resize(mask,
+                                  (self.stored_size, self.stored_size),
+                                  interpolation=interp)
+        self._mask = compress(new_mask.tobytes())
 
     def set_dilation(self, amount: float) -> None:
         """ Set the internal dilation object for returned masks
@@ -402,10 +423,15 @@ class LandmarksMask(Mask):
 
     Parameters
     ----------
-    points : list[:class:`numpy.ndarray`]
-        A list of landmark points that correspond to the given storage_size to create
-        the mask. Each item in the list should be a :class:`numpy.ndarray` that a filled
-        convex polygon will be created from
+    area : Literal["eye", "mouth", "face", "face_extended"]
+        The type of mask to obtain. `face` is a full face mask, `face_extended` is a face mask
+        that extends above the eyebrows. The others are masks for those specific areas
+    landmark_type : :class:`lib.align.constants.LandmarkType`
+        The type of landmarks that this mask is being created from
+    landmarks : :class:`numpy.ndarray`
+        The landmarks to generate the mask from
+    affine_matrix: :class:`numpy.ndarray`
+        The transformation matrix required to transform the mask to the original frame.
     storage_size : int, optional
         The size (in pixels) that the compressed mask should be stored at. Default: 128.
     storage_centering : str, optional:
@@ -415,38 +441,132 @@ class LandmarksMask(Mask):
         The amount of dilation to apply to the mask. as a percentage of the mask size. Default: 0.0
     """
     def __init__(self,
-                 points: list[np.ndarray],
+                 area: T.Literal["eye", "mouth", "face", "face_extended"],
+                 landmark_type: LandmarkType,
+                 landmarks: npt.NDArray[np.float32],
+                 affine_matrix: npt.NDArray[np.float32],
                  storage_size: int = 128,
                  storage_centering: CenteringType = "face",
                  dilation: float = 0.0) -> None:
         super().__init__(storage_size=storage_size, storage_centering=storage_centering)
-        self._points = points
+        self._area = area
+        self._landmark_type = landmark_type
+        self._lm_matrix = affine_matrix
+        self._points = self._get_points(landmarks)
         self.set_dilation(dilation)
 
     @property
-    def mask(self) -> np.ndarray:
+    def mask(self) -> npt.NDArray[np.uint8]:
         """ :class:`numpy.ndarray`: Overrides the default mask property, creating the processed
         mask at first call and compressing it. The decompressed mask is returned from this
         property. """
         return self.stored_mask
 
-    def generate_mask(self, affine_matrix: np.ndarray, interpolator: int) -> None:
+    def _get_slices(self) -> list[slice] | list[list[slice]]:
+        """Obtain the slices that will extract the points for the given area and landmark type
+
+        Returns
+        -------
+        list[slice] | list[list[slice]]
+            The slices required to extract landmark points for creating a mask
+        """
+        parts = LANDMARK_PARTS if self._area in ("eye", "mouth") else LANDMARK_MASK_PARTS
+        if self._landmark_type not in parts:
+            raise FaceswapError(
+                f"Landmark based masks cannot be created for {self._landmark_type.name}")
+
+        lm_parts = parts[self._landmark_type]
+        mapped = {"mouth": ["mouth_outer"],
+                  "eye": ["right_eye", "left_eye"],
+                  "face": list(lm_parts),
+                  "face_extended": list(lm_parts)}[self._area]
+
+        if not all(parts in lm_parts for parts in mapped):
+            raise FaceswapError(
+                f"Landmark based masks cannot be created for {self._landmark_type.name}")
+
+        if self._area in ("eye", "mouth"):
+            retval = [slice(*lm_parts[v][:2]) for v in mapped]
+        else:
+            retval = [[slice(*p) for p in T.cast(list[tuple[int, int]], lm_parts[v])]
+                      for v in mapped]
+        logger.trace("[LM_MASK] area: '%s', slices: %s",  # type:ignore[attr-defined]
+                     self._area, retval)
+        return retval
+
+    def _extend_face_landmarks(self,
+                               landmarks: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+        """ Adjust the top of the face mask to extend above eyebrows
+
+        Parameters
+        ----------
+        landmarks: :class:`numpy.ndarray`
+            The 68 point landmarks to be adjusted
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The landmarks with the upper eyebrow points adjusted
+        """
+        assert self._landmark_type == LandmarkType.LM_2D_68
+        # mid points between the side of face and eye point
+        ml_pnt = (landmarks[36] + landmarks[0]) // 2
+        mr_pnt = (landmarks[16] + landmarks[45]) // 2
+
+        # mid points between the mid points and eye
+        ql_pnt = (landmarks[36] + ml_pnt) // 2
+        qr_pnt = (landmarks[45] + mr_pnt) // 2
+
+        # Top of the eye arrays
+        bot_l = np.array((ql_pnt, landmarks[36], landmarks[37], landmarks[38], landmarks[39]))
+        bot_r = np.array((landmarks[42], landmarks[43], landmarks[44], landmarks[45], qr_pnt))
+
+        # Eyebrow arrays
+        top_l = landmarks[17:22]
+        top_r = landmarks[22:27]
+
+        retval = landmarks.copy()
+
+        # Adjust eyebrow arrays
+        retval[17:22] = top_l + ((top_l - bot_l) // 2)
+        retval[22:27] = top_r + ((top_r - bot_r) // 2)
+        return retval
+
+    def _get_points(self, landmarks: npt.NDArray[np.float32]) -> list[npt.NDArray[np.int32]]:
+        """ Obtain the points required to create the mask
+
+        Parameters
+        ----------
+        landmarks : :class:`numpy.ndarray`
+            The landmarks to obtain the points from
+
+        Returns
+        -------
+        list[:class:`numpy.ndarray`]
+            The list of points for creating each section of the mask
+        """
+        slices = self._get_slices()
+        if self._area == "face_extended":
+            landmarks = self._extend_face_landmarks(landmarks)
+
+        if self._area in ("eye", "mouth"):
+            retval = [np.rint(landmarks[zone]).astype("int32")
+                      for zone in T.cast(list[slice], slices)]
+        else:
+            retval = [np.concatenate([np.rint(landmarks[x]).astype("int32") for x in zone])
+                      for zone in T.cast(list[list[slice]], slices)]
+        return retval
+
+    def generate_mask(self) -> None:
         """ Generate the mask.
 
         Creates the mask applying any requested dilation and blurring and assigns compressed mask
         to :attr:`_mask`
-
-        Parameters
-        ----------
-        affine_matrix: :class:`numpy.ndarray`
-            The transformation matrix required to transform the mask to the original frame.
-        interpolator, int:
-            The CV2 interpolator required to transform this mask to it's original frame
         """
-        mask = np.zeros((self.stored_size, self.stored_size, 1), dtype="float32")
-        for landmarks in self._points:
-            lms = np.rint(landmarks).astype("int")
-            cv2.fillConvexPoly(mask, cv2.convexHull(lms), [1.0], lineType=cv2.LINE_AA)
+        mask = np.zeros((self.stored_size, self.stored_size, 1), dtype="uint8")
+        for pts in self._points:
+            lms = np.rint(pts).astype("int")
+            cv2.fillConvexPoly(mask, cv2.convexHull(lms), [255], lineType=cv2.LINE_AA)
         if self._dilation[-1] is not None:
             self._dilate_mask(mask)
         if self._blur_kernel != 0 and self._blur_type is not None:
@@ -454,9 +574,9 @@ class LandmarksMask(Mask):
                             mask,
                             self._blur_kernel,
                             passes=self._blur_passes).blurred
-        logger.trace("mask: (shape: %s, dtype: %s)",  # type:ignore[attr-defined]
+        logger.trace("[LM_MASK] mask: (shape: %s, dtype: %s)",  # type:ignore[attr-defined]
                      mask.shape, mask.dtype)
-        self.add(mask, affine_matrix, interpolator)
+        self.add(mask, self._lm_matrix)
 
 
 class BlurMask():
