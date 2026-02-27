@@ -336,6 +336,8 @@ class DetectedFace():  # pylint:disable=too-many-instance-attributes
         if alignment.get("mask", None) is not None:
             self.mask = {}
             for name, mask_dict in alignment["mask"].items():
+                if name in ("components", "extended"):
+                    continue  # Skip legacy stored LM based masks
                 self.mask[name] = Mask()
                 self.mask[name].from_dict(mask_dict)
         if image is not None and image.any():
@@ -381,6 +383,8 @@ class DetectedFace():  # pylint:disable=too-many-instance-attributes
         self._landmarks_xy = np.array(alignment["landmarks_xy"], dtype="float32")
         self.mask = {}
         for name, mask_dict in alignment["mask"].items():
+            if name in ("components", "extended"):
+                continue  # Skip legacy stored LM based masks
             self.mask[name] = Mask()
             self.mask[name].from_dict(mask_dict)
         self._identity = {}
