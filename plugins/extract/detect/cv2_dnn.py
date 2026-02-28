@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" OpenCV DNN Face detection plugin """
+"""OpenCV DNN Face detection plugin"""
 import logging
 
 import cv2
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class CV2DNNDetect(ExtractPlugin):
-    """ CV2 DNN detector for face recognition """
+    """CV2 DNN detector for face recognition"""
     def __init__(self) -> None:
         super().__init__(input_size=300,
                          batch_size=1,
@@ -26,7 +26,7 @@ class CV2DNNDetect(ExtractPlugin):
         self._average_image = np.array([104, 117, 123], dtype="float32")
 
     def load_model(self) -> None:
-        """ CV2 DNN Detector Model already initialized. Return """
+        """Load the CV2 DNN Detector Model"""
         model = GetModel(model_filename=["resnet_ssd_v1.caffemodel", "resnet_ssd_v1.prototxt"],
                          git_model_id=4)
         model_path = model.model_path
@@ -35,49 +35,46 @@ class CV2DNNDetect(ExtractPlugin):
         self.model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Compile the detection image(s) for prediction
+        """Compile the detection image(s) for prediction
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             The input batch of images at model input size in the correct color order
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The batch of images ready for feeding the model
+        The batch of images ready for feeding the model
         """
         return (batch - self._average_image).transpose(0, 3, 1, 2)
 
     def process(self, batch: np.ndarray) -> np.ndarray:
-        """ Run model to get predictions
+        """Run model to get predictions
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             A batch of images ready to feed the model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The batch of detection results from the model
+        The batch of detection results from the model
         """
         self.model.setInput(batch)
-        preds = self.model.forward()
-        return preds.reshape(batch.shape[0], 200, 7)
+        result = self.model.forward()
+        return result.reshape(batch.shape[0], 200, 7)
 
     def post_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Compile found faces for output
+        """Compile found faces for output
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             The detection results for the model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The processed detection bounding box from the model at model input size
+        The processed detection bounding box from the model at model input size
         """
         confidence_mask = batch[..., 2] >= self.confidence
         boxes = [batch[b, ..., 3:7][confidence_mask[b]] * self.input_size

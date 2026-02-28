@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" CV2 DNN landmarks extractor for faceswap.py
+"""CV2 DNN landmarks extractor for faceswap.py
 Adapted from: https://github.com/yinguobing/cnn-facial-landmark
 MIT License
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class CV2DNNAlign(ExtractPlugin):
-    """ CV2 DNN Plugin for face alignment """
+    """CV2 DNN Plugin for face alignment """
     def __init__(self) -> None:
         # pylint:disable=duplicate-code
         super().__init__(input_size=128,
@@ -47,7 +47,7 @@ class CV2DNNAlign(ExtractPlugin):
         self.model: cv2.dnn.Net
 
     def load_model(self) -> None:
-        """ CV2 DNN Aligner Model already initialized. Return """
+        """Load the CV2 DNN Aligner Model"""
         model = GetModel(model_filename="cnn-facial-landmark_v1.pb", git_model_id=1)
         model_path = model.model_path
         assert isinstance(model_path, str)
@@ -55,17 +55,16 @@ class CV2DNNAlign(ExtractPlugin):
         self.model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Format the ROI faces detection boxes for prediction
+        """Format the ROI faces detection boxes for prediction
 
         Parameters
         ----------
-        batch: :class:`numpy.ndarray`
+        batch
             The batch of face detection bounding boxes as (bs, l, t, r, b)
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The face detection bounding boxes formatted to take an image patch for prediction
+        The face detection bounding boxes formatted to take an image patch for prediction
         """
         heights = batch[..., 3] - batch[..., 1]
         widths = batch[..., 2] - batch[..., 0]
@@ -88,17 +87,16 @@ class CV2DNNAlign(ExtractPlugin):
         return retval
 
     def process(self, batch: np.ndarray) -> np.ndarray:
-        """ Predict the 68 point landmarks
+        """Predict the 68 point landmarks
 
         Parameters
         ----------
-        feed: :class:`numpy.ndarray`
+        feed
             The batch to feed into the aligner
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The predictions from the aligner
+        The predictions from the aligner
         """
         self.model.setInput(batch.transpose((0, 3, 1, 2)))
         return self.model.forward().reshape(batch.shape[0], -1, 2)

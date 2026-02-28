@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import logging
+import typing as T
 
 import numpy as np
 
@@ -51,21 +52,9 @@ class VGGFace2(FacePlugin):
     def load_model(self) -> None:
         """Initialize VGG Face 2 Model."""
         # pylint:disable=duplicate-code
-        self.model = VGGFace2Model()
-        model_path = GetModel("vggface2_resnet50_v3.pth", 10).model_path
-        assert isinstance(model_path, str)
-        weights = torch.load(model_path, map_location=self.device)
-        self.model.load_state_dict(weights)
-        self.model.to(self.device,
-                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        self.model.eval()
-
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            self.model(placeholder)
-        logger.debug("[%s] Loaded model", self.name)
+        weights = GetModel("vggface2_resnet50_v3.pth", 10).model_path
+        assert isinstance(weights, str)
+        self.model = T.cast(VGGFace2Model, self.load_torch_model(VGGFace2Model(), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction

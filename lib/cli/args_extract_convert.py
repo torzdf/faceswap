@@ -397,6 +397,14 @@ class ExtractArgs(ExtractConvertArgs):
             "group": _("output"),
             "help": _("Draw landmarks on the ouput faces for debugging purposes.")})
         argument_list.append({
+            "opts": ("-c", "--compile"),
+            "action": "store_true",
+            "default": False,
+            "group": _("settings"),
+            "help": _("Compile any PyTorch models. This will lead to slower start up time, but "
+                      "faster processing. For large amounts of data this is worth enabling. For "
+                      "smaller extractions it is not.")})
+        argument_list.append({
             "opts": ("-s", "--skip-existing"),
             "action": "store_true",
             "dest": "skip_existing",

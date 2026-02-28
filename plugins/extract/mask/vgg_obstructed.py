@@ -35,21 +35,10 @@ class VGGObstructed(FacePlugin):
 
     def load_model(self) -> None:
         """Initialize the VGGObstructed Mask model."""
-        self.model = VGGObstructedModel()
-        model_path = GetModel("Nirkin_500_softmax_v2.pth", 5).model_path
-        assert isinstance(model_path, str)
-        weights = torch.load(model_path, map_location=self.device)
-        self.model.load_state_dict(weights)
-        self.model.to(self.device,
-                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        self.model.eval()
-
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            self.model(placeholder)
-        logger.debug("[%s] Loaded model", self.name)
+        weights = GetModel("Nirkin_500_softmax_v2.pth", 8).model_path
+        assert isinstance(weights, str)
+        self.model = T.cast(VGGObstructedModel, self.load_torch_model(VGGObstructedModel(),
+                                                                      weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction

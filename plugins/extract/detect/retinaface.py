@@ -1,5 +1,5 @@
 #! /usr/env/bin/python3
-""" Retina face detector adapted from: https://github.com/biubug6/Pytorch_Retinaface
+"""Retina face detector adapted from: https://github.com/biubug6/Pytorch_Retinaface
 
 MIT License
 
@@ -48,7 +48,7 @@ if T.TYPE_CHECKING:
 
 
 class RetinaFace(ExtractPlugin):
-    """ RetinaFace detector for face detection """
+    """RetinaFace detector for face detection"""
     def __init__(self) -> None:
         super().__init__(input_size=640,
                          batch_size=cfg.batch_size(),
@@ -66,17 +66,16 @@ class RetinaFace(ExtractPlugin):
 
     def _generate_priors(self, clip: bool = False  # pylint:disable=too-many-locals
                          ) -> npt.NDArray[np.float32]:
-        """ Generate the anchor boxes for the image size
+        """Generate the anchor boxes for the image size
 
         Parameters
         ----------
-        clip : bool, optional
+        clip
             ``True`` to clip the output to 0-1. Default: ``False``
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The pre-computed priors in center-offset form shape: (1, num_priors, 4)
+        The pre-computed priors in center-offset form shape: (1, num_priors, 4)
         """
         steps = [8, 16, 32]
         min_sizes = [[16, 32], [64, 128], [256, 512]]
@@ -100,54 +99,42 @@ class RetinaFace(ExtractPlugin):
         return output[None]
 
     def load_model(self) -> None:
-        """ Initialize RetinaFace Model"""
+        """Initialize RetinaFace Model"""
         backbone = cfg.backbone()
         assert backbone in ("resnet", "mobilenet")
 
         vers = 1 if backbone == "resnet" else 2
-        model_path = GetModel(f"retinaface_v{vers}.pth", 32).model_path
-        assert isinstance(model_path, str)
-        weights = torch.load(model_path, map_location=self.device)
-
-        self.model = RetinaFaceModel(backbone)
-        self.model.load_state_dict(weights)
-        self.model.to(self.device,
-                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        self.model.eval()
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            self.model(placeholder)
+        weights = GetModel(f"retinaface_v{vers}.pth", 32).model_path
+        assert isinstance(weights, str)
+        self.model = T.cast(RetinaFaceModel, self.load_torch_model(RetinaFaceModel(backbone),
+                                                                   weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Compile the detection image(s) for prediction
+        """Compile the detection image(s) for prediction
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             The input batch of images at model input size in the correct color order, dtype and
             scale
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The batch of images ready for feeding the model
+        The batch of images ready for feeding the model
         """
         return (batch - self._average_img).transpose(0, 3, 1, 2)
 
     def process(self, batch: np.ndarray) -> np.ndarray:
-        """ Run model to get predictions
+        """Run model to get predictions
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             A batch of images ready to feed the model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The batch of detection results from the model
+        The batch of detection results from the model
         """
         feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
         retval = np.empty((2,), dtype="object")
@@ -161,16 +148,15 @@ class RetinaFace(ExtractPlugin):
 
         Parameters
         ----------
-        locations : :class:`torch.Tensor`
+        locations
             batch of location predictions from the model filtered by score, Shape:
             [batch_size, filtered_num_priors, 4]
-        priors : :class:`torch.Tensor`
+        priors
             The pre-computed priors filtered by score, Shape: [1, filtered_num_priors, 4]
 
         Returns
         -------
-        :class:`torch.Tensor`
-            decoded bounding box predictions
+        Decoded bounding box predictions
         """
         boxes = np.concatenate([
             self._priors[..., :2] + locations[..., :2] * self._variance[0] * self._priors[..., 2:],
@@ -181,17 +167,16 @@ class RetinaFace(ExtractPlugin):
 
     def _nms(self, boxes: npt.NDArray[np.float32]  # pylint:disable=too-many-locals
              ) -> npt.NDArray[np.float32]:
-        """ Perform Non-Maximum Suppression
+        """Perform Non-Maximum Suppression
 
         Parameters
         ----------
-        boxes : :class:`numpy.ndarray`
+        boxes
             The detection bounding boxes to process
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The final bounding boxes
+        The final bounding boxes
         """
         x1 = boxes[:, 0]
         y1 = boxes[:, 1]
@@ -219,17 +204,16 @@ class RetinaFace(ExtractPlugin):
         return boxes[keep]
 
     def post_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Process the output from the model to bounding boxes
+        """Process the output from the model to bounding boxes
 
         Parameters
         ----------
-        batch: :class:`numpy.ndarray`
+        batch
             The output predictions from the S3FD model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The processed detection bounding box from the model at model input size
+        The processed detection bounding box from the model at model input size
         """
         locs, confidence = batch
         batch_boxes = self._decode(locs) * self.input_size
@@ -260,29 +244,28 @@ def conv_bn(in_channels: int,
             use_relu: bool = False,
             leaky: float = 0.0
             ) -> torch.nn.Sequential:
-    """ Generates a Conv Batch Norm sequential module for RetinaFace
+    """Generates a Conv Batch Norm sequential module for RetinaFace
 
     Parameters
     ----------
-    in_channels : int
+    in_channels
         The number of input channels
-    out_channels : int
+    out_channels
         The number of output channels
-    kernel : int, optional
+    kernel
         The kernel size. Default: 3
-    stride : int, optional
+    stride
         The number of strides. Default: 1
-    padding : int, optional
+    padding
         The padding to apply. Default: 1
-    use_relu : bool, optional
+    use_relu
         ``True`` to use LeakyReLU activation
-    leaky : float, optional
+    leaky
         The negative float value for the LeakyReLU. Default: 0.0
 
     Returns
     -------
-    :class:`torch.nn.Sequential`
-        The built sequential module
+    The built sequential module
     """
     layers = [nn.Conv2d(in_channels, out_channels, kernel, stride, padding, bias=False),
               nn.BatchNorm2d(out_channels)]
@@ -292,23 +275,22 @@ def conv_bn(in_channels: int,
 
 
 def conv_dw(in_channels: int, out_channels: int, stride: int, leaky=0.1) -> torch.nn.Sequential:
-    """ Generates a double Conv Batch Norm sequential module for RetinaFace
+    """Generates a double Conv Batch Norm sequential module for RetinaFace
 
     Parameters
     ----------
-    in_channels : int
+    in_channels
         The number of input channels
-    out_channels : int
+    out_channels
         The number of output channels
-    stride : int, optional
+    stride
         The number of strides. Default: 1
-    leaky : float, optional
+    leaky
         The negative float value for the LeakyReLU. Default: 0.0
 
     Returns
     -------
-    :class:`torch.nn.Sequential`
-        The built sequential module
+    The built sequential module
     """
     return nn.Sequential(
         nn.Conv2d(in_channels, in_channels, 3, stride, 1, groups=in_channels, bias=False),
@@ -348,17 +330,16 @@ class MobileNetV1(nn.Module):
         self.fc = nn.Linear(256, 1000)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through MobileNetV1
+        """Forward pass through MobileNetV1
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The input to MobileNetV1
 
         Returns
         -------
-        :class:`torch.Tensor`
-            The output from MobileNetV1
+        The output from MobileNetV1
         """
         x = self.stage1(inputs)
         x = self.stage2(x)
@@ -373,9 +354,9 @@ class SSH(nn.Module):
 
     Parameters
     ----------
-    in_channels : int
+    in_channels
         The number of input channels
-    out_channels : int
+    out_channels
         The number of output channels
     """
     def __init__(self, in_channels: int, out_channel: int) -> None:
@@ -405,17 +386,16 @@ class SSH(nn.Module):
         self.conv7x7_3 = conv_bn(out_channel // 4, out_channel // 4, stride=1, use_relu=False)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through SSH Module
+        """Forward pass through SSH Module
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The input to the SSH Module
 
         Returns
         -------
-        :class:`torch.Tensor`
-            The output from SSH Module
+        The output from SSH Module
         """
         conv3x3 = self.conv3X3(inputs)
 
@@ -434,9 +414,9 @@ class FPN(nn.Module):
 
     Parameters
     ----------
-    in_channels_list : list[int]
+    in_channels_list
         The number of input channels
-    out_channels : int
+    out_channels
         The number of output channels
     """
     def __init__(self, in_channels_list: list[int], out_channels: int) -> None:
@@ -470,23 +450,22 @@ class FPN(nn.Module):
         self.merge2 = conv_bn(out_channels, out_channels, use_relu=True, leaky=leaky)
 
     def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
-        """ Forward pass through FPN Module
+        """Forward pass through FPN Module
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The input to the FPN Module
 
         Returns
         -------
-        list[:class:`torch.Tensor`]
-            The output from FPN Module
+        The output from FPN Module
         """
-        linputs = list(inputs.values())
+        l_inputs = list(inputs.values())
 
-        output1 = self.output1(linputs[0])
-        output2 = self.output2(linputs[1])
-        output3 = self.output3(linputs[2])
+        output1 = self.output1(l_inputs[0])
+        output2 = self.output2(l_inputs[1])
+        output3 = self.output3(l_inputs[2])
 
         up3 = F.interpolate(output3, size=[output2.size(2), output2.size(3)], mode="nearest")
         output2 = output2 + up3
@@ -503,9 +482,9 @@ class ClassHead(nn.Module):
 
     Parameters
     ----------
-    in_channels : int, optional
+    in_channels
         The number of input channels. Default: 512
-    num_anchors : int, optional
+    num_anchors
         The number of anchors. Default: 3
     """
     def __init__(self, in_channels: int = 512, num_anchors: int = 3) -> None:
@@ -518,17 +497,16 @@ class ClassHead(nn.Module):
                                  padding=0)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through ClassHead Module
+        """Forward pass through ClassHead Module
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The input to the ClassHead Module
 
         Returns
         -------
-        :class:`torch.Tensor`
-            The output from ClassHead Module
+        The output from ClassHead Module
         """
         x = self.conv1x1(inputs)
         x = x.permute(0, 2, 3, 1).contiguous()
@@ -540,9 +518,9 @@ class BboxHead(nn.Module):
 
     Parameters
     ----------
-    in_channels : int, optional
+    in_channels
         The number of input channels. Default: 512
-    num_anchors : int, optional
+    num_anchors
         The number of anchors. Default: 3
     """
     def __init__(self, in_channels: int = 512, num_anchors: int = 3) -> None:
@@ -554,17 +532,16 @@ class BboxHead(nn.Module):
                                  padding=0)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through BboxHead Module
+        """Forward pass through BboxHead Module
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The input to the BboxHead Module
 
         Returns
         -------
-        :class:`torch.Tensor`
-            The output from BboxHead Module
+        The output from BboxHead Module
         """
         x = self.conv1x1(inputs)
         x = x.permute(0, 2, 3, 1).contiguous()
@@ -572,22 +549,22 @@ class BboxHead(nn.Module):
 
 
 class RetinaFaceModel(nn.Module):
-    """ RetinaFace Model
+    """RetinaFace Model
 
     Parameters
     ----------
-    backbone : Literal["mobilenet", "resnet"]
+    backbone
         The backbone to use for RetinaFace
     """
     def __init__(self, backbone: T.Literal["mobilenet", "resnet"]) -> None:
         super().__init__()
-        bbone_cfg = {"mobilenet": {"in_channels": 32,
-                                   "out_channel": 64,
-                                   "return_layers": {'stage1': 1, 'stage2': 2, 'stage3': 3}},
-                     "resnet": {"in_channels": 256,
-                                "out_channel": 256,
-                                'return_layers': {'layer2': 1, 'layer3': 2, 'layer4': 3}}}
-        self._config = bbone_cfg[backbone]
+        b_bone_cfg = {"mobilenet": {"in_channels": 32,
+                                    "out_channel": 64,
+                                    "return_layers": {'stage1': 1, 'stage2': 2, 'stage3': 3}},
+                      "resnet": {"in_channels": 256,
+                                 "out_channel": 256,
+                                 'return_layers': {'layer2': 1, 'layer3': 2, 'layer4': 3}}}
+        self._config = b_bone_cfg[backbone]
         self.body = tv_utils.IntermediateLayerGetter(
             tv_models.resnet50() if backbone == "resnet" else MobileNetV1(),
             self._config["return_layers"]
@@ -611,62 +588,59 @@ class RetinaFaceModel(nn.Module):
 
     def _make_class_head(self, fpn_num: int = 3, in_channels: int = 64, anchor_num: int = 2
                          ) -> torch.nn.ModuleList:
-        """ Make the Class Head for RetinaFace
+        """Make the Class Head for RetinaFace
 
         Parameters
         ----------
-        fpn_num : int, optional
+        fpn_num
             The number of FPN modules. Default: 3
-        in_channels : int, optional
+        in_channels
             The number of input channels. Default: 64
-        num_anchors : int, optional
+        num_anchors
             The number of anchors. Default: 2
 
         Returns
         -------
-        :class:`torch.nn.ModuleList`
-            The Class Head module list
+        The Class Head module list
         """
-        classhead = nn.ModuleList()
+        class_head = nn.ModuleList()
         for _ in range(fpn_num):
-            classhead.append(ClassHead(in_channels, anchor_num))
-        return classhead
+            class_head.append(ClassHead(in_channels, anchor_num))
+        return class_head
 
     def _make_bbox_head(self, fpn_num: int = 3, in_channels: int = 64, anchor_num: int = 2
                         ) -> torch.nn.ModuleList:
-        """ Make the Bounding Box Head for RetinaFace
+        """Make the Bounding Box Head for RetinaFace
 
         Parameters
         ----------
-        fpn_num : int, optional
+        fpn_num
             The number of FPN modules. Default: 3
-        in_channels : int, optional
+        in_channels
             The number of input channels. Default: 64
-        num_anchors : int, optional
+        num_anchors
             The number of anchors. Default: 2
 
         Returns
         -------
-        :class:`torch.nn.ModuleList`
-            The Bounding Box Head module list
+        The Bounding Box Head module list
         """
-        bboxhead = nn.ModuleList()
+        bbox_head = nn.ModuleList()
         for _ in range(fpn_num):
-            bboxhead.append(BboxHead(in_channels, anchor_num))
-        return bboxhead
+            bbox_head.append(BboxHead(in_channels, anchor_num))
+        return bbox_head
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """ Forward pass through RetinaFace
+        """Forward pass through RetinaFace
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The input to the RetinaFace Module
 
         Returns
         -------
-        tuple[:class:`torch.Tensor`, :class:`torch.Tensor`]
-            The output from RetinaFace Module
+        The output from RetinaFace Module
         """
         out = self.body(inputs)
 

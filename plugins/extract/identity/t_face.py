@@ -47,23 +47,10 @@ class TFace(FacePlugin):
         model = ir_50 if self._backbone == "ir-50" else ir_101
         vers = 1 if self._backbone == "ir-50" else 2
 
-        model_path = GetModel(f"tface_v{vers}.pth", 33).model_path
-        assert isinstance(model_path, str)
-        weights = torch.load(model_path, map_location=self.device)
-
+        weights = GetModel(f"tface_v{vers}.pth", 33).model_path
+        assert isinstance(weights, str)
         assert self.input_size == 112
-        self.model = model(self.input_size)
-        self.model.load_state_dict(weights)
-        self.model.to(self.device,
-                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        self.model.eval()
-
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            self.model(placeholder)
-        logger.debug("[%s] Loaded model", self.name)
+        self.model = T.cast("IRNet", self.load_torch_model(model(self.input_size), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction
@@ -100,7 +87,7 @@ class TFace(FacePlugin):
 __all__ = get_module_objects(__name__)
 
 
-# LICENCE
+# LICENSE
 """
 Copyright (C) 2025 Tencent.  All rights reserved.
 

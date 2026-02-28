@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" S3FD Face detection plugin
+"""S3FD Face detection plugin
 https://arxiv.org/abs/1708.05237
 
 Adapted from S3FD Port in FAN:
@@ -7,6 +7,7 @@ https://github.com/1adrianb/face-alignment
 """
 from __future__ import annotations
 import logging
+import typing as T
 
 import numpy as np
 
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class S3FD(ExtractPlugin):
-    """ S3FD detector for face detection """
+    """S3FD detector for face detection"""
     def __init__(self) -> None:
         super().__init__(input_size=640,
                          batch_size=cfg.batch_size(),
@@ -37,12 +38,11 @@ class S3FD(ExtractPlugin):
         self._confidence = cfg.confidence() / 100
 
     def _get_weights_path(self) -> str:
-        """ Download the weights, if required, and return the path to the weights files
+        """Download the weights, if required, and return the path to the weights files
 
         Returns
         -------
-        str
-            The path to the downloaded S3FD weights file
+        The path to the downloaded S3FD weights file
         """
         model = GetModel(model_filename="s3fd_torch_v3.pth", git_model_id=11)
         model_path = model.model_path
@@ -50,62 +50,47 @@ class S3FD(ExtractPlugin):
         return model_path
 
     def load_model(self) -> None:
-        """ Load the S3FD Model"""
-        model_path = GetModel(model_filename="s3fd_torch_v3.pth", git_model_id=11).model_path
-        assert isinstance(model_path, str)
-        weights = torch.load(self._model_path, map_location=self.device)
-        self.model = S3FDModel()
-        self.model.load_state_dict(weights)
-        self.model.to(self.device,
-                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        self.model.eval()
-
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            self.model(placeholder)
-
-        logger.debug("[%s] Loaded model", self.name)
+        """Load the S3FD Model"""
+        weights = GetModel(model_filename="s3fd_torch_v3.pth", git_model_id=11).model_path
+        assert isinstance(weights, str)
+        self.model = T.cast(S3FDModel, self.load_torch_model(S3FDModel(), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Compile the detection image(s) for prediction
+        """Compile the detection image(s) for prediction
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             The input batch of images at model input size in the correct color order, dtype and
             scale
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The batch of images ready for feeding the model
+        The batch of images ready for feeding the model
         """
         return (batch - self._average_img).transpose(0, 3, 1, 2)
 
     def process(self, batch: np.ndarray) -> np.ndarray:
-        """ Run model to get predictions
+        """Run model to get predictions
 
         Parameters
         ----------
-        batch : :class:`numpy.ndarray`
+        batch
             A batch of images ready to feed the model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The batch of detection results from the model
+        The batch of detection results from the model
         """
         feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
         with torch.inference_mode():
             outputs = self.model(feed)
         for i in range(len(outputs) // 2):
             outputs[i * 2] = F.softmax(outputs[i * 2], dim=1)
-        preds = [pred.cpu().numpy() for pred in outputs]
+        result = [pred.cpu().numpy() for pred in outputs]
 
-        retval = np.empty(len(preds), dtype=object)
-        retval[:] = preds
+        retval = np.empty(len(result), dtype=object)
+        retval[:] = result
         return retval
 
     @staticmethod
@@ -115,15 +100,14 @@ class S3FD(ExtractPlugin):
 
         Parameters
         ----------
-        location: tensor
+        location
             location predictions for location layers,
-        priors: tensor
+        priors
             Prior boxes in center-offset form.
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            decoded bounding box predictions
+        Decoded bounding box predictions
         """
         variances = [0.1, 0.2]
         boxes = np.concatenate((priors[:, :2] + location[:, :2] * variances[0] * priors[:, 2:],
@@ -133,75 +117,72 @@ class S3FD(ExtractPlugin):
         return boxes
 
     def _process_bbox(self,  # pylint:disable=too-many-locals
-                      ocls: np.ndarray,
-                      oreg: np.ndarray,
+                      o_cls: np.ndarray,
+                      o_reg: np.ndarray,
                       stride: int) -> list[list[np.ndarray]]:
-        """ Process a bounding box
+        """Process a bounding box
 
         Parameters
         ----------
-        ocls : :class:`np.ndarray`
+        o_cls
             The class outputs from S3FD
-        oreg : :class:`np.ndarray`
+        o_reg
             The reg outputs from S3FD
-        stride : int
+        stride
             The stride to use
 
         Returns
         -------
-        list[list[:class:`numpy.ndarray`]]
-            The bounding boxes with scores
+        The bounding boxes with scores
         """
         retval = []
-        for _, h_idx, w_idx in zip(*np.where(ocls[:, 1, :, :] > 0.05)):
+        for _, h_idx, w_idx in zip(*np.where(o_cls[:, 1, :, :] > 0.05)):
             axc, ayc = stride / 2 + w_idx * stride, stride / 2 + h_idx * stride
-            score = ocls[0, 1, h_idx, w_idx]
+            score = o_cls[0, 1, h_idx, w_idx]
             if score < self._confidence:
                 continue
-            loc = oreg[:, :, h_idx, w_idx].copy()
+            loc = o_reg[:, :, h_idx, w_idx].copy()
             priors = np.array([[axc / 1.0, ayc / 1.0, stride * 4 / 1.0, stride * 4 / 1.0]])
             box = self.decode(loc, priors)
             x_1, y_1, x_2, y_2 = box[0] * 1.0
             retval.append([x_1, y_1, x_2, y_2, score])
         return retval
 
-    def _post_process(self, bboxlist: list[np.ndarray]) -> np.ndarray:
-        """ Perform post processing on output
+    def _post_process(self, bbox_list: list[np.ndarray]) -> np.ndarray:
+        """Perform post processing on output
 
         Parameters
         ----------
-        bboxlist : list[:class:`numpy.ndarray`]
+        bbox_list
             The class and reg outputs from the S3FD model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The [N, left, top, right, bottom, score] bounding boxes from the model
+        The [N, left, top, right, bottom, score] bounding boxes from the model
         """
         retval = []
-        for i in range(len(bboxlist) // 2):
-            ocls, oreg = bboxlist[i * 2], bboxlist[i * 2 + 1]
+        for i in range(len(bbox_list) // 2):
+            o_cls, o_reg = bbox_list[i * 2], bbox_list[i * 2 + 1]
             stride = 2 ** (i + 2)    # 4,8,16,32,64,128
-            retval.extend(self._process_bbox(ocls, oreg, stride))
+            retval.extend(self._process_bbox(o_cls, o_reg, stride))
 
         return_numpy = np.array(retval) if len(retval) != 0 else np.zeros((1, 5))
         return return_numpy
 
     @staticmethod
     def _nms(boxes: np.ndarray, threshold: float) -> np.ndarray:
-        """ Perform Non-Maximum Suppression
+        """Perform Non-Maximum Suppression
 
         Parameters
         ----------
-        boxes : :class:`numpy.ndarray`
+        boxes
             The detection bounding boxes to process
-        threshold: float
+        threshold
             The threshold to accept boxes
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The final bounding boxes
+        The final bounding boxes
         """
         retained_box_indices = []
 
@@ -229,25 +210,24 @@ class S3FD(ExtractPlugin):
         return boxes[retained_box_indices]
 
     def post_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Process the output from the model to bounding boxes
+        """Process the output from the model to bounding boxes
 
         Parameters
         ----------
-        batch: :class:`numpy.ndarray`
+        batch
             The output predictions from the S3FD model
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The processed detection bounding box from the model at model input size
+        The processed detection bounding box from the model at model input size
         """
         ret = []
         batch_size = range(batch[0].shape[0])
         for img in batch_size:
-            bboxlist = [scale[img:img+1] for scale in batch]
-            boxes = self._post_process(bboxlist)
-            finallist = self._nms(boxes, 0.5)
-            ret.append(finallist[..., :4])
+            bbox_list = [scale[img:img+1] for scale in batch]
+            boxes = self._post_process(bbox_list)
+            final_list = self._nms(boxes, 0.5)
+            ret.append(final_list[..., :4])
         retval = np.empty(len(ret), dtype=object)
         retval[:] = ret
         return retval
@@ -257,13 +237,13 @@ class S3FD(ExtractPlugin):
 # S3FD Net
 ################################################################################
 class L2Norm(nn.Module):
-    """ L2 Normalization layer for S3FD.
+    """L2 Normalization layer for S3FD.
 
     Parameters
     ----------
-    n_channels : int
+    n_channels
         The number of channels to normalize
-    scale : float, optional
+    scale
         The scaling for initial weights. Default: `1.0`
     """
     def __init__(self, n_channels: int, scale: float) -> None:
@@ -273,26 +253,25 @@ class L2Norm(nn.Module):
         self.eps = 1e-10
         self.weight = nn.Parameter(torch.Tensor(self.n_channels))
 
-    def forward(self, x: torch.Tensor):
-        """ Call the L2 Normalization Layer.
+    def forward(self, inputs: torch.Tensor):
+        """Call the L2 Normalization Layer.
 
         Parameters
         ----------
-        x: :class:`torch.Tensor`
+        inputs
             The input to the L2 Normalization Layer
 
         Returns
         -------
-        :class:`torch.Tensor`:
-            The output from the L2 Normalization Layer
+        The output from the L2 Normalization Layer
         """
-        norm = x.pow(2).sum(dim=1, keepdim=True).sqrt() + self.eps
-        x = x / norm * self.weight.view(1, -1, 1, 1)
+        norm = inputs.pow(2).sum(dim=1, keepdim=True).sqrt() + self.eps
+        x = inputs / norm * self.weight.view(1, -1, 1, 1)
         return x
 
 
 class S3FDModel(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """ The S3FD Model, adapted from https://github.com/1adrianb/face-alignment"""
+    """The S3FD Model, adapted from https://github.com/1adrianb/face-alignment"""
     def __init__(self) -> None:
         super().__init__()
         self.conv1_1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
@@ -342,17 +321,16 @@ class S3FDModel(nn.Module):  # pylint:disable=too-many-instance-attributes
 
     def forward(self,  # pylint:disable=too-many-locals
                 inputs: torch.Tensor) -> list[torch.Tensor]:
-        """ Run the forward pass through S3FD
+        """Run the forward pass through S3FD
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             The (N, C, H, W) batch of images to process
 
         Returns
         -------
-        list[:class:`torch.Tensor`]
-            The predictions from the S3FD model
+        The predictions from the S3FD model
         """
         h = F.relu(self.conv1_1(inputs), inplace=True)
         h = F.relu(self.conv1_2(h), inplace=True)
@@ -409,8 +387,8 @@ class S3FDModel(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         # max-out background label
         chunk = torch.chunk(cls1, 4, 1)
-        bmax = torch.max(torch.max(chunk[0], chunk[1]), chunk[2])
-        cls1 = torch.cat([bmax, chunk[3]], dim=1)
+        b_max = torch.max(torch.max(chunk[0], chunk[1]), chunk[2])
+        cls1 = torch.cat([b_max, chunk[3]], dim=1)
 
         return [cls1, reg1, cls2, reg2, cls3, reg3, cls4, reg4, cls5, reg5, cls6, reg6]
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-""" Facial landmarks extractor for faceswap.py
-    Code adapted and modified from:
-    https://github.com/1adrianb/face-alignment
+"""Facial landmarks extractor for faceswap.py
+   Code adapted and modified from:
+   https://github.com/1adrianb/face-alignment
 """
 from __future__ import annotations
 import logging
+import typing as T
 
 import numpy as np
 
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class FAN(ExtractPlugin):
-    """ FAN Face alignment """
+    """FAN Face alignment"""
     def __init__(self) -> None:
         super().__init__(input_size=256,
                          batch_size=cfg.batch_size(),
@@ -33,39 +34,28 @@ class FAN(ExtractPlugin):
         self._reference_scale = 200. / 195.
 
     def load_model(self):
-        """ Load the FAN model """
-        model_path = GetModel("face-alignment-network_2d4_v4.pth", 13).model_path
-        assert isinstance(model_path, str)
-        self.model = FaceAlignmentNetwork(num_stack=4,
-                                          num_modules=1,
-                                          hg_depth=4,
-                                          num_features=256,
-                                          num_classes=68)
-        weights = torch.load(model_path, map_location=self.device)
-        self.model.load_state_dict(weights)
-        self.model.to(self.device,
-                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        self.model.eval()
-
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            self.model(placeholder)
-        logger.debug("[%s] Loaded model", self.name)
+        """Load the FAN model"""
+        weights = GetModel("face-alignment-network_2d4_v4.pth", 13).model_path
+        assert isinstance(weights, str)
+        self.model = T.cast(FaceAlignmentNetwork,
+                            self.load_torch_model(FaceAlignmentNetwork(num_stack=4,
+                                                                       num_modules=1,
+                                                                       hg_depth=4,
+                                                                       num_features=256,
+                                                                       num_classes=68),
+                                                  weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
-        """ Format the ROI faces detection boxes for prediction
+        """Format the ROI faces detection boxes for prediction
 
         Parameters
         ----------
-        batch: :class:`numpy.ndarray`
+        batch
             The batch of face detection bounding boxes as (bs, l, t, r, b)
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The face detection bounding boxes formatted to take an image patch for prediction
+        The face detection bounding boxes formatted to take an image patch for prediction
         """
         heights = batch[:, 3] - batch[:, 1]
         widths = batch[:, 2] - batch[:, 0]
@@ -84,17 +74,16 @@ class FAN(ExtractPlugin):
         return retval
 
     def process(self, batch: np.ndarray) -> np.ndarray:
-        """ Predict the 68 point landmarks
+        """Predict the 68 point landmarks
 
         Parameters
         ----------
-        batch: :class:`numpy.ndarray`
+        batch
             The batch to feed into the aligner
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The predictions from the aligner
+        The predictions from the aligner
         """
         feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device,
                                                                 memory_format=torch.channels_last)
@@ -103,17 +92,16 @@ class FAN(ExtractPlugin):
         return retval
 
     def post_process(self, batch: np.ndarray) -> np.ndarray:  # pylint:disable=too-many-locals
-        """ Process the output from the model
+        """Process the output from the model
 
         Parameters
         ----------
-        batch: :class:`numpy.ndarray`
+        batch
             The predictions from the aligner
 
         Returns
         -------
-        :class:`numpy.ndarray`
-            The final landmarks in model space
+        The final landmarks in model space
         """
         num_images, num_landmarks, height, width = batch.shape
         assert height == width, "Heatmaps must be square"
@@ -149,13 +137,13 @@ class FAN(ExtractPlugin):
 
 
 class ConvBlock(nn.Module):
-    """ Convolution block for FAN
+    """Convolution block for FAN
 
     Parameters
     ----------
-    num_in : int
+    num_in
         The number of in channels
-    num_out : int
+    num_out
         The number of out channels
     """
     def __init__(self, num_in: int, num_out: int) -> None:
@@ -173,17 +161,16 @@ class ConvBlock(nn.Module):
                                             nn.Conv2d(num_in, num_out, 1, stride=1, bias=False))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through FAN's conv block
+        """Forward pass through FAN's conv block
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             Input to the conv block
 
         Returns
         -------
-        :class:`torch.Tensor`
-            Output from the conv block
+        Output from the conv block
         """
         residual = inputs if self.downsample is None else self.downsample(inputs)
         var_x = self.conv1(F.relu(self.bn1(inputs), inplace=True))
@@ -194,15 +181,15 @@ class ConvBlock(nn.Module):
 
 
 class HourGlass(nn.Module):
-    """ Hour-glass module for FAN
+    """Hour-glass module for FAN
 
     Parameters
     ----------
-    num_modules : int
+    num_modules
         The number of modules in the hour-glass network
-    depth : int
+    depth
         The depth of the hour-glass network
-    num_features : int
+    num_features
         The number of features to generate
     """
     def __init__(self, num_modules: int, depth: int, num_features: int) -> None:
@@ -213,11 +200,11 @@ class HourGlass(nn.Module):
         self._generate_network(depth)
 
     def _generate_network(self, level: int) -> None:
-        """ Recursively generate the hour-glass network
+        """Recursively generate the hour-glass network
 
         Parameters
         ----------
-        level : int
+        level
             The depth of the hour-glass network
         """
         for i in range(self._num_modules):
@@ -236,17 +223,16 @@ class HourGlass(nn.Module):
             self.add_module(f"b3_{level}_{i}", ConvBlock(self._num_features, self._num_features))
 
     def _forward(self, level: int, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through FAN's hour-glass network
+        """Forward pass through FAN's hour-glass network
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             Input to the hour-glass network
 
         Returns
         -------
-        :class:`torch.Tensor`
-            Output from the hour-glass network
+        Output from the hour-glass network
         """
         up1 = inputs
         for i in range(self._num_modules):
@@ -271,23 +257,22 @@ class HourGlass(nn.Module):
         return up1 + up2
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through FAN's hour-glass network
+        """Forward pass through FAN's hour-glass network
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             Input to the hour-glass network
 
         Returns
         -------
-        :class:`torch.Tensor`
-            Output from the hour-glass network
+        Output from the hour-glass network
         """
         return self._forward(self._depth, inputs)
 
 
 class FaceAlignmentNetwork(nn.Module):
-    """ 2D FAN alignment for faceswap"""
+    """2D FAN alignment for faceswap"""
     def __init__(self,
                  num_stack: int = 4,
                  num_modules: int = 1,
@@ -318,17 +303,16 @@ class FaceAlignmentNetwork(nn.Module):
             self.add_module(f"al{i}", nn.Conv2d(num_classes, num_features, 1))
 
     def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
-        """ Forward pass through FAN face alignment
+        """Forward pass through FAN face alignment
 
         Parameters
         ----------
-        inputs : :class:`torch.Tensor`
+        inputs
             Input to FAN
 
         Returns
         -------
-        list[:class:`torch.Tensor`]
-            Output from FAN
+        Output from FAN
         """
         var_x = F.relu(self.bn1(self.conv1(inputs)), inplace=True)
         var_x = F.avg_pool2d(self.conv2(var_x), 2, stride=2)  # pylint:disable=not-callable

@@ -33,6 +33,7 @@ if T.TYPE_CHECKING:
     from plugins.extract.base import FacePlugin
 
 logger = logging.getLogger(__name__)
+# TODO oversized batch when passthrough with lots of detections
 
 
 _PLUGIN_REGISTER: dict[str, list[ExtractRunner]] = {}
@@ -59,10 +60,15 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
     ----------
     plugin
         The name of the plugin that this runner is to use
+    compile_model
+        ``True`` to compile any PyTorch models
     config_file
         Full path to a custom config file to load. ``None`` for default config
     """
-    def __init__(self, plugin: str, config_file: str | None = None) -> None:
+    def __init__(self,
+                 plugin: str,
+                 compile_model: bool = False,
+                 config_file: str | None = None) -> None:
         self._plugin_type: T.Literal["detect",
                                      "align",
                                      "mask",
@@ -79,6 +85,7 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
             self._plugin_name = plugin
             return
         self._plugin = PluginLoader.get_extractor(self._plugin_type, plugin)
+        self._plugin.compile = compile_model
         self._plugin_name = self._plugin.name
         self._dtype = self._plugin.dtype.lower()
         self._overridden = {method: self._is_overridden(method)
@@ -120,7 +127,7 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
         return plugin_type
 
     def _is_overridden(self, method_name: str) -> bool:
-        """Test if a plugin method's method has been overriden
+        """Test if a plugin method's method has been overridden
 
         Parameters
         ----------
@@ -129,7 +136,7 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
 
         Returns
         -------
-        ``True`` if the plugin has overriden the given method
+        ``True`` if the plugin has overridden the given method
         """
         assert self._plugin_type != "dummy"
         plugin_class = type(self._plugin)
@@ -137,7 +144,7 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
             method_name in plugin_class.__dict__
             and plugin_class.__dict__[method_name] is not ExtractPlugin.__dict__.get(method_name)
             )
-        logger.debug("[%s] Overriden method '%s': %s", self._plugin_name, method_name, retval)
+        logger.debug("[%s] Overridden method '%s': %s", self._plugin_name, method_name, retval)
         return retval
 
     def _get_threads(self) -> PluginThreads:
@@ -187,7 +194,7 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
         for the plugin.
 
         If this is a subsequent plugin, then an InboundIterator will be returned, which takes
-        already batched data from the previous plugin and rebatches for the current plugin
+        already batched data from the previous plugin and re-batches for the current plugin
 
         Returns
         -------
@@ -361,27 +368,61 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
 
     @abc.abstractmethod
     def pre_process(self) -> None:
-        """Override for plugin type runner specific behaviour"""
+        """Override for plugin type runner specific behavior"""
+
+    def _predict(self, feed: np.ndarray) -> np.ndarray:
+        """Obtain a prediction from the plugin
+
+        Parameters
+        ----------
+        feed
+            The batch to feed the model
+
+        Returns
+        -------
+        The prediction from the model
+
+        Raises
+        ------
+        FaceswapError
+            If an OOM occurs
+        """
+        feed_size = feed.shape[0]
+        is_padded = self._plugin.compile and feed_size < self._plugin.batch_size
+        batch_feed = feed
+        if is_padded:  # Prevent model re-compile on undersized batch
+            batch_feed = np.empty((self._plugin.batch_size, *feed.shape[1:]), dtype=feed.dtype)
+            logger.debug("[%s.process] Padding undersized batch of shape %s to %s",
+                         self._plugin.name, feed.shape, batch_feed.shape)
+            batch_feed[:feed_size] = feed
+        try:
+            retval = self._plugin.process(batch_feed)
+        except OutOfMemoryError as err:
+            raise FaceswapError(OOM_MESSAGE) from err
+        if is_padded and retval.dtype == "object":
+            out = np.empty(retval.shape, dtype="object")
+            out[:] = [x[:feed_size] for x in retval]
+            retval = out
+        elif is_padded:
+            retval = retval[:feed_size]
+        return retval
 
     def process(self) -> None:
-        """Peform inference to get results from the plugin and pass the batch to the next process'
+        """Perform inference to get results from the plugin and pass the batch to the next process'
         queue. Override for runner specific processing"""
         process = "process"
         logger.debug("[%s.%s] Loading model", self._plugin_name, process)
         self._plugin.load_model()
         logger.debug("[%s.%s] Starting process", self._plugin_name, process)
         for batch in self._get_data(process):
-            try:
-                batch.data = self._plugin.process(batch.data)
-            except OutOfMemoryError as err:
-                raise FaceswapError(OOM_MESSAGE) from err
+            batch.data = self._predict(batch.data)
             self._put_data(process, batch)
         logger.debug("[%s.%s] Finished process", self._plugin_name, process)
         self._put_data(process, ExtractSignal.SHUTDOWN)
 
     @abc.abstractmethod
     def post_process(self) -> None:
-        """Override for plugin type runner specific behaviour"""
+        """Override for plugin type runner specific behavior"""
 
     def _put_to_input(self, data: ExtractMedia | ExtractorBatch | ExtractSignal) -> None:
         """Put data to the runner's input queue, monitoring for errors
@@ -699,14 +740,19 @@ class ExtractRunnerFace(ExtractRunner, abc.ABC):
     ----------
     plugin
         The name of the plugin that this runner is to use
+    compile_model
+        ``True`` to compile any PyTorch models
     config_file
         Full path to a custom config file to load. ``None`` for default config
     """
     _logged_warning: dict[str, bool] = {"mask": False, "identity": False}
     """Stores whether a warning has been issued for non-68 point landmarks for this plugin type"""
 
-    def __init__(self, plugin: str, config_file: str | None = None) -> None:
-        super().__init__(plugin, config_file=config_file)
+    def __init__(self,
+                 plugin: str,
+                 compile_model: bool = False,
+                 config_file: str | None = None) -> None:
+        super().__init__(plugin, compile_model=compile_model, config_file=config_file)
         self._plugin: FacePlugin
 
         self._input_size = self._plugin.input_size
@@ -787,17 +833,19 @@ class ExtractRunnerFace(ExtractRunner, abc.ABC):
         then the final channel is an ROI mask indicating areas that go out of bounds
         """
         scales = np.hypot(matrices[..., 0, 0], matrices[..., 1, 0])  # Always same x/y scaling
-        interps = np.where(scales > 1.0, cv2.INTER_LINEAR, cv2.INTER_AREA)
+        interpolations = np.where(scales > 1.0, cv2.INTER_LINEAR, cv2.INTER_AREA)
         size = (self._input_size, self._input_size)
         channels = 4 if with_alpha else 3
         retval = np.zeros((len(image_ids), *size, channels), dtype=images[image_ids[0]].dtype)
 
-        for idx, (image_id, mat, interp) in enumerate(zip(image_ids, matrices, interps)):
+        for idx, (image_id, mat, interpolation) in enumerate(zip(image_ids,
+                                                                 matrices,
+                                                                 interpolations)):
             img: np.ndarray = images[image_id]
             if with_alpha:
                 alpha = np.ones((*img.shape[:2], 1), dtype=img.dtype) * 255
                 img = np.concatenate([img, alpha], axis=-1)
-            cv2.warpAffine(img, mat, size, dst=retval[idx], flags=interp)
+            cv2.warpAffine(img, mat, size, dst=retval[idx], flags=interpolation)
         return retval
 
     # Aligned faces as input methods
@@ -823,10 +871,10 @@ class ExtractRunnerFace(ExtractRunner, abc.ABC):
         if in_size == self._input_size:
             return images
 
-        interp = cv2.INTER_AREA if self._input_size < in_size else cv2.INTER_LINEAR
+        interpolation = cv2.INTER_AREA if self._input_size < in_size else cv2.INTER_LINEAR
         out_size = (self._input_size, self._input_size)
         for idx, img in enumerate(images):
-            cv2.resize(img, out_size, dst=destination[idx], interpolation=interp)
+            cv2.resize(img, out_size, dst=destination[idx], interpolation=interpolation)
         return destination
 
     def _get_faces_aligned(self,
@@ -866,130 +914,6 @@ class ExtractRunnerFace(ExtractRunner, abc.ABC):
         offsets = np.rint(delta * base_size + padding_diff).astype("int32")
         imgs = batch_sub_crop(imgs, offsets, out_size)
         return self._batch_resize(imgs, dst)
-
-
-class DummyRunner(ExtractRunner):
-    """A pseudo runner that matches interfaces of a standard ExtractRunner for passing through
-    data when the pipeline is driven entirely by an alignments file (ie: no plugins are being
-    loaded)
-
-    Parameters
-    ----------
-    plugin
-        The name of the plugin that this runner is to use
-    """
-    def __init__(self, plugin: str | None = None) -> None:
-        plugin = "alignments" if plugin is None else plugin
-        super().__init__(plugin)
-
-    def pre_process(self) -> None:
-        """Overriden for Abstract Base Class but unused"""
-        return
-
-    def post_process(self) -> None:
-        """Overriden for Abstract Base Class but unused"""
-        return
-
-    # Hideously C+P'd overload just so typechecker doesn't complain
-    @T.overload
-    def put(self,
-            filename: str,
-            image: npt.NDArray[np.uint8],
-            detected_faces: list[DetectedFace] | None = None,
-            source: str | None = None,
-            is_aligned: bool = False,
-            frame_metadata: PNGHeaderSourceDict | None = None,
-            passthrough: T.Literal[False] = False) -> None: ...
-
-    @T.overload
-    def put(self,  # pylint:disable=arguments-differ
-            filename: str,
-            image: npt.NDArray[np.uint8],
-            detected_faces: list[DetectedFace] | None = None,
-            source: str | None = None,
-            is_aligned: bool = False,
-            frame_metadata: PNGHeaderSourceDict | None = None,
-            *,
-            passthrough: T.Literal[True]) -> ExtractMedia: ...
-
-    def put(self,
-            filename: str,
-            image: npt.NDArray[np.uint8],
-            detected_faces: list[DetectedFace] | None = None,
-            source: str | None = None,
-            is_aligned: bool = False,
-            frame_metadata: PNGHeaderSourceDict | None = None,
-            passthrough: bool = False) -> None | ExtractMedia:
-        """Put a frame into the dummy runner.
-
-        Parameters
-        ----------
-        filename
-            The filename of the frame
-        image
-            The loaded frame as UINT8 BGR array
-        source
-            The full path to the source folder or video file. Default: ``None`` (Not provided)
-        detected_faces
-            The detected face objects for the frame. ``None`` if not any. This cannot be ``None``
-            for dummy runners. Default: ``None``
-        is_aligned
-            ``True`` if the image being passed into the pipeline is an aligned faceswap face.
-            Default: ``False``
-        frame_metadata
-            If the image is aligned then the original frame metadata can be added here. Some
-            plugins (eg: mask) require this to be populated for aligned inputs. Default: ``None``
-        passthrough
-            ``True`` if this item is meant to be passed straight through the extraction pipeline
-            with no caching, for immediate return. Default: ``False``
-
-        Returns
-        -------
-        If passthrough is ``True`` returns the output ExtractMedia object, otherwise ``None``
-
-        Raises
-        ------
-        AssertionError
-            If no detected faces are provided
-        """
-        assert detected_faces is not None
-        super().put(filename,
-                    image,
-                    detected_faces=detected_faces,
-                    source=source,
-                    is_aligned=is_aligned,
-                    frame_metadata=frame_metadata,
-                    passthrough=passthrough)
-
-    def put_direct(self,
-                   filename: str,
-                   image: npt.NDArray[np.uint8],
-                   detected_faces: list[DetectedFace],
-                   is_aligned: bool = False,
-                   frame_size: tuple[int, int] | None = None) -> ExtractorBatch:
-        # This makes no sense for a dummy runner so raise not implemented
-        raise NotImplementedError
-
-    def __next__(self) -> ExtractMedia:
-        """Obtain the next item from the plugin's output
-
-        Returns
-        -------
-        The media object with populated detected faces for a frame
-        """
-        while True:
-            try:
-                retval = self._queues["out"].get(timeout=1)
-            except QueueEmpty:
-                logger.trace("[%s] No item available",  # type:ignore[attr-defined]
-                             self.__class__.__name__)
-                continue
-            if isinstance(retval, ExtractMedia):
-                return retval
-            if retval == ExtractSignal.SHUTDOWN:
-                raise StopIteration
-            if retval == ExtractSignal.FLUSH:
-                continue  # Wait for next job
 
 
 __all__ = get_module_objects(__name__)

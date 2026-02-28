@@ -31,12 +31,17 @@ class Mask(ExtractRunnerFace):
     ----------
     plugin
         The plugin that this runner is to use
+    compile_model
+        ``True`` to compile any PyTorch models
     config_file
         Full path to a custom config file to load. ``None`` for default config
     """
-    def __init__(self, plugin: str, config_file: str | None = None) -> None:
+    def __init__(self,
+                 plugin: str,
+                 compile_model: bool = False,
+                 config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__(plugin, config_file=config_file)
+        super().__init__(plugin, compile_model=compile_model, config_file=config_file)
 
     # Pre-processing
     def _pre_process_aligned(self, batch: ExtractorBatch, matrices: npt.NDArray[np.float32]
@@ -67,17 +72,17 @@ class Mask(ExtractRunnerFace):
                                                           self._aligned_offsets_name))
 
         scales = np.hypot(matrices[..., 0, 0], matrices[..., 1, 0])  # Always same x/y scaling
-        interps = np.where(scales > 1.0, cv2.INTER_LINEAR, cv2.INTER_AREA)
+        interpolations = np.where(scales > 1.0, cv2.INTER_LINEAR, cv2.INTER_AREA)
         size = (self._input_size, self._input_size)
-        for idx, (mat, interp) in enumerate(zip(matrices, interps)):
+        for idx, (mat, interpolation) in enumerate(zip(matrices, interpolations)):
             mask = np.ones((batch.frame_sizes[batch.frame_ids[idx]]), dtype=dtype) * 255
-            retval[idx, :, :, 3] = cv2.warpAffine(mask, mat, size, flags=interp)
+            retval[idx, :, :, 3] = cv2.warpAffine(mask, mat, size, flags=interpolation)
 
         return retval
 
     def pre_process(self) -> None:
         """Obtain the aligned face images at the requested size, centering and image format.
-        Peform any plugin specific pre-processing"""
+        Perform any plugin specific pre-processing"""
         process = "pre_process"
         logger.debug("[%s.%s] Starting process", self._plugin.name, process)
         for batch in self._get_data(process):

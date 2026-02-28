@@ -38,13 +38,18 @@ class Identity(ExtractRunnerFace):
         The plugin that this runner is to use
     filter_threshold
         The threshold to use when filtering faces by identity. Default: 0.4
+    compile_model
+        ``True`` to compile any PyTorch models
     config_file
         Full path to a custom config file to load. ``None`` for default config
     """
-    def __init__(self, plugin: str, threshold: float = 0.4, config_file: str | None = None
-                 ) -> None:
+    def __init__(self,
+                 plugin: str,
+                 threshold: float = 0.4,
+                 compile_model: bool = False,
+                 config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__(plugin, config_file=config_file)
+        super().__init__(plugin, compile_model=compile_model, config_file=config_file)
         self._filter = IdentityFilter(threshold, self.storage_name)
 
     def __repr__(self) -> str:
@@ -175,9 +180,9 @@ class IdentityFilter:
             logger.info("[Identity filter] %s", ", ".join(counts))
 
     @classmethod
-    def _find_cosine_similiarity(cls,
-                                 source: npt.NDArray[np.float32],
-                                 batch: npt.NDArray[np.float32]) -> npt.NDArray[np.float64]:
+    def _find_cosine_similarity(cls,
+                                source: npt.NDArray[np.float32],
+                                batch: npt.NDArray[np.float32]) -> npt.NDArray[np.float64]:
         """Find the cosine similarity between a source face identity and a test face identity
 
         Parameters
@@ -208,11 +213,11 @@ class IdentityFilter:
             return
         identities = batch.identities[self._plugin_name]
         mask = np.empty((self._active_count, batch.bboxes.shape[0]), dtype="bool")
-        for idx, ftype in enumerate(sorted(self._active)):
-            similarities = self._find_cosine_similiarity(self._filters[ftype], identities)
+        for idx, f_type in enumerate(sorted(self._active)):
+            similarities = self._find_cosine_similarity(self._filters[f_type], identities)
             matches = np.any(similarities >= self.threshold, axis=1)
-            mask[idx] = ~matches if ftype == "nfilter" else matches
-            self._counts[ftype] += int(np.sum(~mask[idx]))
+            mask[idx] = ~matches if f_type == "nfilter" else matches
+            self._counts[f_type] += int(np.sum(~mask[idx]))
 
         if np.all(mask):
             return
@@ -237,7 +242,7 @@ class FilterLoader:
         The list of full paths to the files to use for filtering. Default: ``None`` (don't use
         filter)
     nfilter_files
-        The list of full paths to the files to use for nfiltering. Default: ``None`` (don't use
+        The list of full paths to the files to use to nfilter. Default: ``None`` (don't use
         nfilter)
     """
     def __init__(self,
@@ -434,7 +439,7 @@ class FilterLoader:
                     continue
                 if embed.ndim != 1 and not is_filter:
                     logger.warning("%s file '%s' contains %s detected faces. All of "
-                                   "these identies will be used",
+                                   "these identities will be used",
                                    name, os.path.basename(fname), embed.shape[0])
                     collated.extend(list(embed))
                     continue
@@ -460,8 +465,8 @@ class FilterLoader:
         aligned: dict[str, tuple[PNGHeaderDict, npt.NDArray[np.uint8]]] = {}
 
         for filepath in self._filter_files.union(self._nfilter_files):
-            with open(filepath, "rb") as infile:
-                raw_image = infile.read()
+            with open(filepath, "rb") as in_file:
+                raw_image = in_file.read()
 
             meta = self._get_meta(filepath, raw_image)
             if meta is not None:

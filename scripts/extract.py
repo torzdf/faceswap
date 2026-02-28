@@ -18,8 +18,8 @@ from tqdm import tqdm
 from lib.align.aligned_utils import get_centered_size
 from lib.align.detected_face import DetectedFace
 from lib.infer import Detect, Align, Identity, Mask
+from lib.infer import DummyRunner
 from lib.infer.identity import FilterLoader
-from lib.infer.runner import DummyRunner
 from lib.infer.objects import ExtractMedia
 from lib.image import (encode_image, generate_thumbnail, ImagesLoader, ImagesSaver)
 from lib.logger import parse_class_init
@@ -36,6 +36,7 @@ if T.TYPE_CHECKING:
     from lib.infer.runner import ExtractRunner
 
 logger = logging.getLogger(__name__)
+# TODO ctrl-c
 
 
 @dataclass
@@ -272,6 +273,7 @@ class Extract:
                                 rotation=arguments.rotate_images,
                                 min_size=arguments.min_size,
                                 max_size=arguments.max_size,
+                                compile_model=arguments.compile,
                                 config_file=conf_file)(retval)
             if arguments.aligner != "file":
                 retval = Align(arguments.aligner,
@@ -279,14 +281,18 @@ class Extract:
                                re_align=arguments.re_align,
                                normalization=arguments.normalization,
                                filters=arguments.align_filters,
+                               compile_model=arguments.compile,
                                config_file=conf_file)(retval)
             if arguments.masker is not None:
                 for masker in arguments.masker:
-                    retval = Mask(masker, config_file=conf_file)(retval)
+                    retval = Mask(masker,
+                                  compile_model=arguments.compile,
+                                  config_file=conf_file)(retval)
             if arguments.identity:
                 for idx, identity in enumerate(arguments.identity):
                     retval = Identity(identity,
                                       self._face_filter.threshold,
+                                      compile_model=arguments.compile,
                                       config_file=conf_file)(retval)
                     if self._face_filter.enabled and idx == 0:
                         # Add the first selected identity plugin

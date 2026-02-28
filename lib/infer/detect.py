@@ -8,19 +8,18 @@ import typing as T
 import cv2
 import numpy as np
 import numpy.typing as npt
-from torch import OutOfMemoryError
 
 from lib.logger import format_array, parse_class_init
-from lib.utils import FaceswapError, get_module_objects
+from lib.utils import get_module_objects
 
 from .objects import ExtractorBatch, ExtractSignal
-from .runner import ExtractRunner, OOM_MESSAGE
+from .runner import ExtractRunner
 
 logger = logging.getLogger(__name__)
 
 
 class Detect(ExtractRunner):
-    """Responsible for running Dectection plugins within the extract pipeline
+    """Responsible for running Detection plugins within the extract pipeline
 
     Parameters
     ----------
@@ -35,6 +34,8 @@ class Detect(ExtractRunner):
     max_size
         Maximum percentage of the frame's shortest edge to accept as a successful detection along
         the detection's longest edge Default: `0` (accept all detections)
+    compile_model
+        ``True`` to compile any PyTorch models
     config_file
         Full path to a custom config file to load. ``None`` for default config
     """
@@ -43,9 +44,10 @@ class Detect(ExtractRunner):
                  rotation: str | None = None,
                  min_size: int = 0,
                  max_size: int = 0,
+                 compile_model: bool = False,
                  config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__(plugin, config_file=config_file)
+        super().__init__(plugin, compile_model=compile_model, config_file=config_file)
         self._rotation = rotation
         self._rotator = Rotator(rotation, self._plugin.input_size)
         """Responsible for rotating feed images for the model"""
@@ -117,12 +119,12 @@ class Detect(ExtractRunner):
         """
         retval = np.zeros((len(images), self._plugin.input_size, self._plugin.input_size, 3),
                           dtype=images[0].dtype)
-        interps = np.where(matrices[:, 0, 0] < 1.0, cv2.INTER_AREA, cv2.INTER_CUBIC)
+        interpolators = np.where(matrices[:, 0, 0] < 1.0, cv2.INTER_AREA, cv2.INTER_CUBIC)
         dims = (self._plugin.input_size, self._plugin.input_size)
         warp_mats = matrices[:, :2]
-        for idx, (image, mat, interp) in enumerate(zip(images, warp_mats, interps)):
+        for idx, (image, mat, interpolator) in enumerate(zip(images, warp_mats, interpolators)):
             image = image[..., 2::-1] if self._plugin.is_rgb else image
-            cv2.warpAffine(image, mat, dims, dst=retval[idx], flags=interp)
+            cv2.warpAffine(image, mat, dims, dst=retval[idx], flags=interpolator)
         logger.trace("Resized batch shape: %s", retval.shape)  # type:ignore[attr-defined]
         return retval
 
@@ -131,7 +133,7 @@ class Detect(ExtractRunner):
 
         - Gets the scale and padding to take the batch of images to model input size
         - Formats the image to the correct color order, dtype and scale for the plugin
-        - Peforms any plugin specific pre-processing
+        - Performs any plugin specific pre-processing
         - Sends the prepared batch to the processing process
         """
         process = "pre_process"
@@ -216,19 +218,14 @@ class Detect(ExtractRunner):
                         batch.filenames)
 
                     break
-
-                try:
-                    preds = self._plugin.process(feed)
-                except OutOfMemoryError as err:
-                    raise FaceswapError(OOM_MESSAGE) from err
-
+                result = self._predict(feed)
                 if not self._rotator.enabled:
                     # Not rotating. Do post-processing in next thread
-                    boxes = preds
+                    boxes = result
                     break
 
                 # We are rotating, so we have to do post-processing here, to re-feed model
-                self._process_rotations(preds, mask_requires, indices_angle, box_list, idx)
+                self._process_rotations(result, mask_requires, indices_angle, box_list, idx)
                 if not np.any(mask_requires):
                     logger.trace(  # type:ignore[attr-defined]
                         "[%s.%s] Found faces for all %s images after %s rotations: %s",
@@ -274,11 +271,11 @@ class Detect(ExtractRunner):
             batch.frame_ids = np.empty((0, ), dtype="int32")
             return self._empty_bbox
 
-        preds = [p for p, v in zip(predictions, valid) if v]
-        lengths = np.fromiter((a.shape[0] for a in preds), dtype="int32")
+        result = [p for p, v in zip(predictions, valid) if v]
+        lengths = np.fromiter((a.shape[0] for a in result), dtype="int32")
         batch.frame_ids = np.repeat(np.arange(len(lengths)), lengths).astype("int32")
 
-        return np.vstack(T.cast(T.Sequence, preds)).astype("float32")
+        return np.vstack(T.cast(T.Sequence, result)).astype("float32")
 
     def _scale_boxes(self, batch: ExtractorBatch, predictions: npt.NDArray[np.float32]) -> None:
         """Scale the detected faces back out to original image size, round to int and add to the
@@ -322,11 +319,11 @@ class Detect(ExtractRunner):
 
         mins = (frames * self._min_size).astype("int32")[batch.frame_ids]
         if self._max_size:
-            maxs = (frames * self._max_size).astype("int32")[batch.frame_ids]
+            maxes = (frames * self._max_size).astype("int32")[batch.frame_ids]
         else:
-            maxs = sizes
+            maxes = sizes
 
-        keep = np.nonzero(np.logical_and(mins <= sizes, maxs >= sizes))[0]
+        keep = np.nonzero(np.logical_and(mins <= sizes, maxes >= sizes))[0]
         if len(keep) == len(sizes):
             return
 
@@ -361,13 +358,13 @@ class Detect(ExtractRunner):
         logger.debug("[%s.%s] Starting process", self._plugin.name, process)
 
         for batch in self._get_data(process):
-            indices_angle, preds = batch.data
+            indices_angle, result = batch.data
             if self._overridden[process] and not self._rotator.enabled:
-                preds = self._plugin.post_process(preds)
+                result = self._plugin.post_process(result)
             else:
-                self._rotator.unrotate(indices_angle, preds)
-            preds = self._stack_boxes(batch, preds)
-            self._scale_boxes(batch, preds)
+                self._rotator.un_rotate(indices_angle, result)
+            result = self._stack_boxes(batch, result)
+            self._scale_boxes(batch, result)
             self._filter_boxes(batch)
             self._put_data(process, batch)
 
@@ -533,17 +530,17 @@ class Rotator:
 
         return retval
 
-    def unrotate(self,
-                 indices_angle: npt.NDArray[np.int32],
-                 rois: npt.NDArray[np.float32]) -> None:
-        """Unrotate the given bounding boxes for the given angle indices and update in place
+    def un_rotate(self,
+                  indices_angle: npt.NDArray[np.int32],
+                  roi: npt.NDArray[np.float32]) -> None:
+        """Un-rotate the given bounding boxes for the given angle indices and update in place
 
         Parameters
         ----------
         indices_angle
             The angle indices that correlate to the angle each roi was rotated to to obtain the
             result
-        rois
+        roi
             Ragged array of (B, N, 4) detected bounding discovered at the corresponding angle
             index
         """
@@ -555,7 +552,7 @@ class Rotator:
         matrices = self._matrices_inverse[indices_angle[mask_needs_rotate]]
 
         for pred_idx, mat in zip(indices_needs_rotate, matrices):
-            bboxes = rois[pred_idx]
+            bboxes = roi[pred_idx]
             pts = np.empty((bboxes.shape[0], 4, 2), dtype="float32")
             pts[:, 0] = bboxes[:, [0, 1]]  # lt
             pts[:, 1] = bboxes[:, [2, 1]]  # rt

@@ -10,24 +10,23 @@ import typing as T
 import cv2
 import numpy as np
 import numpy.typing as npt
-from torch import OutOfMemoryError
 
 from lib.align.aligned_face import batch_umeyama, LandmarkType
 from lib.align.constants import EXTRACT_RATIOS, MEAN_FACE
 from lib.align.pose import Batch3D
-from lib.utils import FaceswapError, get_module_objects
+from lib.utils import get_module_objects
 from lib.logger import format_array, parse_class_init
 
 from plugins.extract import extract_config as cfg
 from plugins.extract.base import ExtractPlugin
-from .runner import ExtractRunner, OOM_MESSAGE
+from .runner import ExtractRunner
 from .objects import ExtractorBatch, ExtractSignal
 
 logger = logging.getLogger(__name__)
 
 
 class Align(ExtractRunner):
-    """Responsible for running Dectection plugins within the extract pipeline
+    """Responsible for running detection plugins within the extract pipeline
 
     Parameters
     ----------
@@ -41,6 +40,8 @@ class Align(ExtractRunner):
         The normalization to perform on aligner input images. Default: ``None`` (no normalization)
     filters
         ``True`` to enable aligner filters to filter out faces. Default: ``False``
+    compile_model
+        ``True`` to compile any PyTorch models
     config_file
         Full path to a custom config file to load. ``None`` for default config
     """
@@ -50,9 +51,10 @@ class Align(ExtractRunner):
                  re_align: bool = False,
                  normalization: T.Literal["none", "clahe", "hist", "mean"] | None = None,
                  filters: bool = False,
+                 compile_model: bool = False,
                  config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__(plugin, config_file=config_file)
+        super().__init__(plugin, compile_model=compile_model, config_file=config_file)
         self._landmark_type: LandmarkType | None = None  # Populate on first plugin output received
         self._re_feed = ReFeed(re_feeds)
         self._normalize = Normalize("none" if normalization is None else normalization)
@@ -67,9 +69,9 @@ class Align(ExtractRunner):
         return retval
 
     # Pre-Processing
-    def _clamp_rois(self,
-                    batch: ExtractorBatch,
-                    rois: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
+    def _clamp_roi(self,
+                   batch: ExtractorBatch,
+                   roi: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
         """Adjust the provided ROIs to within frame boundaries
 
         Parameters
@@ -77,7 +79,7 @@ class Align(ExtractRunner):
         batch
             The batch object that holds the images and ROI co-ordinates for extracting face
             patches for alignments
-        rois
+        roi
             The ROI co-ordinates for extracting face patches for alignments
 
         Returns
@@ -85,27 +87,27 @@ class Align(ExtractRunner):
         The batch ROIs adjusted to fit within the frame's dimensions
         """
         imgs_h_w = np.array([batch.images[i].shape[:2] for i in batch.frame_ids])
-        if imgs_h_w.shape[0] != rois.shape[0]:  # Re-feeds
+        if imgs_h_w.shape[0] != roi.shape[0]:  # Re-feeds
             imgs_h_w = np.repeat(imgs_h_w, self._re_feed.total_feeds, axis=0)
-        retval = np.empty_like(rois)
-        retval[:, 0] = np.clip(rois[:, 0], 0, imgs_h_w[:, 1] - 1)
-        retval[:, 1] = np.clip(rois[:, 1], 0, imgs_h_w[:, 0] - 1)
-        retval[:, 2] = np.clip(rois[:, 2], 0, imgs_h_w[:, 1] - 1)
-        retval[:, 3] = np.clip(rois[:, 3], 0, imgs_h_w[:, 0] - 1)
+        retval = np.empty_like(roi)
+        retval[:, 0] = np.clip(roi[:, 0], 0, imgs_h_w[:, 1] - 1)
+        retval[:, 1] = np.clip(roi[:, 1], 0, imgs_h_w[:, 0] - 1)
+        retval[:, 2] = np.clip(roi[:, 2], 0, imgs_h_w[:, 1] - 1)
+        retval[:, 3] = np.clip(roi[:, 3], 0, imgs_h_w[:, 0] - 1)
         return retval
 
     @classmethod
     def _get_destinations(cls,
-                          original_rois: npt.NDArray[np.int32],
-                          clamped_rois: npt.NDArray[np.int32],
+                          original_roi: npt.NDArray[np.int32],
+                          clamped_roi: npt.NDArray[np.int32],
                           scales: npt.NDArray[np.float64]) -> npt.NDArray[np.int32]:
         """Provide the destination ROI for resizing the face patch in to the model input
 
         Parameters
         ----------
-        original_rois
+        original_roi
             The original square ROIs calculated from a detection bounding box
-        clamped_rois
+        clamped_roi
             The same ROIs but with out of bound co-ordinates clamped to frame boundaries
         scales
             The scaling required to take the original ROIs to model input size
@@ -114,19 +116,19 @@ class Align(ExtractRunner):
         -------
         The destination co-ordinates for re-sizing the face box to model input size
         """
-        retval = np.empty_like(clamped_rois, dtype=np.int32)
-        retval[:, [0, 2]] = (clamped_rois[:, [0, 2]] - original_rois[:, 0, None]) * scales[:, None]
-        retval[:, [1, 3]] = (clamped_rois[:, [1, 3]] - original_rois[:, 1, None]) * scales[:, None]
+        retval = np.empty_like(clamped_roi, dtype=np.int32)
+        retval[:, [0, 2]] = (clamped_roi[:, [0, 2]] - original_roi[:, 0, None]) * scales[:, None]
+        retval[:, [1, 3]] = (clamped_roi[:, [1, 3]] - original_roi[:, 1, None]) * scales[:, None]
         return retval
 
     def _crop_and_resize(self,  # pylint:disable=too-many-locals
                          images: list[npt.NDArray[np.uint8]],
                          image_ids: npt.NDArray[np.int32],
-                         rois: npt.NDArray[np.int32],
+                         roi: npt.NDArray[np.int32],
                          destinations: npt.NDArray[np.int32],
                          scales: npt.NDArray[np.float64],
                          is_final: bool) -> np.ndarray:
-        """Crop and resize the face images from the ROIS and return as batch at model input size
+        """Crop and resize the face images from the ROIs and return as batch at model input size
 
         Parameters
         ----------
@@ -134,7 +136,7 @@ class Align(ExtractRunner):
             The images for the batch
         image_ids
             The image indexes that correspond to the batch's ROIs
-        rois
+        roi
             The ROIs required to extract a face from an image
         destinations
             The ROIs that the resized image should be placed on the destination patch
@@ -154,28 +156,28 @@ class Align(ExtractRunner):
                                       self._plugin.input_size,
                                       self._plugin.input_size, 3),
                                      dtype=images[image_ids[0]].dtype)
-        rois_reshaped = rois.reshape(num_imgs, -1, 4)
-        dests_reshaped = destinations.reshape(num_imgs, -1, 4)
+        roi_reshaped = roi.reshape(num_imgs, -1, 4)
+        dest_reshaped = destinations.reshape(num_imgs, -1, 4)
         scales_reshaped = scales.reshape(num_imgs, -1)
-        interps = np.where(scales_reshaped > 1.0, cv2.INTER_CUBIC, cv2.INTER_AREA)
+        interpolations = np.where(scales_reshaped > 1.0, cv2.INTER_CUBIC, cv2.INTER_AREA)
 
-        for batch_id, (image_id, bboxes, dsts) in enumerate(zip(image_ids,
-                                                                rois_reshaped,
-                                                                dests_reshaped)):
+        for batch_id, (image_id, bboxes, dst) in enumerate(zip(image_ids,
+                                                               roi_reshaped,
+                                                               dest_reshaped)):
             img = images[image_id]
             img = img[..., 2::-1] if self._plugin.is_rgb else img
-            for i, (box, dst) in enumerate(zip(bboxes, dsts)):
+            for i, (box, dst) in enumerate(zip(bboxes, dst)):
                 out = batch[batch_id, i]
                 cv2.resize(img[box[1]:box[3], box[0]:box[2]],
                            (dst[2] - dst[0], dst[3] - dst[1]),
                            dst=out[dst[1]:dst[3], dst[0]:dst[2]],
-                           interpolation=interps[batch_id, i])
+                           interpolation=interpolations[batch_id, i])
         retval = batch.reshape((-1, self._plugin.input_size, self._plugin.input_size, 3))
         return retval
 
     def _prepare_images(self,
                         batch: ExtractorBatch,
-                        rois: npt.NDArray[np.int32],
+                        roi: npt.NDArray[np.int32],
                         is_final: bool) -> npt.NDArray[np.float32]:
         """Prepare the images from the ROI bounding boxes and model input size for feeding the
         model and populate to the batch's data attribute
@@ -184,7 +186,7 @@ class Align(ExtractRunner):
         ----------
         batch
             The batch to be fed to the aligner
-        rois
+        roi
             The square ROI from the original image that plugin's face patch should be created from
         is_final
             ``True`` if this is the final pass through the aligner
@@ -194,23 +196,23 @@ class Align(ExtractRunner):
         The formatted and resized feed images for the plugin
         """
         scale = self._plugin.input_size / batch.matrices[:, 0, 0]
-        clamped_rois = self._clamp_rois(batch, rois)
-        destinations = self._get_destinations(rois, clamped_rois, scale)
+        clamped_roi = self._clamp_roi(batch, roi)
+        destinations = self._get_destinations(roi, clamped_roi, scale)
         images = self._crop_and_resize(batch.images,
                                        batch.frame_ids,
-                                       clamped_rois,
+                                       clamped_roi,
                                        destinations,
                                        scale,
                                        is_final)
         images = self._normalize(images)
         return self._format_images(images)
 
-    def _matrices_from_rois(self, rois: npt.NDArray[np.int32]) -> npt.NDArray[np.float32]:
-        """Convert the ROIS to transformation matrices for mapping predictions back to frame space
+    def _matrices_from_roi(self, roi: npt.NDArray[np.int32]) -> npt.NDArray[np.float32]:
+        """Convert the ROIs to transformation matrices for mapping predictions back to frame space
 
         Parameters
         ----------
-        rois
+        roi
             The square (B, left, top, right, bottom) region of interest in the original frame for
             feeding the plugin
 
@@ -218,14 +220,14 @@ class Align(ExtractRunner):
         -------
         The (B, 3, 3) transformation matrices for taking the ROIs back to frame space
         """
-        assert np.all(rois[:, 3] - rois[:, 1] == rois[:, 2] - rois[:, 0]), (
+        assert np.all(roi[:, 3] - roi[:, 1] == roi[:, 2] - roi[:, 0]), (
             f"[{self._plugin.name}.pre_process] All ROI bounding boxes for aligner input must "
             "be square")
-        retval = np.zeros((rois.shape[0], 3, 3), dtype="float32")
-        retval[:, 0, 0] = rois[:, 2] - rois[:, 0]
-        retval[:, 1, 1] = rois[:, 3] - rois[:, 1]
-        retval[:, 0, 2] = rois[:, 0]
-        retval[:, 1, 2] = rois[:, 1]
+        retval = np.zeros((roi.shape[0], 3, 3), dtype="float32")
+        retval[:, 0, 0] = roi[:, 2] - roi[:, 0]
+        retval[:, 1, 1] = roi[:, 3] - roi[:, 1]
+        retval[:, 0, 2] = roi[:, 0]
+        retval[:, 1, 2] = roi[:, 1]
         retval[:, 2, 2] = 1.0
         return retval
 
@@ -248,12 +250,12 @@ class Align(ExtractRunner):
         if iteration == 1:
             # Re-feeds are performed during 2nd pass on aligned bounding box for re-aligns
             boxes = batch.bboxes.copy()
-            rois = self._plugin.pre_process(boxes)
-            mats = self._matrices_from_rois(rois)
+            roi = self._plugin.pre_process(boxes)
+            mats = self._matrices_from_roi(roi)
             if is_final and self._re_feed.total_feeds > 1:
-                mats, rois = self._re_feed(mats, with_roi=True)
+                mats, roi = self._re_feed(mats, with_roi=True)
             batch.matrices = mats
-            batch.data = self._prepare_images(batch, rois, is_final)
+            batch.data = self._prepare_images(batch, roi, is_final)
         else:  # If we are here we are re-aligning
             if self._re_feed.total_feeds > 1:
                 mats = self._re_feed(self._re_align.default_crop_matrices,
@@ -298,16 +300,13 @@ class Align(ExtractRunner):
         chunks = self._re_feed.total_feeds if is_final else 1
         for idx in range(chunks):
             start = idx * batch_size
-            try:
-                results.append(self._plugin.process(feed[start: start + batch_size]))
-            except OutOfMemoryError as err:
-                raise FaceswapError(OOM_MESSAGE) from err
+            results.append(self._predict(feed[start: start + batch_size]))
 
         retval = np.array(results)
         return retval.reshape((feed.shape[0], *retval.shape[2:]))
 
     def process(self) -> None:
-        """Peform inference to get results from the plugin and pass the batch to the next process'
+        """Perform inference to get results from the plugin and pass the batch to the next process'
         queue"""
         # pylint:disable=duplicate-code
         process = "process"
@@ -317,7 +316,7 @@ class Align(ExtractRunner):
         logger.debug("[%s.%s] Starting process", self._plugin.name, process)
 
         for batch in self._get_data(process):
-            preds = None
+            result = None
             for iteration in range(1, self._re_align.iterations + 1):
                 is_final = iteration == self._re_align.iterations
 
@@ -326,18 +325,18 @@ class Align(ExtractRunner):
                     self._prepare_data(batch, iteration=iteration)
 
                 assert batch.data is not None
-                preds = self._get_predictions(is_final, batch.data)
+                result = self._get_predictions(is_final, batch.data)
 
                 if is_final and not self._re_align.enabled:  # Nothing left to do. Just the 1 pass
                     break
 
                 if self._overridden[process]:  # Must make sure we are final (B, 68, 2) lms
-                    preds = self._plugin.post_process(preds)
+                    result = self._plugin.post_process(result)
 
-                self._re_align(batch, preds, iteration)  # 1st or 2nd pass re-align op
+                self._re_align(batch, result, iteration)  # 1st or 2nd pass re-align op
 
-            assert preds is not None
-            batch.data = preds  # Final pass predictions
+            assert result is not None
+            batch.data = result  # Final pass predictions
 
             self._put_data(process, batch)
 
@@ -366,15 +365,15 @@ class Align(ExtractRunner):
         to original frame dimensions, apply any filters and put to plugin output"""
         process = "post_process"
         for batch in self._get_data(process):
-            preds = batch.data
+            result = batch.data
 
             if self._overridden[process] and not self._re_align.enabled:
-                preds = self._plugin.post_process(preds)
-            assert preds.dtype == np.float32, (
+                result = self._plugin.post_process(result)
+            assert result.dtype == np.float32, (
                 f"[{self._plugin.name}.{process}] Landmarks should be a numpy float32 array")
 
-            self._scale_predictions(batch, preds)  # Scaling must happen prior to merging
-            landmarks = self._re_feed.merge(preds)
+            self._scale_predictions(batch, result)  # Scaling must happen prior to merging
+            landmarks = self._re_feed.merge(result)
             if self._landmark_type is None:
                 self._landmark_type = LandmarkType.from_shape(T.cast(tuple[int, int],
                                                                      landmarks.shape[1:]))
@@ -470,8 +469,8 @@ class Normalize():
         """
         imgs = images.astype("float32")
         mins = imgs.min(axis=(1, 2))[:, None, None, :]
-        maxs = imgs.max(axis=(1, 2))[:, None, None, :]
-        den = np.maximum(maxs - mins, 1e-6)
+        maxes = imgs.max(axis=(1, 2))[:, None, None, :]
+        den = np.maximum(maxes - mins, 1e-6)
         out = (imgs - mins) / den * 255.
         return out.astype("uint8")
 
@@ -489,7 +488,7 @@ class Normalize():
         self._method = None if self.name == "none" else self.name
 
     def __call__(self, images: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
-        """Peform the selected normalization method on the batch of model input images
+        """Perform the selected normalization method on the batch of model input images
 
         Parameters
         ----------
@@ -580,7 +579,7 @@ class ReAlign:
     def get_images(self,  # pylint:disable=too-many-locals
                    matrices: npt.NDArray[np.float32],
                    feeds: int) -> npt.NDArray[np.float32]:
-        """Obtain the sub-crops from the main image patches based on the rois stored in the batch
+        """Obtain the sub-crops from the main image patches based on the roi stored in the batch
         and populate them to the batch's data attribute
 
         Parameters
@@ -598,24 +597,24 @@ class ReAlign:
         mats = matrices.reshape(-1, feeds, 3, 3)
         all_offsets = np.rint(mats[..., :2, 2]).astype("int32")
         all_scales = mats[..., 0, 0]  # Always same x/y scaling, always aligned
-        all_interps = np.where(all_scales < 1.0, cv2.INTER_CUBIC, cv2.INTER_AREA)
+        all_interpolations = np.where(all_scales < 1.0, cv2.INTER_CUBIC, cv2.INTER_AREA)
         all_dims = np.rint(self._size / all_scales).astype(np.int32)  # Always square
 
         size = (self._size, self._size)
         retval = np.empty((*mats.shape[:2], *size, 3), dtype=self._images.dtype)
 
-        for batch_id, (offsets, scales, interps, dims) in enumerate(zip(all_offsets,
-                                                                        all_scales,
-                                                                        all_interps,
-                                                                        all_dims)):
+        for batch_id, (offsets, scales, interpolations, dims) in enumerate(zip(all_offsets,
+                                                                               all_scales,
+                                                                               all_interpolations,
+                                                                               all_dims)):
             img = self._images[batch_id]
             for feed_id, offset in enumerate(offsets):
                 scale = scales[feed_id]
-                interp = interps[feed_id]
+                interpolation = interpolations[feed_id]
                 src_dim = dims[feed_id]
                 crop = img[offset[1]:offset[1] + src_dim, offset[0]:offset[0] + src_dim]
                 if scale != 1.:
-                    crop = cv2.resize(crop, size, interpolation=interp)
+                    crop = cv2.resize(crop, size, interpolation=interpolation)
                 retval[batch_id, feed_id] = crop
 
         # Add the adjusted matrices to :attr:`_matrices` for warping back to frame downstream
@@ -650,7 +649,7 @@ class ReAlign:
         Returns
         The (N, 3, 3) transformation matrix that will create an image patch for re-alignment
         """
-        # Frame space -> Normalised Space -> Aligned space -> Patch Space
+        # Frame space -> Normalized Space -> Aligned space -> Patch Space
         # normalized -> aligned
         mats = batch_umeyama(landmarks[:, 17:], self._mean_face, True).astype("float32")
 
@@ -699,7 +698,7 @@ class ReAlign:
         cropping
 
         Assumptions:
-            - The "default" ROI is a square box along the bbbox's longest edge at the same center
+            - The "default" ROI is a square box along the bbox's longest edge at the same center
             - Padding is how much wider the actual ROI is than this "default" ROI
             - offset is how much the centre of the actual ROI deviates from the "default" ROI
             - A dummy padding 'constant' is added to the matrix to cater for detection box
@@ -707,7 +706,7 @@ class ReAlign:
 
         The aim is to end up with a face patch which is about similarly framed to the original
         bbox. A bit of extra padding is added to match with the amount of offset applied by
-        refeed The original 'ROI' will be the square around the center of the image patch that is
+        re-feed The original 'ROI' will be the square around the center of the image patch that is
         of plugin input size
 
         Parameters
@@ -720,16 +719,18 @@ class ReAlign:
         warp_mats = self._get_matrix(landmarks, batch.bboxes, batch.matrices)[:, :2]
 
         scales = np.sqrt(np.abs(np.linalg.det(warp_mats[:, :, :2])))
-        interps = np.where(scales < 1.0, cv2.INTER_CUBIC, cv2.INTER_AREA)
+        interpolations = np.where(scales < 1.0, cv2.INTER_CUBIC, cv2.INTER_AREA)
 
         size = (self._expanded_size, self._expanded_size)
-        for idx, (frame_id, mat, interp) in enumerate(zip(batch.frame_ids, warp_mats, interps)):
+        for idx, (frame_id, mat, interpolation) in enumerate(zip(batch.frame_ids,
+                                                                 warp_mats,
+                                                                 interpolations)):
             img = batch.images[frame_id]
             cv2.warpAffine(img.astype(self._images.dtype),
                            mat,
                            size,
                            dst=self._images[idx],
-                           flags=interp,
+                           flags=interpolation,
                            borderMode=cv2.BORDER_REPLICATE)
         self._scale_images()
 
@@ -782,7 +783,7 @@ class ReFeed:
     Parameters
     ----------
     re_feeds
-        The number of refeeds to be performed.
+        The number of re-feeds to be performed.
     """
     def __init__(self, re_feeds: int) -> None:
         logger.debug(parse_class_init(locals()))
@@ -790,7 +791,7 @@ class ReFeed:
         self.beta = 0.05
         """The amount each corner point can move relative to the boxes shortest side"""
         self.total_feeds = re_feeds + 1
-        """The total number of feeds through the model for original boxes plus refeeds"""
+        """The total number of feeds through the model for original boxes plus re-feeds"""
         self._corners = np.array([[[0, 0, 1], [1, 1, 1]]], dtype="float32").swapaxes(1, 2)
 
     @T.overload
@@ -831,8 +832,8 @@ class ReFeed:
             The adjusted matrices for taking points from normalized to frame space in shape
             ((Num re_feeds * N) + 1, 3, 3), in frame contiguous order (Na, Nb, Nc, Na1, Nb1,
             Nc1...)
-        rois
-            The ((Num re_feeds * N) + 1, 4) rois for each adjusted feed. Returned if `with_roi` is
+        roi
+            The ((Num re_feeds * N) + 1, 4) roi for each adjusted feed. Returned if `with_roi` is
             ``True``
         """
         if self._re_feeds == 0:
@@ -860,12 +861,12 @@ class ReFeed:
             return mats
 
         tl_br = np.rint((mats @ self._corners).swapaxes(1, 2))
-        rois = np.stack([tl_br[:, 0, 0], tl_br[:, 0, 1], tl_br[:, 1, 0], tl_br[:, 1, 1]],
-                        axis=1).astype(np.int32)
+        roi = np.stack([tl_br[:, 0, 0], tl_br[:, 0, 1], tl_br[:, 1, 0], tl_br[:, 1, 1]],
+                       axis=1).astype(np.int32)
 
-        logger.trace("re-feed. matrices: %s, rois: %s",  # type: ignore[attr-defined]
-                     format_array(mats), format_array(rois))
-        return mats, rois
+        logger.trace("re-feed. matrices: %s, roi: %s",  # type: ignore[attr-defined]
+                     format_array(mats), format_array(roi))
+        return mats, roi
 
     def merge(self, landmarks: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
         """If re-feeds enabled return the average result from the re-feeds, otherwise the original
@@ -878,7 +879,7 @@ class ReFeed:
 
         Returns
         -------
-        The final (N, 68, 2) landmarks with any refeeds merged
+        The final (N, 68, 2) landmarks with any re-feeds merged
         """
         if self.total_feeds == 1:
             return landmarks
@@ -988,10 +989,10 @@ class AlignedFilter:  # pylint:disable=too-many-instance-attributes
                                                   mats[:, 1, 0] * mats[:, 1, 0])
         mins = (frames * self._min_scale)[frame_ids]
         if self._max_scale:
-            maxs = (frames * self._max_scale)[frame_ids]
+            maxes = (frames * self._max_scale)[frame_ids]
         else:
-            maxs = sizes
-        return (mins <= sizes) & (maxs >= sizes)
+            maxes = sizes
+        return (mins <= sizes) & (maxes >= sizes)
 
     def _filter_roll(self, rotation: npt.NDArray[np.float32]) -> npt.NDArray[np.bool]:
         """Filter faces based on aligned face roll (a properly aligned face should have roll
