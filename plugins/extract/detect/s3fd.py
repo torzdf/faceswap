@@ -62,7 +62,7 @@ class S3FD(ExtractPlugin):
         placeholder_shape = (self.batch_size, 3, self.input_size, self.input_size)
         placeholder = torch.zeros(*placeholder_shape, dtype=torch.float32, device=self.device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             self.model(placeholder)
 
         logger.debug("[%s] Loaded model", self.name)
@@ -97,7 +97,7 @@ class S3FD(ExtractPlugin):
             The batch of detection results from the model
         """
         feed = torch.from_numpy(batch).to(self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(feed)
         for i in range(len(outputs) // 2):
             outputs[i * 2] = F.softmax(outputs[i * 2], dim=1)

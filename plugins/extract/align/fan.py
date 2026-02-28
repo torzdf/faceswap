@@ -48,7 +48,7 @@ class FAN(ExtractPlugin):
 
         placeholder_shape = (self.batch_size, 3, self.input_size, self.input_size)
         placeholder = torch.zeros(placeholder_shape, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             self.model(placeholder)
         logger.debug("[%s] Loaded model", self.name)
 
@@ -95,7 +95,7 @@ class FAN(ExtractPlugin):
             The predictions from the aligner
         """
         feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             retval = self.model(feed)[-1].cpu().numpy()
         return retval
 

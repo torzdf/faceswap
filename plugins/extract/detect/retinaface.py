@@ -115,7 +115,7 @@ class RetinaFace(ExtractPlugin):
         self.model.eval()
         placeholder_shape = (self.batch_size, 3, self.input_size, self.input_size)
         placeholder = torch.zeros(*placeholder_shape, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             self.model(placeholder)
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
@@ -149,7 +149,7 @@ class RetinaFace(ExtractPlugin):
         """
         feed = torch.from_numpy(batch).to(self.device)
         retval = np.empty((2,), dtype="object")
-        with torch.no_grad():
+        with torch.inference_mode():
             retval[:] = [x.cpu().numpy() for x in self.model(feed)]
         return retval
 

@@ -345,7 +345,7 @@ class PNetRunner():
                 cv2.resize(images[idx], (rwidth, rheight), dst=batch[idx])
 
             feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 cls_prob, roi = (t.cpu().numpy() for t in self._model(feed))
             cls_prob = cls_prob[:, 1]
             out_side = max(cls_prob.shape[1:3])
@@ -503,7 +503,7 @@ class RNetRunner():
                 cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]], (24, 24), dst=batch[idx])
 
             feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 cls_prob, roi_prob = (t.cpu().numpy() for t in self._model(feed))
 
             ret.append(self._filter_face_24net(cls_prob, roi_prob, rectangles))
@@ -671,7 +671,7 @@ class ONetRunner():
                 cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]], (48, 48), dst=batch[i])
 
             feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 cls_probs, roi_probs, pts_probs = (t.cpu().numpy()
                                                    for t in self._model(feed))
             ret.append(self._filter_face_48net(cls_probs, roi_probs, pts_probs, rectangles))
