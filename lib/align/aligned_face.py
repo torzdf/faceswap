@@ -661,9 +661,8 @@ def batch_umeyama(source: np.ndarray, destination: np.ndarray, estimate_scale: b
     .. [1] "Least-squares estimation of transformation parameters between two
             point patterns", Shinji Umeyama, PAMI 1991, :DOI:`10.1109/34.88573`
     """
-    # pylint:disable=invalid-name,too-many-locals
-    assert source.ndim == 3, "Data must be batched"
-    bs, num, dim = source.shape  # (B, M, N)
+    # pylint:disable=too-many-locals
+    batch_size, num, dim = source.shape  # (B, M, N)
 
     # Compute mean of source and destination.
     src_mean = source.mean(axis=1)       # (B, N)
@@ -674,49 +673,30 @@ def batch_umeyama(source: np.ndarray, destination: np.ndarray, estimate_scale: b
     dst_demean = destination - dst_mean      # (M, N)
 
     # Eq. (38).
-    a = np.einsum("mi,bmj->bij", dst_demean, src_demean) / num  # (B, N, N)
+    a = dst_demean.T @ src_demean / num  # (B, N, N)
 
-    # Eq. (39).
-    d = np.ones((bs, dim), dtype=np.double)
-    det_a = np.linalg.det(a)
-    d[det_a < 0, dim - 1] = -1
-
-    retval = np.tile(np.eye(dim + 1, dtype=np.double), (bs, 1, 1))  # (B, N+1, N+1)
-
+    # SVD
     u, s, vt = np.linalg.svd(a)
-    v = vt.transpose(0, 2, 1)
 
-    # Eq. (40) and (43).
-    rank = np.linalg.matrix_rank(a)
-    valid = rank > 0
-
-    r = u @ np.einsum("bi,bij->bij", d, v)
-
-    # Handle rank == dim - 1 special case
-    mask = (rank == dim - 1) & valid
-    if np.any(mask):
-        det_uv = np.linalg.det(u[mask]) * np.linalg.det(v[mask])
-        flip = det_uv <= 0
-
-        d_adj = d[mask].copy()
-        d_adj[flip, dim - 1] *= -1
-
-        r[mask] = u[mask] @ np.einsum("bi,bij->bij", d_adj, v[mask])
-
-    retval[:, :dim, :dim] = r
+    rot = u @ vt
+    det_rot = np.linalg.det(rot)
+    # Fix improper rotations
+    vt[det_rot < 0, -1, :] *= -1
+    rot = u @ vt
 
     if estimate_scale:
         # Eq. (41) and (42).
         var_src = src_demean.var(axis=1).sum(axis=1)  # (B,)
-        scale = (s * d).sum(axis=1) / var_src         # (B,)
+        scale = s.sum(axis=1) / var_src
     else:
-        scale = np.ones(bs)
+        scale = np.ones(batch_size)
 
-    retval[:, :dim, dim] = dst_mean - scale[:, None] * np.einsum("bij,bj->bi",
-                                                                 retval[:, :dim, :dim],
-                                                                 src_mean)
-    retval[:, :dim, :dim] *= scale[:, None, None]
-    retval[~valid] = np.nan
+    trans = dst_mean - scale[:, None] * ((rot @ src_mean[..., None])[..., 0])
+    retval = np.zeros((batch_size, dim + 1, dim + 1), dtype=source.dtype)
+    retval[:, -1, -1] = 1.0
+
+    retval[:, :dim, :dim] = scale[:, None, None] * rot
+    retval[:, :dim, dim] = trans
     return retval
 
 
