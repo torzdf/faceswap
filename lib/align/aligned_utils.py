@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Tools for working with aligned faces and aligned masks """
+"""Tools for working with aligned faces and aligned masks"""
 from __future__ import annotations
 
 import logging
@@ -24,26 +24,25 @@ def get_adjusted_center(image_size: int,
                         target_offset: np.ndarray,
                         source_centering: CenteringType,
                         y_offset: float) -> np.ndarray:
-    """ Obtain the correct center of a face extracted image to translate between two different
+    """Obtain the correct center of a face extracted image to translate between two different
     extract centerings.
 
     Parameters
     ----------
-    image_size: int
+    image_size
         The size of the image at the given :attr:`source_centering`
-    source_offset: :class:`numpy.ndarray`
+    source_offset
         The pose offset to translate a base extracted face to source centering
-    target_offset: :class:`numpy.ndarray`
+    target_offset
         The pose offset to translate a base extracted face to target centering
-    source_centering: ["face", "head", "legacy"]
+    source_centering
         The centering of the source image
-    y_offset: float
+    y_offset
         Amount to additionally offset the center of the image along the y-axis
 
     Returns
     -------
-    :class:`numpy.ndarray`
-        The center point of the image at the given size for the target centering
+    The center point of the image at the given size for the target centering
     """
     source_size = image_size - (image_size * EXTRACT_RATIOS[source_centering])
     offset = target_offset - source_offset - [0., y_offset]
@@ -60,7 +59,7 @@ def get_centered_size(source_centering: CenteringType,
                       target_centering: CenteringType,
                       size: int,
                       coverage_ratio: float = 1.0) -> int:
-    """ Obtain the size of a cropped face from an aligned image.
+    """Obtain the size of a cropped face from an aligned image.
 
     Given an image of a certain dimensions, returns the dimensions of the sub-crop within that
     image for the requested centering at the requested coverage ratio
@@ -78,20 +77,18 @@ def get_centered_size(source_centering: CenteringType,
 
     Parameters
     ----------
-    source_centering: ["head", "face", "legacy"]
+    source_centering
         The centering that the original image is aligned at
-    target_centering: ["head", "face", "legacy"]
+    target_centering
         The centering that the sub-crop size should be obtained for
-    size: int
+    size
         The size of the source image to obtain the cropped size for
-    coverage_ratio: float, optional
+    coverage_ratio
         The coverage ratio to be applied to the target image. Default: `1.0`
 
     Returns
     -------
-    int
-        The pixel size of a sub-crop image from a full head aligned image with the given coverage
-        ratio
+    The pixel size of a sub-crop image from a full head aligned image with the given coverage ratio
     """
     if source_centering == target_centering and coverage_ratio == 1.0:
         src_size: float | int = size
@@ -108,19 +105,18 @@ def get_centered_size(source_centering: CenteringType,
 
 
 def get_matrix_scaling(matrix: np.ndarray) -> tuple[int, int]:
-    """ Given a matrix, return the cv2 Interpolation method and inverse interpolation method for
+    """Given a matrix, return the cv2 Interpolation method and inverse interpolation method for
     applying the matrix on an image.
 
     Parameters
     ----------
-    matrix: :class:`numpy.ndarray`
+    matrix
         The transform matrix to return the interpolator for
 
     Returns
     -------
-    tuple
-        The interpolator and inverse interpolator for the given matrix. This will be (Cubic, Area)
-        for an upscale matrix and (Area, Cubic) for a downscale matrix
+    The interpolator and inverse interpolator for the given matrix. This will be (Cubic, Area) for
+    an upscale matrix and (Area, Cubic) for a downscale matrix
     """
     x_scale = np.sqrt(matrix[0, 0] * matrix[0, 0] + matrix[0, 1] * matrix[0, 1])
     if x_scale == 0:
@@ -141,23 +137,22 @@ def transform_image(image: np.ndarray,
                     matrix: np.ndarray,
                     size: int,
                     padding: int = 0) -> np.ndarray:
-    """ Perform transformation on an image, applying the given size and padding to the matrix.
+    """Perform transformation on an image, applying the given size and padding to the matrix.
 
     Parameters
     ----------
-    image: :class:`numpy.ndarray`
+    image
         The image to transform
-    matrix: :class:`numpy.ndarray`
+    matrix
         The transformation matrix to apply to the image
-    size: int
+    size
         The final size of the transformed image
-    padding: int, optional
+    padding
         The amount of padding to apply to the final image. Default: `0`
 
     Returns
     -------
-    :class:`numpy.ndarray`
-        The transformed image
+    The transformed image
     """
     logger.trace("image shape: %s, matrix: %s, size: %s. padding: %s",  # type:ignore[attr-defined]
                  image.shape, matrix, size, padding)

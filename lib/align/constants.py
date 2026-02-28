@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Constants that are required across faceswap's lib.align package """
+"""Constants that are required across faceswap's lib.align package"""
 from __future__ import annotations
 
 import typing as T
@@ -11,13 +11,9 @@ from lib.utils import get_module_objects
 
 CenteringType = T.Literal["face", "head", "legacy"]
 
-EXTRACT_RATIOS: dict[CenteringType, float] = {"legacy": 0.375, "face": 0.5, "head": 0.625}
-"""dict[Literal["legacy", "face", head"] float]: The amount of padding applied to each
-centering type when generating aligned faces """
-
 
 class LandmarkType(Enum):
-    """ Enumeration for the landmark types that Faceswap supports """
+    """Enumeration for the landmark types that Faceswap supports """
     LM_2D_4 = 1
     LM_2D_51 = 2
     LM_2D_68 = 3
@@ -25,17 +21,16 @@ class LandmarkType(Enum):
 
     @classmethod
     def from_shape(cls, shape: tuple[int, int]) -> LandmarkType:
-        """ The landmark type for a given shape
+        """The landmark type for a given shape
 
         Parameters
         ----------
-        shape: tuple[int, int]
+        shape
             The shape to get the landmark type for
 
         Returns
         -------
-        Type[LandmarkType]
-            The enum for the given shape
+        The enum for the given shape
 
         Raises
         ------
@@ -49,6 +44,10 @@ class LandmarkType(Enum):
         if shape not in shapes:
             raise ValueError(f"The given shape {shape} is not valid. Valid shapes: {list(shapes)}")
         return shapes[shape]
+
+
+EXTRACT_RATIOS: dict[CenteringType, float] = {"legacy": 0.375, "face": 0.5, "head": 0.625}
+"""The amount of padding applied to each centering type when generating aligned faces"""
 
 
 MEAN_FACE: dict[LandmarkType, np.ndarray] = {
@@ -95,8 +94,7 @@ MEAN_FACE: dict[LandmarkType, np.ndarray] = {
         [-0.589441, -8.443925, 6.109526],   # 46 mouth bottom R
         [0.0, -8.601736, 6.097667],         # 45 mouth bottom C
         [0.589441, -8.443925, 6.109526]])}   # 44 mouth bottom L
-"""dict[:class:`~LandmarkType, np.ndarray]: 'Mean' landmark points for various landmark types. Used
-for aligning faces """
+"""'Mean' landmark points for various landmark types. Used for aligning faces"""
 
 LANDMARK_PARTS: dict[LandmarkType, dict[str, tuple[int, int, bool]]] = {
     LandmarkType.LM_2D_68: {"mouth_outer": (48, 60, True),
@@ -110,9 +108,8 @@ LANDMARK_PARTS: dict[LandmarkType, dict[str, tuple[int, int, bool]]] = {
                             "chin": (8, 11, False)},
     LandmarkType.LM_2D_4: {"face": (0, 4, True)}
 }
-"""dict[:class:`LandmarkType`, dict[str, tuple[int, int, bool]]: For each landmark type, stores
-the (start index, end index, is polygon) information about each part of the face. """
-
+"""For each landmark type, stores the (start index, end index, is polygon) information about each
+part of the face."""
 
 LANDMARK_MASK_PARTS: dict[LandmarkType, dict[str, list[tuple[int, int]]]] = {
     LandmarkType.LM_2D_68: {"right_jaw": [(0, 9), (17, 18)],
@@ -124,8 +121,8 @@ LANDMARK_MASK_PARTS: dict[LandmarkType, dict[str, list[tuple[int, int]]]] = {
                             "left_eye": [(22, 27), (27, 28), (31, 36), (8, 9)],
                             "nose": [(27, 31), (31, 36)]}
 }
-"""dict[:class:`LandmarkType`, dict[str, list[tuple[int, int]]]: For each landmark type, stores
-the (start index, end index) information about each part of the face that makes a face mask. """
+"""For each landmark type, stores the (start index, end index) information about each part of the
+face that makes a face mask."""
 
 
 __all__ = get_module_objects(__name__)

@@ -101,8 +101,8 @@ class DetectedFace():  # pylint:disable=too-many-instance-attributes
             k[1:] if k.startswith("_") else k: format_array(v) if isinstance(v, np.ndarray) else v
             for k, v in params.items()
             }
-        sparams = ", ".join(f"{k}={v}" for k, v in params.items())
-        return f"{self.__class__.__name__}({sparams})"
+        s_params = ", ".join(f"{k}={v}" for k, v in params.items())
+        return f"{self.__class__.__name__}({s_params})"
 
     @property
     def aligned(self) -> AlignedFace:
@@ -164,12 +164,12 @@ class DetectedFace():  # pylint:disable=too-many-instance-attributes
         logger.trace("name: '%s', mask shape: %s, affine_matrix: %s, "  # type:ignore[attr-defined]
                      "storage_size: %s, storage_centering: %s)", name,
                      mask.shape, affine_matrix, storage_size, storage_centering)
-        fsmask = Mask(storage_size=storage_size, storage_centering=storage_centering)
-        fsmask.add(mask, affine_matrix)
-        self.mask[name] = fsmask
+        fs_mask = Mask(storage_size=storage_size, storage_centering=storage_centering)
+        fs_mask.add(mask, affine_matrix)
+        self.mask[name] = fs_mask
 
     def add_landmarks_xy(self, landmarks: np.ndarray) -> None:
-        """Add landmarks to the detected face object. If landmarks alread exist, they will be
+        """Add landmarks to the detected face object. If landmarks already exist, they will be
         overwritten.
 
         Parameters
@@ -240,7 +240,7 @@ class DetectedFace():  # pylint:disable=too-many-instance-attributes
             0-255 range
         delete_masks
             ``True`` to delete any of the :class:`~lib.align.aligned_mask.Mask` objects owned by
-            this detected face. Use to free up unrequired memory usage. Default: ``False``
+            this detected face. Use to free up non-required memory usage. Default: ``False``
         """
         if delete_masks:
             del self.mask
@@ -250,7 +250,7 @@ class DetectedFace():  # pylint:disable=too-many-instance-attributes
         if not valid:
             return
         combined = np.concatenate(valid, axis=-1)
-        self._training_masks = (compress(combined), combined.shape)
+        self._training_masks = (compress(combined), T.cast(tuple[int, int, int], combined.shape))
 
     def get_training_masks(self) -> np.ndarray | None:
         """Obtain the decompressed combined training masks.

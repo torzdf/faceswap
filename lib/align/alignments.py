@@ -647,11 +647,11 @@ class _IO():
         The full path to the alignments file
         """
         logger.debug("Getting location: (folder: '%s', filename: '%s')", folder, filename)
-        noext_name, extension = os.path.splitext(filename)
+        no_ext_name, extension = os.path.splitext(filename)
         if extension[1:] == self._serializer.file_extension:
             logger.debug("Valid Alignments filename provided: '%s'", filename)
         else:
-            filename = f"{noext_name}.{self._serializer.file_extension}"
+            filename = f"{no_ext_name}.{self._serializer.file_extension}"
             logger.debug("File extension set from serializer: '%s'",
                          self._serializer.file_extension)
         location = os.path.join(str(folder), filename)
