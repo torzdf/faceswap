@@ -43,11 +43,13 @@ class FAN(ExtractPlugin):
                                           num_classes=68)
         weights = torch.load(model_path, map_location=self.device)
         self.model.load_state_dict(weights)
-        self.model.to(self.device)
+        self.model.to(self.device,
+                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         self.model.eval()
 
-        placeholder_shape = (self.batch_size, 3, self.input_size, self.input_size)
-        placeholder = torch.zeros(placeholder_shape, dtype=torch.float32, device=self.device)
+        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
+                                  dtype=torch.float32,
+                                  device=self.device).to(memory_format=torch.channels_last)
         with torch.inference_mode():
             self.model(placeholder)
         logger.debug("[%s] Loaded model", self.name)
@@ -94,7 +96,8 @@ class FAN(ExtractPlugin):
         :class:`numpy.ndarray`
             The predictions from the aligner
         """
-        feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+        feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device,
+                                                                memory_format=torch.channels_last)
         with torch.inference_mode():
             retval = self.model(feed)[-1].cpu().numpy()
         return retval

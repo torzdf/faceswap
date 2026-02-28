@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+import torch
 from tqdm import tqdm
 
 from lib.align.aligned_utils import get_centered_size
@@ -73,6 +74,7 @@ class Extract:
                                           additional={"K": ("to skip saving faces", True, None)})
         args = self._validate_compatible_args(args)
         self._face_filter = FilterLoader(args.ref_threshold, args.filter, args.nfilter)
+        self._configure_torch()
         self._pipeline = self._load_pipeline(args)
         input_locations = self._get_input_locations(args.input_dir, args.batch_mode)
         self._validate_batch_mode(args.batch_mode, input_locations, args)
@@ -214,6 +216,13 @@ class Extract:
             logger.warning("Custom alignments path not supported for batch mode. "
                            "Reverting to default.")
             args.alignments_path = None
+
+    def _configure_torch(self) -> None:
+        """Set various Torch switches for inference optimization"""
+        torch.backends.cudnn.benchmark = True
+        torch.use_deterministic_algorithms(False)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     def _should_save_alignments(self, arguments: Namespace) -> bool:
         """ Decide whether alignments should be saved from the given command line arguments and
