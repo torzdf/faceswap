@@ -188,7 +188,7 @@ class FacePlugin(ExtractPlugin):
         dimensions
     batch_size : int, optional
         The batch size that the plugin processes data at. Note: Only the `process` method is
-        guaranteed to receive data at this batch size (or less). The other processes may recieve
+        guaranteed to receive data at this batch size (or less). The other processes may receive
         higher batch sizes for re-processing reasons. Do not rely on this when processing data.
         Default: `1`
     is_rgb : bool, optional
@@ -199,7 +199,7 @@ class FacePlugin(ExtractPlugin):
         The scale that the plugin expects to receive the image at eg: (0, 255) for uint8 images.
         Default: (0, 1)
     force_cpu : bool, optional
-        For Torch models, force running on the CPU, rather than the accelarated device. Sets the
+        For Torch models, force running on the CPU, rather than the accelerated device. Sets the
         :class:`torch.device` to :attr:`device`. Default: ``False``
     centering : Literal["face", "head", "legacy"]
         The centering that the mask should be stored at

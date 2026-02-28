@@ -102,12 +102,13 @@ class BiSeNetFP(FacePlugin):
         assert isinstance(model_path, str)
         weights = torch.load(model_path, map_location=self.device)
         self.model.load_state_dict(weights)
-        self.model.to(self.device)
+        self.model.to(self.device,
+                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         self.model.eval()
 
         placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
                                   dtype=torch.float32,
-                                  device=self.device)
+                                  device=self.device).to(memory_format=torch.channels_last)
         with torch.inference_mode():
             self.model(placeholder)
         logger.debug("[%s] Loaded model", self.name)
@@ -124,7 +125,7 @@ class BiSeNetFP(FacePlugin):
         -------
         The updated images for feeding the model
         """
-        return (batch - self._mean) / self._std
+        return ((batch - self._mean) / self._std).transpose(0, 3, 1, 2)
 
     def process(self, batch: np.ndarray) -> np.ndarray:
         """Get the masks from the model
@@ -139,7 +140,7 @@ class BiSeNetFP(FacePlugin):
 
             The predicted masks from the plugin
         """
-        feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
         with torch.inference_mode():
             retval = self.model(feed)[0].cpu().numpy().transpose(0, 2, 3, 1)
         return retval

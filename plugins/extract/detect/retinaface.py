@@ -111,10 +111,12 @@ class RetinaFace(ExtractPlugin):
 
         self.model = RetinaFaceModel(backbone)
         self.model.load_state_dict(weights)
-        self.model.to(self.device)
+        self.model.to(self.device,
+                      memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         self.model.eval()
-        placeholder_shape = (self.batch_size, 3, self.input_size, self.input_size)
-        placeholder = torch.zeros(*placeholder_shape, dtype=torch.float32, device=self.device)
+        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
+                                  dtype=torch.float32,
+                                  device=self.device).to(memory_format=torch.channels_last)
         with torch.inference_mode():
             self.model(placeholder)
 
@@ -147,7 +149,7 @@ class RetinaFace(ExtractPlugin):
         :class:`numpy.ndarray`
             The batch of detection results from the model
         """
-        feed = torch.from_numpy(batch).to(self.device)
+        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
         retval = np.empty((2,), dtype="object")
         with torch.inference_mode():
             retval[:] = [x.cpu().numpy() for x in self.model(feed)]

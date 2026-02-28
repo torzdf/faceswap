@@ -234,7 +234,8 @@ class PNetRunner():
                  threshold: float) -> None:
         logger.debug(parse_class_init(locals()))
         self._model = PNet(weights_path)
-        self._model.to(device)
+        self._model.to(device,
+                       memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         self.device = device
 
         self._input_size = input_size
@@ -344,7 +345,9 @@ class PNetRunner():
             for idx in range(batch_size):
                 cv2.resize(images[idx], (rwidth, rheight), dst=batch[idx])
 
-            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(
+                self.device,
+                memory_format=torch.channels_last)
             with torch.inference_mode():
                 cls_prob, roi = (t.cpu().numpy() for t in self._model(feed))
             cls_prob = cls_prob[:, 1]
@@ -434,7 +437,8 @@ class RNetRunner():
                  threshold: float) -> None:
         logger.debug(parse_class_init(locals()))
         self._model = RNet(weights_path)
-        self._model.to(device)
+        self._model.to(device,
+                       memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         self.device = device
         self._input_size = input_size
         self._threshold = threshold
@@ -502,7 +506,9 @@ class RNetRunner():
             for idx, rect in enumerate(rectangles):
                 cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]], (24, 24), dst=batch[idx])
 
-            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(
+                self.device,
+                memory_format=torch.channels_last)
             with torch.inference_mode():
                 cls_prob, roi_prob = (t.cpu().numpy() for t in self._model(feed))
 
@@ -589,7 +595,8 @@ class ONetRunner():
                  threshold: float) -> None:
         logger.debug(parse_class_init(locals()))
         self._model = ONet(weights_path)
-        self._model.to(device)
+        self._model.to(device,
+                       memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         self.device = device
         self._input_size = input_size
         self._threshold = threshold
@@ -670,7 +677,9 @@ class ONetRunner():
             for i, rect in enumerate(rectangles):
                 cv2.resize(image[rect[1]: rect[3], rect[0]: rect[2]], (48, 48), dst=batch[i])
 
-            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device)
+            feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(
+                self.device,
+                memory_format=torch.channels_last)
             with torch.inference_mode():
                 cls_probs, roi_probs, pts_probs = (t.cpu().numpy()
                                                    for t in self._model(feed))
