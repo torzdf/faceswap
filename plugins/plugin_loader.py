@@ -107,7 +107,7 @@ class PluginLoader():
             raise ValueError(f"{name} is not a valid {plugin_type} plugin. Select from {mods}")
 
         mod, obj = plugins[mods.index(real_name)].rsplit(".", maxsplit=1)
-        logger.info("Loading %s from %s plugin...", plugin_type.title(), name.upper())
+        logger.info("Loading %s from %s", plugin_type.title(), name.upper())
 
         module = import_module(mod)
         return getattr(module, obj)()

@@ -5,12 +5,14 @@ from __future__ import annotations
 import abc
 import logging
 import typing as T
-from threading import Event, Lock
+from operator import itemgetter
+from threading import Lock
 
 import numpy as np
 import numpy.typing as npt
 import torch
 
+from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
@@ -18,6 +20,180 @@ if T.TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _TorchInfer():
+    """Handles loading PyTorch models and handling data transfer for plugins that use PyTorch
+
+    Parameters
+    ----------
+    plugin_name
+        The name of the plugin using this object for interfacing with Torch
+    force_cpu
+        For Torch models, force running on the CPU, rather than the accelerated device. Sets the
+        :class:`torch.device` to :attr:`device`. Default: ``False``
+    """
+    _compile_message_logged = False
+    """``True`` if a message that model compilation is occurring has been output"""
+    _compile_lock = Lock()
+    """Lock for compiling models. Compiling is not thread safe (specifically TorchDynamo + Inductor
+    can run into errors) so we need to lock when compiling models. It is slower, but necessary"""
+
+    def __init__(self, name: str, force_cpu: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._name = f"{self.__class__.__name__[1:]}.{name}"
+        self.device = self._get_device(cpu=force_cpu)
+        self.compile: bool = False
+        """Set by the runner calling this plugin. Set to ``True`` if the loaded model should be
+        compiled """
+        self._model: torch.nn.Module | None = None
+        self._output_is_list = False
+        self._output_length = 0
+        self._return_indices: list[int] = []
+
+    def __repr__(self) -> str:
+        """Pretty print for logging"""
+        name = repr(self._name.rsplit(".", maxsplit=1)[-1])
+        force_cpu = self.device.type == "cpu"
+        return f"{self.__class__.__name__}(name={name}, force_cpu={force_cpu})"
+
+    def _get_device(self, cpu: bool = False) -> torch.device:
+        """Get the correctly configured device for running inference
+
+        Parameters
+        ----------
+        cpu
+            ``True`` to force running on the CPU.
+
+        Returns
+        -------
+        The device that torch should use
+        """
+        if cpu:
+            logger.debug("[%s] CPU mode selected. Returning CPU device context", self._name)
+            return torch.device("cpu")
+
+        if torch.cuda.is_available():
+            logger.debug("[%s] Cuda available. Returning Cuda device context", self._name)
+            return torch.device("cuda")
+
+        if torch.backends.mps.is_available():
+            logger.debug("[%s] MPS available. Returning MPS device context", self._name)
+            return torch.device("mps")
+
+        logger.debug("[%s] No backends available. Returning CPU device context", self._name)
+        return torch.device("cpu")
+
+    def _send_warmup_batch(self, model: torch.nn.Module, batch_size: int, input_size: int) -> None:
+        """Send a warmup batch through the model and set the received return type
+
+        Parameters
+        ----------
+        batch_size
+            The selected batch size of the model
+        input_size
+            The square pixel dimensions of the model input
+        """
+        with torch.inference_mode():
+            placeholder = torch.zeros((batch_size, 3, input_size, input_size),
+                                      dtype=torch.float32,
+                                      device=self.device).to(memory_format=torch.channels_last)
+            ret = model(placeholder)
+
+            if self._return_indices:
+                assert all(abs(x) < len(ret) for x in self._return_indices)
+                ret = itemgetter(*self._return_indices)(ret)
+
+            if not isinstance(ret, torch.Tensor):
+                assert isinstance(ret, (list, tuple))
+                logger.debug("[%s] Setting _output_is_list to True for %s (length: %s)",
+                             self._name, type(ret), len(ret))
+                self._output_is_list = True
+                self._output_length = len(ret)
+
+    def load_torch_model(self,
+                         model: torch.nn.Module,
+                         weights_path: str,
+                         batch_size: int,
+                         input_size: int,
+                         return_indices: list[int] | None) -> torch.nn.Module:
+        """Load a PyTorch model, apply the weights and pass a warmup batch through
+
+        Parameters
+        ----------
+        model
+            The Torch model to load
+        weights_path
+            Full path to the weights file to load
+        batch_size
+            The selected batch size of the model
+        input_size
+            The square pixel dimensions of the model input
+        return_indices
+            If the model outputs multiple items, just copy and return these indices from the GPU.
+            ``None`` to return all data
+
+        Returns
+        -------
+        The loaded model ready for inference
+        """
+        if return_indices is not None:
+            logger.debug("[%s] Setting return indices: %s", self._name, return_indices)
+            self._return_indices = return_indices
+
+        weights = torch.load(weights_path, map_location=self.device)
+        model.load_state_dict(weights)
+        model.to(self.device, memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
+        model.eval()
+
+        if self.compile:
+            with self._compile_lock:
+                if not self._compile_message_logged:
+                    self._compile_message_logged = True
+                    logger.info("Compiling PyTorch models...")
+                logger.verbose("Compiling %s...", self._name)  # type:ignore[attr-defined]
+                model = torch.compile(model)  # pyright:ignore[reportAssignmentType]
+                self._send_warmup_batch(model, batch_size, input_size)
+        else:
+            # TODO stacks VRAM at start. Maybe do try/except to do sequentially on OOM?
+            self._send_warmup_batch(model, batch_size, input_size)
+
+        self._model = model
+        logger.debug("[%s] Loaded model", self._name)
+        return model
+
+    def predict(self, batch: np.ndarray) -> np.ndarray:
+        """Run inference on a PyTorch model.
+
+        Parameters
+        ----------
+        batch
+            The batch array to feed to the PyTorch model
+
+        Returns
+        -------
+        The result from the PyTorch model
+        """
+        if self._model is None:
+            raise ValueError("Plugin function 'load_torch_model' must have been called to use "
+                             "this function")
+
+        with torch.inference_mode():
+            feed = torch.from_numpy(batch).pin_memory().to(self.device,
+                                                           non_blocking=True,
+                                                           memory_format=torch.channels_last)
+            out = self._model(feed)
+            if self._return_indices:
+                out = itemgetter(*self._return_indices)(out)
+
+            out = [x.to("cpu").numpy()
+                   for x in out] if self._output_is_list else out.to("cpu").numpy()
+
+        if self._output_is_list:
+            retval = np.empty((self._output_length, ), dtype="object")
+            retval[:] = out
+            return retval
+        return T.cast(np.ndarray, out)
 
 
 class ExtractPlugin(abc.ABC):
@@ -44,12 +220,6 @@ class ExtractPlugin(abc.ABC):
         For Torch models, force running on the CPU, rather than the accelerated device. Sets the
         :class:`torch.device` to :attr:`device`. Default: ``False``
     """
-    _compile_warning = Event()
-    """Event to indicate that model compilation is occurring. Just log once"""
-    _compile_lock = Lock()
-    """Lock for compiling models. Compiling is not thread safe (specifically TorchDynamo + Inductor
-    can run into errors) so we need to lock when compiling models. It is slower, but necessary"""
-
     def __init__(self,
                  input_size: int,
                  batch_size: int = 1,
@@ -57,6 +227,7 @@ class ExtractPlugin(abc.ABC):
                  dtype: str = "float32",
                  scale: tuple[int, int] = (0, 1),
                  force_cpu: bool = False) -> None:
+        logger.debug(parse_class_init(locals()))
         self.input_size = input_size
         """The size of the plugin's input in pixels"""
         self.name = self.__class__.__name__
@@ -69,11 +240,8 @@ class ExtractPlugin(abc.ABC):
         """The datatype that the plugin expects images at"""
         self.scale = scale
         """The numeric range that the plugin expects images to be in"""
-        self.device = self._get_device(force_cpu)
-        """The selected device to run torch ops on"""
-        self.compile: bool = False
-        """Set by the runner calling this plugin. Set to ``True`` if the plugin should compile
-        any Torch models"""
+        self._torch = _TorchInfer(self.name, force_cpu)
+        """Handles interfacing with an underlying Torch model"""
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
@@ -82,6 +250,22 @@ class ExtractPlugin(abc.ABC):
         params["force_cpu"] = self.device.type == "cpu"
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
+
+    @property
+    def compile(self) -> bool:
+        """``True`` if the plugin should compile any Torch models"""
+        return self._torch.compile
+
+    @compile.setter
+    def compile(self, value: bool) -> None:
+        """Set the indicator that this plugin's torch model should be compiled"""
+        logger.debug("[%s] Setting compile to: %s", self.name, value)
+        self._torch.compile = value
+
+    @property
+    def device(self) -> torch.device:
+        """The selected device to run torch ops on"""
+        return self._torch.device
 
     @abc.abstractmethod
     def load_model(self):
@@ -157,42 +341,10 @@ class ExtractPlugin(abc.ABC):
         """
         return batch
 
-    def _get_device(self, cpu: bool = False) -> torch.device:
-        """Get the correctly configured device for running inference
-
-        Parameters
-        ----------
-        cpu
-            ``True`` to force running on the CPU.
-
-        Returns
-        -------
-        The device that torch should use
-        """
-        if cpu:
-            logger.debug("[%s] CPU mode selected. Returning CPU device context", self.name)
-            return torch.device("cpu")
-
-        if torch.cuda.is_available():
-            logger.debug("[%s] Cuda available. Returning Cuda device context", self.name)
-            return torch.device("cuda")
-
-        if torch.backends.mps.is_available():
-            logger.debug("[%s] MPS available. Returning MPS device context", self.name)
-            return torch.device("mps")
-
-        logger.debug("[%s] No backends available. Returning CPU device context", self.name)
-        return torch.device("cpu")
-
-    def _send_warmup_batch(self, model: torch.nn.Module) -> None:
-        """Send a warmup batch through the model"""
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            model(placeholder)
-
-    def load_torch_model(self, model: torch.nn.Module, weights_path: str) -> torch.nn.Module:
+    def load_torch_model(self,
+                         model: torch.nn.Module,
+                         weights_path: str,
+                         return_indices: list[int] | None = None) -> torch.nn.Module:
         """Load a PyTorch model, apply the weights and pass a warmup batch through
 
         This function does not need to be used, but some default Faceswap optimizations are
@@ -205,26 +357,37 @@ class ExtractPlugin(abc.ABC):
             The Torch model to load
         weights_path
             Full path to the weights file to load
+        return_indices
+            If the model outputs multiple items, but you only require some of them, the indices of
+            the required items can be placed here so that when calling `from_torch` any extra data
+            is not copied from the GPU and copied. Default: ``None`` (return all data)
 
         Returns
         -------
         The loaded model ready for inference
         """
-        weights = torch.load(weights_path, map_location=self.device)
-        model.load_state_dict(weights)
-        model.to(self.device, memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
-        model.eval()
-        if self.compile:
-            with self._compile_lock:
-                if not self._compile_warning.is_set():
-                    self._compile_warning.set()
-                    logger.info("Compiling PyTorch models...")
-                model = torch.compile(model)  # pyright:ignore[reportAssignmentType]
-                self._send_warmup_batch(model)
-        else:
-            self._send_warmup_batch(model)
-        logger.debug("[%s] Loaded model", self.name)
-        return model
+        return self._torch.load_torch_model(model, weights_path,
+                                            self.batch_size,
+                                            self.input_size,
+                                            return_indices)
+
+    def from_torch(self, batch: np.ndarray) -> np.ndarray:
+        """Run inference on a PyTorch model.
+
+        This function does not need to be used, however it handles torch backend for better
+        throughput, so it is recommended. Must have used `self.load_torch_model` to load the Torch
+        model to use this function.
+
+        Parameters
+        ----------
+        batch
+            The batch array to feed to the PyTorch model
+
+        Returns
+        -------
+        The result from the PyTorch model
+        """
+        return self._torch.predict(batch)
 
 
 class FacePlugin(ExtractPlugin):
