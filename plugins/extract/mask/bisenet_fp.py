@@ -102,7 +102,7 @@ class BiSeNetFP(FacePlugin):
         -------
         The loaded BiSeNetFP model
         """
-        weights = GetModel(f"bisnet_face_parsing_v{self._git_version}.pth", 14).model_path
+        weights = GetModel(f"bisenet_face_parsing_v{self._git_version}.pth", 14).model_path
         assert isinstance(weights, str)
         return T.cast(BiSeNet, self.load_torch_model(BiSeNet(5 if self._is_faceswap else 19),
                                                      weights,
@@ -396,9 +396,9 @@ class AttentionRefinementModule(nn.Module):
         The output from the block
         """
         feat = self.conv(inputs)
-        atten = F.avg_pool2d(feat, feat.size()[2:])  # pylint:disable=not-callable
-        atten = self.sigmoid_atten(self.bn_atten(self.conv_atten(atten)))
-        out = torch.mul(feat, atten)
+        attention = F.avg_pool2d(feat, feat.size()[2:])  # pylint:disable=not-callable
+        attention = self.sigmoid_atten(self.bn_atten(self.conv_atten(attention)))
+        out = torch.mul(feat, attention)
         return out
 
 
