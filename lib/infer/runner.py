@@ -412,7 +412,7 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
         queue. Override for runner specific processing"""
         process = "process"
         logger.debug("[%s.%s] Loading model", self._plugin_name, process)
-        self._plugin.load_model()
+        self._plugin.model = self._plugin.load_model()  # Load here to keep Cuda in same thread
         logger.debug("[%s.%s] Starting process", self._plugin_name, process)
         for batch in self._get_data(process):
             batch.data = self._predict(batch.data)
@@ -720,7 +720,6 @@ class ExtractRunner(abc.ABC):  # pylint:disable=too-many-instance-attributes
                 raise ValueError("Dummy plugin cannot have an input runner")
             logger.debug("[%s] Returning early for dummy plugin call", self.__class__.__name__)
             return self
-
         self._inbound_iterator = self._get_inbound_iterator()
         self._output_iterator = OutputIterator(self._queues["out"],
                                                f"{self._plugin_name}_out",

@@ -33,17 +33,24 @@ class FAN(ExtractPlugin):
         self.realign_centering = "head"
         self._reference_scale = 200. / 195.
 
-    def load_model(self):
-        """Load the FAN model"""
+    def load_model(self) -> FaceAlignmentNetwork:
+        """Load the FAN model
+
+        Returns
+        -------
+        The loaded FAN model
+        """
         weights = GetModel("face-alignment-network_2d4_v4.pth", 13).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(FaceAlignmentNetwork,
-                            self.load_torch_model(FaceAlignmentNetwork(num_stack=4,
-                                                                       num_modules=1,
-                                                                       hg_depth=4,
-                                                                       num_features=256,
-                                                                       num_classes=68),
-                                                  weights))
+        model = T.cast(FaceAlignmentNetwork,
+                       self.load_torch_model(FaceAlignmentNetwork(num_stack=4,
+                                                                  num_modules=1,
+                                                                  hg_depth=4,
+                                                                  num_features=256,
+                                                                  num_classes=68),
+                                             weights,
+                                             return_indices=[-1]))
+        return model
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the ROI faces detection boxes for prediction
@@ -85,11 +92,7 @@ class FAN(ExtractPlugin):
         -------
         The predictions from the aligner
         """
-        feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device,
-                                                                memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed)[-1].cpu().numpy()
-        return retval
+        return self.from_torch(batch.transpose(0, 3, 1, 2))
 
     def post_process(self, batch: np.ndarray) -> np.ndarray:  # pylint:disable=too-many-locals
         """Process the output from the model

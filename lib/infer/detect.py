@@ -192,8 +192,8 @@ class Detect(ExtractRunner):
         """
         # pylint:disable=duplicate-code
         process = "process"
-        logger.debug("[%s.%s] Loading model", self._plugin.name, process)
-        self._plugin.load_model()
+        logger.debug("[%s.%s] Loading model", self._plugin_name, process)
+        self._plugin.model = self._plugin.load_model()  # Load here to keep Cuda in same thread
 
         logger.debug("[%s.%s] Starting process", self._plugin.name, process)
         for batch in self._get_data(process):

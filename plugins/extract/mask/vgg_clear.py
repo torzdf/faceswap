@@ -5,7 +5,6 @@ import logging
 import typing as T
 
 import numpy as np
-import torch
 from torch import nn
 from torch.nn import functional as F
 
@@ -31,11 +30,18 @@ class VGGClear(FacePlugin):
                          centering="face")
         self.model: VGGClearModel
 
-    def load_model(self) -> None:
-        """Initialize the VGG Clear Mask model."""
+    def load_model(self) -> VGGClearModel:
+        """Initialize the VGG Clear Mask model.
+
+        Returns
+        -------
+        The loaded VGGClear model
+        """
         weights = GetModel("Nirkin_300_softmax_v2.pth", 8).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(VGGClearModel, self.load_torch_model(VGGClearModel(), weights))
+        return T.cast(VGGClearModel, self.load_torch_model(VGGClearModel(),
+                                                           weights,
+                                                           return_indices=[-1]))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction
@@ -63,10 +69,7 @@ class VGGClear(FacePlugin):
         -------
         The predicted masks from the plugin
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed)[:, -1].cpu().numpy()
-        return retval
+        return self.from_torch(batch)
 
 
 class ConvBlock(nn.Module):
@@ -215,7 +218,7 @@ class VGGClearModel(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         x = self.upscore8_r(x)
         x = x[:, :, 31:-45, 31:-45]
-        return F.softmax(x, dim=1)
+        return F.softmax(x, dim=1).swapaxes(0, 1)
 
 
 __all__ = get_module_objects(__name__)

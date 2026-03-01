@@ -95,12 +95,18 @@ class BiSeNetFP(FacePlugin):
         logger.debug("Selected segment indices: %s", retval)
         return retval
 
-    def load_model(self) -> None:
-        """Initialize the BiSeNet Face Parsing model. """
+    def load_model(self) -> BiSeNet:
+        """Initialize the BiSeNet Face Parsing model.
+
+        Returns
+        -------
+        The loaded BiSeNetFP model
+        """
         weights = GetModel(f"bisnet_face_parsing_v{self._git_version}.pth", 14).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(BiSeNet, self.load_torch_model(BiSeNet(5 if self._is_faceswap else 19),
-                                                           weights))
+        return T.cast(BiSeNet, self.load_torch_model(BiSeNet(5 if self._is_faceswap else 19),
+                                                     weights,
+                                                     return_indices=[0]))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction
@@ -129,10 +135,7 @@ class BiSeNetFP(FacePlugin):
 
             The predicted masks from the plugin
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed)[0].cpu().numpy().transpose(0, 2, 3, 1)
-        return retval
+        return self.from_torch(batch).transpose(0, 2, 3, 1)
 
     def post_process(self, batch: np.ndarray) -> np.ndarray:
         """Process the output from the model

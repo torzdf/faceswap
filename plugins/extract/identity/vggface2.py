@@ -7,13 +7,15 @@ import typing as T
 
 import numpy as np
 
-import torch
-from torch import nn, Tensor
+from torch import nn
 from torch.nn import functional as F
 
 from lib.utils import get_module_objects, GetModel
 from plugins.extract.base import FacePlugin
 from . import vggface2_defaults as cfg
+
+if T.TYPE_CHECKING:
+    from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +51,17 @@ class VGGFace2(FacePlugin):
         self._average_img = np.array([91.4953, 103.8827, 131.0912], dtype="float32")
         logger.debug("Initialized %s", self.__class__.__name__)
 
-    def load_model(self) -> None:
-        """Initialize VGG Face 2 Model."""
+    def load_model(self) -> VGGFace2Model:
+        """Initialize VGG Face 2 Model.
+
+        Returns
+        -------
+        The loaded VGGFace2 model
+        """
         # pylint:disable=duplicate-code
         weights = GetModel("vggface2_resnet50_v3.pth", 10).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(VGGFace2Model, self.load_torch_model(VGGFace2Model(), weights))
+        return T.cast(VGGFace2Model, self.load_torch_model(VGGFace2Model(), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction
@@ -82,10 +89,7 @@ class VGGFace2(FacePlugin):
         -------
         The predictions from the plugin
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed).cpu().numpy()
-        return retval
+        return self.from_torch(batch)
 
 
 # Model definition

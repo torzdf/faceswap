@@ -30,7 +30,6 @@ class MTCNN(ExtractPlugin):
                          force_cpu=cfg.cpu())
         self.model: MTCNNModel
         self._validate_config()
-        self._model_path = self._get_weights_path()
 
     def _validate_config(self) -> None:
         """Validate that config options are correct. If not reset to default"""
@@ -64,22 +63,29 @@ class MTCNN(ExtractPlugin):
         assert isinstance(model_path, list)
         return model_path
 
-    def load_model(self):
-        """Load the model"""
+    def load_model(self) -> MTCNNModel:
+        """Load the model
+
+        Returns
+        -------
+        The loaded MTCNN model
+        """
+        weights = self._get_weights_path()
         threshold = [cfg.threshold_1(), cfg.threshold_2(), cfg.threshold_3()]
-        self.model = MTCNNModel(self._model_path,
-                                self.device,
-                                input_size=self.input_size,
-                                min_size=cfg.minsize(),
-                                threshold=threshold,
-                                factor=cfg.scalefactor(),
-                                compile_model=self.compile)
+        model = MTCNNModel(weights,
+                           self.device,
+                           input_size=self.input_size,
+                           min_size=cfg.minsize(),
+                           threshold=threshold,
+                           factor=cfg.scalefactor(),
+                           compile_model=self.compile)
 
         placeholder_shape = (self.batch_size, self.input_size, self.input_size, 3)
         placeholder = np.zeros(placeholder_shape, dtype="float32")
 
-        self.model.detect_faces(placeholder)
+        model.detect_faces(placeholder)
         logger.debug("[%s] Loaded model", self.name)
+        return model
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Compile the detection image(s) for prediction. No further pre-processing required for

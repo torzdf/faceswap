@@ -7,8 +7,6 @@ import typing as T
 
 import numpy as np
 
-import torch
-
 from lib.utils import get_module_objects, GetModel
 from lib.model.networks.insightface_resnet import ir_50, ir_101
 from plugins.extract.base import FacePlugin
@@ -41,16 +39,20 @@ class TFace(FacePlugin):
         self.model: IRNet
         logger.debug("Initialized %s", self.__class__.__name__)
 
-    def load_model(self) -> None:
-        """Initialize TFace Model"""
+    def load_model(self) -> IRNet:
+        """Initialize TFace Model
+
+        Returns
+        -------
+        The loaded TFace model
+        """
         # pylint:disable=duplicate-code
         model = ir_50 if self._backbone == "ir-50" else ir_101
         vers = 1 if self._backbone == "ir-50" else 2
-
         weights = GetModel(f"tface_v{vers}.pth", 33).model_path
         assert isinstance(weights, str)
         assert self.input_size == 112
-        self.model = T.cast("IRNet", self.load_torch_model(model(self.input_size), weights))
+        return T.cast("IRNet", self.load_torch_model(model(self.input_size), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction
@@ -78,10 +80,7 @@ class TFace(FacePlugin):
         -------
         The predictions from the plugin
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed).cpu().numpy()
-        return retval
+        return self.from_torch(batch)
 
 
 __all__ = get_module_objects(__name__)

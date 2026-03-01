@@ -6,7 +6,6 @@ import typing as T
 
 import numpy as np
 
-import torch
 from torch import nn
 from torch.nn import functional as F
 
@@ -33,12 +32,18 @@ class VGGObstructed(FacePlugin):
                          centering="face")
         self.model: VGGObstructedModel
 
-    def load_model(self) -> None:
-        """Initialize the VGGObstructed Mask model."""
+    def load_model(self) -> VGGObstructedModel:
+        """Initialize the VGGObstructed Mask model.
+
+        Returns
+        -------
+        The loaded VGGObstructed model
+        """
         weights = GetModel("Nirkin_500_softmax_v2.pth", 8).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(VGGObstructedModel, self.load_torch_model(VGGObstructedModel(),
-                                                                      weights))
+        return T.cast(VGGObstructedModel, self.load_torch_model(VGGObstructedModel(),
+                                                                weights,
+                                                                return_indices=[0]))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the detected faces for prediction
@@ -66,10 +71,7 @@ class VGGObstructed(FacePlugin):
         -------
         The predicted masks from the plugin
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed)[:, 0].cpu().numpy() * -1.0 + 1.0
-        return retval
+        return self.from_torch(batch) * -1.0 + 1.0
 
 
 class ConvBlock(nn.Module):
@@ -221,7 +223,7 @@ class VGGObstructedModel(nn.Module):  # pylint:disable=too-many-instance-attribu
 
         x = self.upscore8(x)
         x = x[:, :, 31:-37, 31:-37]
-        return F.softmax(x, dim=1)
+        return F.softmax(x, dim=1).swapaxes(0, 1)
 
 
 __all__ = get_module_objects(__name__)

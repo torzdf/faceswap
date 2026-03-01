@@ -98,16 +98,19 @@ class RetinaFace(ExtractPlugin):
             output.clip(0, 1)
         return output[None]
 
-    def load_model(self) -> None:
-        """Initialize RetinaFace Model"""
+    def load_model(self) -> RetinaFaceModel:
+        """Initialize RetinaFace Model
+
+        Returns
+        -------
+        The loaded RetinaFace model
+        """
         backbone = cfg.backbone()
         assert backbone in ("resnet", "mobilenet")
-
         vers = 1 if backbone == "resnet" else 2
         weights = GetModel(f"retinaface_v{vers}.pth", 32).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(RetinaFaceModel, self.load_torch_model(RetinaFaceModel(backbone),
-                                                                   weights))
+        return T.cast(RetinaFaceModel, self.load_torch_model(RetinaFaceModel(backbone), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Compile the detection image(s) for prediction
@@ -136,11 +139,7 @@ class RetinaFace(ExtractPlugin):
         -------
         The batch of detection results from the model
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        retval = np.empty((2,), dtype="object")
-        with torch.inference_mode():
-            retval[:] = [x.cpu().numpy() for x in self.model(feed)]
-        return retval
+        return self.from_torch(batch)
 
     def _decode(self, locations: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
         """Decode locations from the model using priors to undo the encoding we did for offset

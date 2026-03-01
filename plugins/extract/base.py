@@ -16,6 +16,7 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
+    import cv2
     from lib.align.constants import CenteringType
 
 
@@ -242,6 +243,8 @@ class ExtractPlugin(abc.ABC):
         """The numeric range that the plugin expects images to be in"""
         self._torch = _TorchInfer(self.name, force_cpu)
         """Handles interfacing with an underlying Torch model"""
+        self.model: torch.nn.Module | cv2.dnn.Net | T.Any
+        """The loaded model for the plugin"""
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
@@ -268,8 +271,13 @@ class ExtractPlugin(abc.ABC):
         return self._torch.device
 
     @abc.abstractmethod
-    def load_model(self):
-        """Override to perform any model initialization code"""
+    def load_model(self) -> torch.nn.Module | cv2.dnn.Net | T.Any:
+        """Override to perform any model initialization code
+
+        Returns
+        -------
+        The loaded model that will be accessible from :attr:`Model`
+        """
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Override to perform pre-processing

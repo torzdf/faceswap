@@ -107,10 +107,13 @@ class PluginLoader():
             raise ValueError(f"{name} is not a valid {plugin_type} plugin. Select from {mods}")
 
         mod, obj = plugins[mods.index(real_name)].rsplit(".", maxsplit=1)
-        logger.info("Loading %s from %s", plugin_type.title(), name.upper())
+        logger.debug("Loading '%s' from '%s'", plugin_type, name)
 
         module = import_module(mod)
-        return getattr(module, obj)()
+
+        retval = getattr(module, obj)()
+        logger.info("Loading %s from %s", plugin_type.title(), retval.name)
+        return retval
 
     @staticmethod
     def get_model(name: str, disable_logging: bool = False) -> type[ModelBase]:

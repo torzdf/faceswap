@@ -46,13 +46,19 @@ class CV2DNNAlign(ExtractPlugin):
                          scale=(0, 255))
         self.model: cv2.dnn.Net
 
-    def load_model(self) -> None:
-        """Load the CV2 DNN Aligner Model"""
+    def load_model(self) -> cv2.dnn.Net:
+        """Load the CV2 DNN Aligner Model
+
+        Returns
+        -------
+        The loaded cv2-DNN model
+        """
         model = GetModel(model_filename="cnn-facial-landmark_v1.pb", git_model_id=1)
         model_path = model.model_path
         assert isinstance(model_path, str)
-        self.model = cv2.dnn.readNetFromTensorflow(model_path)
-        self.model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        model = cv2.dnn.readNetFromTensorflow(model_path)
+        model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        return model
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Format the ROI faces detection boxes for prediction

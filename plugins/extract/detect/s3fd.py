@@ -49,11 +49,16 @@ class S3FD(ExtractPlugin):
         assert isinstance(model_path, str)
         return model_path
 
-    def load_model(self) -> None:
-        """Load the S3FD Model"""
+    def load_model(self) -> S3FDModel:
+        """Load the S3FD Model
+
+        Returns
+        -------
+        The loaded S3FD model
+        """
         weights = GetModel(model_filename="s3fd_torch_v3.pth", git_model_id=11).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(S3FDModel, self.load_torch_model(S3FDModel(), weights))
+        return T.cast(S3FDModel, self.load_torch_model(S3FDModel(), weights))
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Compile the detection image(s) for prediction
@@ -82,16 +87,7 @@ class S3FD(ExtractPlugin):
         -------
         The batch of detection results from the model
         """
-        feed = torch.from_numpy(batch).to(self.device, memory_format=torch.channels_last)
-        with torch.inference_mode():
-            outputs = self.model(feed)
-        for i in range(len(outputs) // 2):
-            outputs[i * 2] = F.softmax(outputs[i * 2], dim=1)
-        result = [pred.cpu().numpy() for pred in outputs]
-
-        retval = np.empty(len(result), dtype=object)
-        retval[:] = result
-        return retval
+        return self.from_torch(batch)
 
     @staticmethod
     def decode(location: np.ndarray, priors: np.ndarray) -> np.ndarray:
@@ -319,7 +315,7 @@ class S3FDModel(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.conv7_2_mbox_conf = nn.Conv2d(256, 2, kernel_size=3, stride=1, padding=1)
         self.conv7_2_mbox_loc = nn.Conv2d(256, 4, kernel_size=3, stride=1, padding=1)
 
-    def forward(self,  # pylint:disable=too-many-locals
+    def forward(self,  # pylint:disable=too-many-locals,too-many-statements
                 inputs: torch.Tensor) -> list[torch.Tensor]:
         """Run the forward pass through S3FD
 
@@ -390,7 +386,11 @@ class S3FDModel(nn.Module):  # pylint:disable=too-many-instance-attributes
         b_max = torch.max(torch.max(chunk[0], chunk[1]), chunk[2])
         cls1 = torch.cat([b_max, chunk[3]], dim=1)
 
-        return [cls1, reg1, cls2, reg2, cls3, reg3, cls4, reg4, cls5, reg5, cls6, reg6]
+        outputs = [cls1, reg1, cls2, reg2, cls3, reg3, cls4, reg4, cls5, reg5, cls6, reg6]
+        for i in range(len(outputs) // 2):
+            outputs[i * 2] = F.softmax(outputs[i * 2], dim=1)
+
+        return outputs
 
 
 __all__ = get_module_objects(__name__)

@@ -25,14 +25,20 @@ class CV2DNNDetect(ExtractPlugin):
         self.confidence = cfg.confidence() / 100
         self._average_image = np.array([104, 117, 123], dtype="float32")
 
-    def load_model(self) -> None:
-        """Load the CV2 DNN Detector Model"""
+    def load_model(self) -> cv2.dnn.Net:
+        """Load the CV2 DNN Detector Model
+
+        Returns
+        -------
+        The loaded cv2-DNN model
+        """
         model = GetModel(model_filename=["resnet_ssd_v1.caffemodel", "resnet_ssd_v1.prototxt"],
                          git_model_id=4)
         model_path = model.model_path
         assert isinstance(model_path, list)
-        self.model = cv2.dnn.readNetFromCaffe(model_path[1], model_path[0])
-        self.model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        model = cv2.dnn.readNetFromCaffe(model_path[1], model_path[0])
+        model.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        return model
 
     def pre_process(self, batch: np.ndarray) -> np.ndarray:
         """Compile the detection image(s) for prediction

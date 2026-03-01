@@ -45,11 +45,16 @@ class UNetDFL(FacePlugin):
                          centering="legacy")
         self.model: UnetDFL
 
-    def load_model(self) -> None:
-        """Initialize the UNet-DFL Model"""
+    def load_model(self) -> UnetDFL:
+        """Initialize the UNet-DFL Model
+
+        Returns
+        -------
+        The loaded UnetDFL model
+        """
         weights = GetModel("DFL_256_sigmoid_v2.pth", 6).model_path
         assert isinstance(weights, str)
-        self.model = T.cast(UnetDFL, self.load_torch_model(UnetDFL(), weights))
+        return T.cast(UnetDFL, self.load_torch_model(UnetDFL(), weights))
 
     def process(self, batch: np.ndarray) -> np.ndarray:
         """Get the masks from the model
@@ -63,11 +68,7 @@ class UNetDFL(FacePlugin):
         -------
         The predicted masks from the plugin
         """
-        feed = torch.from_numpy(batch.transpose(0, 3, 1, 2)).to(self.device,
-                                                                memory_format=torch.channels_last)
-        with torch.inference_mode():
-            retval = self.model(feed).cpu().numpy().transpose(0, 2, 3, 1)
-        return retval
+        return self.from_torch(batch.transpose(0, 3, 1, 2)).transpose(0, 2, 3, 1)
 
 
 class ConvBlock(nn.Module):
