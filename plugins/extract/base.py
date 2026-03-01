@@ -5,7 +5,7 @@ from __future__ import annotations
 import abc
 import logging
 import typing as T
-from threading import Event
+from threading import Event, Lock
 
 import numpy as np
 import numpy.typing as npt
@@ -45,6 +45,10 @@ class ExtractPlugin(abc.ABC):
         :class:`torch.device` to :attr:`device`. Default: ``False``
     """
     _compile_warning = Event()
+    """Event to indicate that model compilation is occurring. Just log once"""
+    _compile_lock = Lock()
+    """Lock for compiling models. Compiling is not thread safe (specifically TorchDynamo + Inductor
+    can run into errors) so we need to lock when compiling models. It is slower, but necessary"""
 
     def __init__(self,
                  input_size: int,
@@ -180,6 +184,14 @@ class ExtractPlugin(abc.ABC):
         logger.debug("[%s] No backends available. Returning CPU device context", self.name)
         return torch.device("cpu")
 
+    def _send_warmup_batch(self, model: torch.nn.Module) -> None:
+        """Send a warmup batch through the model"""
+        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
+                                  dtype=torch.float32,
+                                  device=self.device).to(memory_format=torch.channels_last)
+        with torch.inference_mode():
+            model(placeholder)
+
     def load_torch_model(self, model: torch.nn.Module, weights_path: str) -> torch.nn.Module:
         """Load a PyTorch model, apply the weights and pass a warmup batch through
 
@@ -203,16 +215,14 @@ class ExtractPlugin(abc.ABC):
         model.to(self.device, memory_format=torch.channels_last)  # pyright:ignore[reportCallIssue]
         model.eval()
         if self.compile:
-            if not self._compile_warning.is_set():
-                self._compile_warning.set()
-                logger.info("Compiling PyTorch models...")
-            model = torch.compile(model)  # pyright:ignore[reportAssignmentType]
-
-        placeholder = torch.zeros((self.batch_size, 3, self.input_size, self.input_size),
-                                  dtype=torch.float32,
-                                  device=self.device).to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            model(placeholder)
+            with self._compile_lock:
+                if not self._compile_warning.is_set():
+                    self._compile_warning.set()
+                    logger.info("Compiling PyTorch models...")
+                model = torch.compile(model)  # pyright:ignore[reportAssignmentType]
+                self._send_warmup_batch(model)
+        else:
+            self._send_warmup_batch(model)
         logger.debug("[%s] Loaded model", self.name)
         return model
 
