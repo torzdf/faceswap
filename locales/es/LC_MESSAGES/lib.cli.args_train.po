@@ -212,7 +212,7 @@ msgstr ""
 "iteraciones indicado aquí. 0 para desactivar."
 
 #: lib/cli/args_train.py:184
-msgid "Use distibuted training on multi-gpu setups."
+msgid "Use distributed training on multi-gpu setups."
 msgstr "Utilice capacitación distribuida en configuraciones de múltiples GPU."
 
 #: lib/cli/args_train.py:192

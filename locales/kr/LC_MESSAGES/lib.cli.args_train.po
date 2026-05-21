@@ -196,7 +196,7 @@ msgstr ""
 "까지 선형적으로 증가시킵니다. 0으로 설정하면 비활성화됩니다."
 
 #: lib/cli/args_train.py:184
-msgid "Use distibuted training on multi-gpu setups."
+msgid "Use distributed training on multi-gpu setups."
 msgstr "멀티 GPU 환경에서 분산 학습을 활용하세요."
 
 #: lib/cli/args_train.py:192

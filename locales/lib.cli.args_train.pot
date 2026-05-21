@@ -140,7 +140,7 @@ msgid ""
 msgstr ""
 
 #: lib/cli/args_train.py:184
-msgid "Use distibuted training on multi-gpu setups."
+msgid "Use distributed training on multi-gpu setups."
 msgstr ""
 
 #: lib/cli/args_train.py:192

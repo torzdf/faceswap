@@ -208,7 +208,7 @@ msgstr ""
 "отключить."
 
 #: lib/cli/args_train.py:184
-msgid "Use distibuted training on multi-gpu setups."
+msgid "Use distributed training on multi-gpu setups."
 msgstr ""
 "Используйте распределенное обучение на системах с несколькими графическими "
 "процессорами."

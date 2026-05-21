@@ -165,6 +165,15 @@ class TrainArgs(FaceSwapArgs):
                 "model to stop automatically at a set number of iterations, you can set that "
                 "value here.")})
         argument_list.append({
+            "opts": ("-e", "--identity_loss"),
+            "dest": "identity-loss",
+            "action": "store_true",
+            "default": False,
+            "group": _("training"),
+            "help": _(
+                "Enable identity loss. Faces must have been extracted with an identity encoding. "
+                "Identity loss can be configured within train settings")})
+        argument_list.append({
             "opts": ("-a", "--warmup"),
             "action": Slider,
             "min_max": (0, 5000),
@@ -182,7 +191,7 @@ class TrainArgs(FaceSwapArgs):
             "default": False,
             "backend": ("nvidia", "rocm"),
             "group": _("training"),
-            "help": _("Use distibuted training on multi-gpu setups.")})
+            "help": _("Use distributed training on multi-gpu setups.")})
         argument_list.append({
             "opts": ("-n", "--no-logs"),
             "action": "store_true",
