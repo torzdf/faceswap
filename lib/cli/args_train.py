@@ -165,8 +165,8 @@ class TrainArgs(FaceSwapArgs):
                 "model to stop automatically at a set number of iterations, you can set that "
                 "value here.")})
         argument_list.append({
-            "opts": ("-e", "--identity_loss"),
-            "dest": "identity-loss",
+            "opts": ("-e", "--identity-loss"),
+            "dest": "identity_loss",
             "action": "store_true",
             "default": False,
             "group": _("training"),

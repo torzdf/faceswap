@@ -37,6 +37,9 @@ class BatchMeta:
     All lists are of len(number model outputs per side) with tensors in shape (batch_size,
     num_inputs, 1, H, W)
     """
+    image_indices: npt.NDArray[np.int64]
+    """The image indices for each of the images within the batch in shape
+    (batch_size, num_inputs). Used for downstream tracking"""
     mask_face: list[torch.Tensor] | None = None
     """The selected face mask for penalized loss/learn mask for each output in NCHW order"""
     mask_eye: list[torch.Tensor] | None = None
@@ -46,7 +49,9 @@ class BatchMeta:
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = ", ".join(f"{k}={None if v is None else [(x.shape, x.dtype) for x in v]}"
+        params = ", ".join(f"{k}={(None if v is None
+                                   else format_array(v) if isinstance(v, np.ndarray)
+                                   else [(x.shape, x.dtype) for x in v])}"
                            for k, v in self.__dict__.items())
         return f"{self.__class__.__name__}({params})"
 
@@ -60,11 +65,16 @@ class BatchMeta:
 
         Returns
         -------
-        The meta data for a specific model input. Data will be populated in lists of
-        length num_outputs in shape (batch_size, 1, H, W)
+        The meta data for a specific model input. image_indices will be a 1D array of image indices
+        for the requested model input index. All other Data will be populated in lists of length
+        num_outputs in shape (batch_size, 1, H, W)
         """
-        return BatchMeta(**{k: None if v is None else [x[:, key] for x in v]
-                            for k, v in self.__dict__.items()})
+        mask_dict = {k: None if v is None else [x[:, key] for x in v]
+                     for k, v in self.__dict__.items() if k != "image_indices"}
+        return BatchMeta(image_indices=self.image_indices[:, key],
+                         mask_face=mask_dict["mask_face"],
+                         mask_eye=mask_dict["mask_eye"],
+                         mask_mouth=mask_dict["mask_mouth"])
 
     def to(self, device: str | torch.Device) -> T.Self:
         """Place all contained tensors onto the given device
@@ -80,7 +90,7 @@ class BatchMeta:
         """
         for k in list(self.__dict__):
             v = self.__dict__[k]
-            if v is None:
+            if k == "image_indices" or v is None:
                 continue
             self.__dict__[k] = [x.to(device) for x in v]
         return self
@@ -328,7 +338,9 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         return f"{self.__class__.__name__}({s_params})"
 
     def _create_targets(self, batch: npt.NDArray[np.uint8]
-                        ) -> tuple[list[torch.Tensor], BatchMeta]:
+                        ) -> tuple[list[torch.Tensor],
+                                   dict[T.Literal["mask_face", "mask_eye", "mask_mouth"],
+                                        list[torch.Tensor]]]:
         """ Compile target images, with masks, for the model output sizes.
 
         Parameters
@@ -345,8 +357,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         targets
             List of len (num_outputs) of target images in shape (batch_size, num_inputs, height,
             width, 3) at all model output sizes as float32 0.0 - 1.0 range
-        meta
-            Any additional Meta information relating to the batch required for training the model
+        masks
+            Any additional masks relating to the batch required for training the model
         """
         logger.trace("[%s] Compiling targets: batch shape: %s",  # type:ignore[attr-defined]
                      self._name, batch.shape)
@@ -370,12 +382,16 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                         for _ in self._output_sizes]
 
         targets = [torch.from_numpy(out[..., :3]) for out in reshaped]
-        masks = BatchMeta(
-            **{self._mask_types[idx]: [torch.from_numpy(out[..., 3 + idx][:, :, None, :, :])
-                                       for out in reshaped]
-               for idx in range(reshaped[0].shape[-1] - 3)})
+        masks = T.cast(
+            dict[T.Literal["mask_face", "mask_eye", "mask_mouth"], list[torch.Tensor]],
+            {self._mask_types[idx]: [torch.from_numpy(out[..., 3 + idx][:, :, None, :, :])
+                                     for out in reshaped]
+             for idx in range(reshaped[0].shape[-1] - 3)}
+        )
+
         logger.trace("[%s] Processed targets: %s, masks: %s",  # type:ignore[attr-defined]
-                     self._name, [t.shape for t in targets], masks)
+                     self._name, [t.shape for t in targets], {k: [x.shape for x in v]
+                                                              for k, v in masks.items()})
         return targets, masks
 
     def _get_landmarks_pairs(self, indices: npt.NDArray[np.int64]
@@ -461,7 +477,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
         feed = feed.reshape(self._num_inputs, self._batch_size, *feed.shape[1:])
         inputs = [torch.from_numpy(x) for x in feed]
-        return inputs, targets, masks
+        meta = BatchMeta(image_indices=indices.T, **masks)
+        return inputs, targets, meta
 
 
 __all__ = get_module_objects(__name__)
