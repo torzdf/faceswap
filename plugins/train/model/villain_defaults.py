@@ -39,6 +39,6 @@ lowmem = ConfigItem(
     datatype=bool,
     default=False,
     group="settings",
-    info="Lower memory mode. Set to 'True' if having issues with VRAM useage.\n"
+    info="Lower memory mode. Set to 'True' if having issues with VRAM usage.\n"
          "NB: Models with a changed lowmem mode are not compatible with each other.",
     fixed=True)

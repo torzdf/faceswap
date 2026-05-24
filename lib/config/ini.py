@@ -89,8 +89,8 @@ class ConfigFile():
         logger.debug("[%s] %s config: '%s'",
                      self._plugin_group, "Updating" if self._exists else "Saving", self._file_path)
         # TODO in python >= 3.14 this will error when there are delimiters in the comments
-        with open(self._file_path, "w", encoding="utf-8", errors="replace") as f_cfgfile:
-            self._parser.write(f_cfgfile)
+        with open(self._file_path, "w", encoding="utf-8", errors="replace") as f_cfg:
+            self._parser.write(f_cfg)
         logger.info("[%s] Saved config: '%s'", self._plugin_group, self._file_path)
 
     # .ini vs Faceswap Config checking
@@ -378,11 +378,17 @@ class ConfigFile():
         app_config : dict[str, :class:`ConfigSection`]
             The latest configuration settings from the application. Section name is key
         """
+        sync_from_app = False
         if not self._exists:
             logger.debug("[%s] Creating new ini file", self._plugin_group)
             self._sync_from_app(app_config)
+        elif LegacyUpdate().update(self._plugin_group, self._parser):
+            sync_from_app = True
 
         if not self._is_synced_structure(app_config):
+            sync_from_app = True
+
+        if sync_from_app:
             self._sync_from_app(app_config)
 
         self._sync_to_app(app_config)
@@ -405,6 +411,59 @@ class ConfigFile():
         if parser != self._parser:
             self._parser = parser
         self.save()
+
+
+class LegacyUpdate:
+    """Updates stored config items that have changed to their new values"""
+    @classmethod
+    def _update_train_config(cls, parser: ConfigParser) -> bool:
+        """Update legacy train config items
+
+        Parameters
+        ----------
+        parser
+            The train parser to be updated
+
+        Returns
+        -------
+        ``True`` if the config was updated
+        """
+        retval = False
+        # loss weights converted from percentage ints to float multipliers.
+        # Rather than just blanket converting values stored as ints to floats we can check for
+        # addition of new "loss_weight" key that was implemented at the same time to protect
+        # against updating values where user has entered whole floats as ints
+        if parser.get("global.loss", "loss_weight", fallback=None) is not None:
+            return False  # key exists
+        for key in ("loss_weight_2", "loss_weight_3", "loss_weight_4"):
+            val = parser.get("global.loss", key, fallback=None)
+            if val is None:
+                continue
+            retval = True
+            new_val = str(float(val) / 100.0)
+            logger.info("[train] Updating legacy config item '%s' from percentage %s to "
+                        "multiplier %s", key, val, new_val)
+            parser["global.loss"][key] = new_val
+        return retval
+
+    @classmethod
+    def update(cls, plugin_group: str, parser: ConfigParser) -> bool:
+        """Update the config for the given plugin group
+
+        Parameters
+        ----------
+        plugin_group
+            The plugin group that is calling the updater
+        parser
+            The parser to be updated
+
+        Returns
+        -------
+        ``True`` if the config was updated
+        """
+        if plugin_group == "train":
+            return cls._update_train_config(parser)
+        return False
 
 
 __all__ = get_module_objects(__name__)

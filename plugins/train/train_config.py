@@ -301,6 +301,18 @@ _LOSS_HELP = {
 
 _NON_PRIMARY_LOSS = ["flip", "lpips_alex", "lpips_squeeze", "lpips_vgg16", "none"]
 
+_LOSS_WEIGHT_HELP = (
+    "\n\nThe value given here is as the amount that the loss output for this function should be "
+    "multiplied by. This impacts how much it will contribute to the overall loss cost of the "
+    "model. For example:"
+    "\n\t 1.0 - The loss calculated for this function will be applied at its full amount towards "
+    "the overall loss score. "
+    "\n\t 0.25 - The loss calculated for this function will be reduced by a quarter prior to "
+    "adding to the overall loss score. "
+    "\n\t 4.0 - The loss calculated for this function will be multiplied 4 times prior to adding "
+    "to the overall loss score."
+    "\n\t 0.0 - Disables this loss function altogether.")
+
 
 @dataclass
 class Loss(GlobalSection):
@@ -326,6 +338,14 @@ class Loss(GlobalSection):
                                        if k not in _NON_PRIMARY_LOSS)),
         choices=[x for x in sorted(_LOSS_HELP) if x not in _NON_PRIMARY_LOSS],
         fixed=False)
+    loss_weight = ConfigItem(
+        datatype=float,
+        default=1.0,
+        group=_("loss"),
+        info=_("The amount of weight to apply to the main loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        min_max=(0.0, 10.0),
+        rounding=3,
+        fixed=False)
     loss_function_2 = ConfigItem(
         datatype=str,
         default="mse",
@@ -339,23 +359,12 @@ class Loss(GlobalSection):
         choices=list(sorted(_LOSS_HELP)),
         fixed=False)
     loss_weight_2 = ConfigItem(
-        datatype=int,
-        default=100,
+        datatype=float,
+        default=1.0,
         group=_("loss"),
-        info=_(
-            "The amount of weight to apply to the second loss function.\n\n"
-            "\n\nThe value given here is as a percentage denoting how much the selected "
-            "function should contribute to the overall loss cost of the model. For "
-            "example:"
-            "\n\t 100 - The loss calculated for the second loss function will be applied "
-            "at its full amount towards the overall loss score. "
-            "\n\t 25 - The loss calculated for the second loss function will be reduced "
-            "by a quarter prior to adding to the overall loss score. "
-            "\n\t 400 - The loss calculated for the second loss function will be "
-            "multiplied 4 times prior to adding to the overall loss score. "
-            "\n\t 0 - Disables the second loss function altogether."),
-        min_max=(0, 400),
-        rounding=1,
+        info=_("The amount of weight to apply to the 2nd loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        min_max=(0.0, 10.0),
+        rounding=3,
         fixed=False)
     loss_function_3 = ConfigItem(
         datatype=str,
@@ -368,23 +377,12 @@ class Loss(GlobalSection):
         choices=list(sorted(_LOSS_HELP)),
         fixed=False)
     loss_weight_3 = ConfigItem(
-        datatype=int,
-        default=0,
+        datatype=float,
+        default=0.0,
         group=_("loss"),
-        info=_(
-            "The amount of weight to apply to the third loss function.\n\n"
-            "\n\nThe value given here is as a percentage denoting how much the selected "
-            "function should contribute to the overall loss cost of the model. For "
-            "example:"
-            "\n\t 100 - The loss calculated for the third loss function will be applied "
-            "at its full amount towards the overall loss score. "
-            "\n\t 25 - The loss calculated for the third loss function will be reduced "
-            "by a quarter prior to adding to the overall loss score. "
-            "\n\t 400 - The loss calculated for the third loss function will be "
-            "multiplied 4 times prior to adding to the overall loss score. "
-            "\n\t 0 - Disables the third loss function altogether."),
-        min_max=(0, 400),
-        rounding=1,
+        info=_("The amount of weight to apply to the 3rd loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        min_max=(0.0, 10.0),
+        rounding=3,
         fixed=False)
     loss_function_4 = ConfigItem(
         datatype=str,
@@ -398,23 +396,12 @@ class Loss(GlobalSection):
         choices=list(sorted(_LOSS_HELP)),
         fixed=False)
     loss_weight_4 = ConfigItem(
-        datatype=int,
-        default=0,
+        datatype=float,
+        default=0.0,
         group=_("loss"),
-        info=_(
-            "The amount of weight to apply to the fourth loss function.\n\n"
-            "\n\nThe value given here is as a percentage denoting how much the selected "
-            "function should contribute to the overall loss cost of the model. For "
-            "example:"
-            "\n\t 100 - The loss calculated for the fourth loss function will be applied "
-            "at its full amount towards the overall loss score. "
-            "\n\t 25 - The loss calculated for the fourth loss function will be reduced "
-            "by a quarter prior to adding to the overall loss score. "
-            "\n\t 400 - The loss calculated for the fourth loss function will be "
-            "multiplied 4 times prior to adding to the overall loss score. "
-            "\n\t 0 - Disables the fourth loss function altogether."),
-        min_max=(0, 400),
-        rounding=1,
+        info=_("The amount of weight to apply to the 4th loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        min_max=(0.0, 10.0),
+        rounding=3,
         fixed=False)
     mask_loss_function = ConfigItem(
         datatype=str,

@@ -42,8 +42,8 @@ input_size = ConfigItem(
     info="Resolution (in pixels) of the image to train on.\n"
          "BE AWARE Larger resolution will dramatically increaseVRAM requirements.\n"
          "Make sure your resolution is divisible by 64 (e.g. 64, 128, 256 etc.).\n"
-         "NB: Your faceset must be at least 1.6x larger than your required input "
-         "size.\n(e.g. 160 is the maximum input size for a 256x256 faceset).",
+         "NB: Your face-set must be at least 1.6x larger than your required input "
+         "size.\n(e.g. 160 is the maximum input size for a 256x256 face-set).",
     rounding=64,
     min_max=(64, 512),
     fixed=True)
@@ -52,9 +52,9 @@ lowmem = ConfigItem(
     datatype=bool,
     default=False,
     group="settings",
-    info="Lower memory mode. Set to 'True' if having issues with VRAM useage.\n"
+    info="Lower memory mode. Set to 'True' if having issues with VRAM usage.\n"
          "NB: Models with a changed lowmem mode are not compatible with each other.\n"
-         "NB: lowmem will override cutom nodes and complexity settings.",
+         "NB: lowmem will override custom nodes and complexity settings.",
     fixed=True)
 
 nodes = ConfigItem(
