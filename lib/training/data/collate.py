@@ -37,6 +37,8 @@ class BatchMeta:
     All lists are of len(number model outputs per side) with tensors in shape (batch_size,
     num_inputs, 1, H, W)
     """
+    side_index: tuple[int, ...]
+    """The input side index/indices that are contained within this batch"""
     image_indices: npt.NDArray[np.int64]
     """The image indices for each of the images within the batch in shape
     (batch_size, num_inputs). Used for downstream tracking"""
@@ -49,7 +51,7 @@ class BatchMeta:
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = ", ".join(f"{k}={(None if v is None
+        params = ", ".join(f"{k}={(v if v is None or isinstance(v, tuple)
                                    else format_array(v) if isinstance(v, np.ndarray)
                                    else [(x.shape, x.dtype) for x in v])}"
                            for k, v in self.__dict__.items())
@@ -70,8 +72,9 @@ class BatchMeta:
         num_outputs in shape (batch_size, 1, H, W)
         """
         mask_dict = {k: None if v is None else [x[:, key] for x in v]
-                     for k, v in self.__dict__.items() if k != "image_indices"}
-        return BatchMeta(image_indices=self.image_indices[:, key],
+                     for k, v in self.__dict__.items() if k.startswith("mask")}
+        return BatchMeta(side_index=(self.side_index[key], ),
+                         image_indices=self.image_indices[:, key],
                          mask_face=mask_dict["mask_face"],
                          mask_eye=mask_dict["mask_eye"],
                          mask_mouth=mask_dict["mask_mouth"])
@@ -90,9 +93,12 @@ class BatchMeta:
         """
         for k in list(self.__dict__):
             v = self.__dict__[k]
-            if k == "image_indices" or v is None:
+            if k in ("side_index", "image_indices") or v is None:
                 continue
-            self.__dict__[k] = [x.to(device) for x in v]
+            if isinstance(v, list):
+                self.__dict__[k] = [x.to(device) for x in v]
+            else:
+                self.__dict__[k] = v.to(device)
         return self
 
 
@@ -477,7 +483,9 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
         feed = feed.reshape(self._num_inputs, self._batch_size, *feed.shape[1:])
         inputs = [torch.from_numpy(x) for x in feed]
-        meta = BatchMeta(image_indices=indices.T, **masks)
+        meta = BatchMeta(side_index=tuple(range(self._num_inputs)),
+                         image_indices=indices.T,
+                         **masks)
         return inputs, targets, meta
 
 

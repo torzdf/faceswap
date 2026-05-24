@@ -35,6 +35,10 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# TODO custom config file loading
+# TODO centralize swap-prediction for identity loss for dist training
+# TODO output loss ratios at each save iter
+
 class Train():
     """The Faceswap Training Process.
 
@@ -311,6 +315,7 @@ class Train():
                              flip=not self._args.no_flip,
                              warp=not self._args.no_warp,
                              cache_landmarks=self._args.warp_to_landmarks,
+                             identity_loss=self._args.identity_loss,
                              lr_finder=self._args.use_lr_finder,
                              snapshot_interval=self._args.snapshot_interval)
         retval = Trainer(PluginLoader.get_trainer(trainer)(model, config),

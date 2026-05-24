@@ -42,6 +42,8 @@ class TrainConfig:
         ``False`` to disable warping ``True`` to enable warping
     cache_landmarks
         ``True`` to cache landmarks from the other side for Warp to landmarks
+    identity_loss
+        ``True`` to enable identity loss
     use_lr_finder
         ``True`` to use the learning rate finder. Default: ``False``
     snapshot interval
@@ -60,6 +62,8 @@ class TrainConfig:
     """``False`` to disable warping ``True`` to enable warping"""
     cache_landmarks: bool
     """``True`` to cache landmarks from the other side for Warp to landmarks"""
+    identity_loss: bool
+    """``True`` to use identity loss"""
     lr_finder: bool = False
     """``True`` to use the learning rate finder"""
     snapshot_interval: int = -1

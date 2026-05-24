@@ -23,13 +23,14 @@ from lib.utils import get_module_objects, FaceswapError
 from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
 
-from .loss import LossCollator
+from .loss import LossCollator, LossConfig
 from .optimizer import Optimizer
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt
     from collections.abc import Callable
     from plugins.train.trainer.base import TrainerBase
+    from .data.data_set import MultiDataset
     from .loss import BatchLoss
 
 logger = logging.getLogger(__name__)
@@ -76,14 +77,15 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._device = get_device()
         self._model = plugin.model
         self._out_size = max(x[1] for x in self._model.output_shapes if x[-1] != 1)
+
+        self._train_loader = self._get_train_loader()
+
         self._configure_model(plugin)
         self._optimizer = Optimizer(self._model,
                                     mod_cfg.Optimizer,
                                     mixed_precision=mod_cfg.mixed_precision(),
                                     warmup_steps=warmup_steps)
         self._optimizer.to(self._device)
-
-        self._train_loader = self._get_train_loader()
 
         self._exit_early = self._handle_lr_finder()
         if self._exit_early:
@@ -120,23 +122,26 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         plugin
             The plugin that is training the model
         """
-        loss = LossCollator(
-            functions=[mod_cfg.Loss.loss_function(),
-                       mod_cfg.Loss.loss_function_2(),
-                       mod_cfg.Loss.loss_function_3(),
-                       mod_cfg.Loss.loss_function_4()],
-            weights=[1.0,
-                     mod_cfg.Loss.loss_weight_2() / 100.,
-                     mod_cfg.Loss.loss_weight_3() / 100.,
-                     mod_cfg.Loss.loss_weight_4() / 100.],
-            color_order=self._model.color_order,
-            use_mask=mod_cfg.Loss.penalized_mask_loss(),
-            eye_multiplier=mod_cfg.Loss.eye_multiplier(),
-            mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
-            smallest_output=min(x[1] for x in self._model.output_shapes
-                                if x[-1] != 1),
-            mask_loss=(None if not mod_cfg.Loss.learn_mask()
-                       else mod_cfg.Loss.mask_loss_function()))
+        conf = LossConfig(functions=[mod_cfg.Loss.loss_function(),
+                                     mod_cfg.Loss.loss_function_2(),
+                                     mod_cfg.Loss.loss_function_3(),
+                                     mod_cfg.Loss.loss_function_4()],
+                          weights=[1.0,
+                                   mod_cfg.Loss.loss_weight_2() / 100.,
+                                   mod_cfg.Loss.loss_weight_3() / 100.,
+                                   mod_cfg.Loss.loss_weight_4() / 100.],
+                          use_mask=mod_cfg.Loss.penalized_mask_loss(),
+                          eye_multiplier=mod_cfg.Loss.eye_multiplier(),
+                          mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
+                          mask_loss=(None if not mod_cfg.Loss.learn_mask()
+                                     else mod_cfg.Loss.mask_loss_function()),
+                          identity_backend="ir-101" if plugin.config.identity_loss else None)  # TODO config
+        loss = LossCollator(conf,
+                            color_order=self._model.color_order,
+                            smallest_output=min(x[1] for x in self._model.output_shapes
+                                                if x[-1] != 1),
+                            image_counts=T.cast("MultiDataset",
+                                                self._train_loader.loader.dataset).num_images)
         plugin.register_loss(loss)
         plugin.model.model.to(self._device)
 

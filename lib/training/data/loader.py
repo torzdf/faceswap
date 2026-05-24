@@ -67,11 +67,11 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         self._color_order: T.Literal["bgr", "rgb"] = T.cast(T.Literal["bgr", "rgb"],
                                                             color_order.lower())
         self._sampler = tch_data.RandomSampler if sampler is None else sampler
-        self._loader = self.get_loader()
+        self.loader = self._get_loader()
         self._iterator = T.cast(T.Iterator[tuple[list[torch.Tensor],
                                                  list[torch.Tensor],
                                                  "BatchMeta"]],
-                                iter(self._loader))
+                                iter(self.loader))
         self._epoch = 0
 
     def __iter__(self) -> T.Self:
@@ -85,7 +85,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
-    def get_loader(self) -> DataLoader:
+    def _get_loader(self) -> DataLoader:
         """Obtain the dataloaders for each input/output for the model
 
         Returns
@@ -141,10 +141,10 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
             epoch = self._epoch
             logger.debug("[TrainLoader] epoch %s end", epoch)
 
-            if isinstance(self._loader.sampler, tch_data.DistributedSampler):
-                self._loader.sampler.set_epoch(epoch + 1)
-            T.cast(MultiDataset, self._loader.dataset).shuffle()
-            self._iterator = iter(self._loader)
+            if isinstance(self.loader.sampler, tch_data.DistributedSampler):
+                self.loader.sampler.set_epoch(epoch + 1)
+            T.cast(MultiDataset, self.loader.dataset).shuffle()
+            self._iterator = iter(self.loader)
             inputs, targets, meta = next(self._iterator)
             self._epoch += 1
 
@@ -196,9 +196,9 @@ class PreviewLoader():
         self._color_order: T.Literal["bgr", "rgb"] = T.cast(T.Literal["bgr", "rgb"],
                                                             color_order.lower())
         self._sampler = tch_data.RandomSampler if sampler is None else sampler
-        self._loader = self.get_loader()
+        self.loader = self._get_loader()
         self._iterator = T.cast(T.Iterator[tuple[torch.Tensor, torch.Tensor]],
-                                iter(self._loader))
+                                iter(self.loader))
 
     def __iter__(self) -> T.Self:
         """This is an iterator"""
@@ -211,7 +211,7 @@ class PreviewLoader():
                                     "_input_folders", "_batch_size", "_sampler", "_num_samples"))
         return f"{self.__class__.__name__}({params})"
 
-    def get_loader(self) -> DataLoader:
+    def _get_loader(self) -> DataLoader:
         """Obtain the dataloaders for each input/output for the model
 
         Returns
@@ -250,7 +250,7 @@ class PreviewLoader():
 
         except StopIteration:
             logger.debug("[PreviewLoader] end")
-            self._iterator = iter(self._loader)
+            self._iterator = iter(self.loader)
             inputs, targets = next(self._iterator)
 
         logger.trace(  # type:ignore[attr-defined]

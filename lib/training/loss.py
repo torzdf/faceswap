@@ -59,76 +59,97 @@ class BatchLoss:
         return self
 
 
-class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """Compiles the chosen loss functions and calculates the values in the training loop
+@dataclass
+class LossConfig:
+    """Dataclass to hold configuration options for Loss Functions
 
     Parameters
     ----------
     functions
         List of lost function names from configuration file to collate for loss calculation
     weights
-        List of weights, corresponding to the the list of functions, to apply to each loss function
-    color_order
-        The color order that the model is training in
+        List of weights, corresponding to the the list of functions, to apply to each loss
+        function
     use_mask
         ``True`` if loss should be masked as `penalize mask loss` has been selected
     eye_multiplier
         The amount of extra weighting to apply to the eye area
     mouth_multiplier
         The amount of extra weighting to apply to the mouth area
+    mask_loss
+        The loss function to use if learn_mask is enabled
+    identity_loss
+        The identity loss functions to use
+    """
+    functions: list[str]
+    """List of lost function names from configuration file to collate for loss calculation"""
+    weights: list[float]
+    """List of weights, corresponding to the the list of functions, to apply to each loss
+    function"""
+    use_mask: bool
+    """``True`` if loss should be masked as `penalize mask loss` has been selected"""
+    eye_multiplier: float
+    """The amount of extra weighting to apply to the eye area"""
+    mouth_multiplier: float
+    """The amount of extra weighting to apply to the mouth area"""
+    mask_loss: str | None
+    """The loss function to use if learn_mask is enabled"""
+    identity_backend: T.Literal["ir-50", "ir-101"] | None
+    """The backend to use for the identity loss functions. ``None`` for no identity loss"""
+    identity_weight: float = 1.0
+    """The weighting to use for identity loss"""
+
+
+class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """Compiles the chosen loss functions and calculates the values in the training loop
+
+    Parameters
+    ----------
+    config
+        The loss configuration settings
+    color_order
+        The color order that the model is training in
     smallest_output
         The smallest output from the model. Required for initializing some loss functions
-    mask_loss
-        The loss function to use if learn_mask is enabled. Default: ``None`` (not enabled)
+    image_counts
+        The number of images contained within each dataset in input order
     """
     def __init__(self,
-                 functions: list[str],
-                 weights: list[float],
+                 config: LossConfig,
                  color_order: T.Literal["bgr", "rgb"],
-                 use_mask: bool,
-                 eye_multiplier: float,
-                 mouth_multiplier: float,
                  smallest_output: int,
-                 mask_loss: str | None = None) -> None:
+                 image_counts: tuple[int, ...]) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+        self._config = config
         self._color_order: T.Literal["bgr", "rgb"] = color_order
-        self._use_mask = use_mask
-        self._eye_multiplier = eye_multiplier
-        self._mouth_multiplier = mouth_multiplier
         self._smallest_output = smallest_output
-        self._mask_loss = mask_loss
-        self._functions, self._weights = self._configure_functions(functions, weights)
+        self._functions, self._weights = self._configure_functions()
         self._spatial, self._non_spatial = self._get_function_types()
 
         self._mask_loss_function = (
-            None if mask_loss is None
-            else self._functions[mask_loss] if mask_loss in self._functions
-            else get_loss_function(mask_loss)
+            None if config.mask_loss is None
+            else self._functions[config.mask_loss] if config.mask_loss in self._functions
+            else get_loss_function(config.mask_loss)
             )
+        self._identity_function = (
+            None if config.identity_backend is None
+            else get_loss_function("identity",
+                                   color_order=color_order,
+                                   kwargs={"backbone": config.identity_backend,
+                                           "image_counts": image_counts})
+            )
+        self._image_idx: int | None = None
+        """The index of the final target image within y_true_all"""
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = {"functions": list(self._functions),
-                  "weights": list(self._weights.values())}
-        params |= {k[1:]: v for k, v in self.__dict__.items()
-                   if k in ("_color_order", "_use_mask", "_eye_multiplier", "_mouth_multiplier",
-                            "_smallest_output", "_mask_loss")}
-        s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
-        return f"{self.__class__.__name__}({s_params})"
+        params = ", ".join(f"{k[1:]}={repr(v)}" for k, v in self.__dict__.items()
+                           if k in ("_config", "_color_order", "_smallest_output", "image_count"))
+        return f"{self.__class__.__name__}({params})"
 
-    def _configure_functions(self,
-                             names: list[str],
-                             weights: list[float]) -> tuple[nn.ModuleDict, dict[str, float]]:
+    def _configure_functions(self) -> tuple[nn.ModuleDict, dict[str, float]]:
         """Configure the selected loss functions and send to the correct device
-
-        Parameters
-        ----------
-        names
-            List of lost function names from configuration file to collate for loss calculation
-        weights
-            List of weights, corresponding to the the list of functions, to apply to each loss
-            function
 
         Returns
         -------
@@ -142,13 +163,13 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         ValueError
             If the number of function names and loss weights do not correspond
         """
-        if len(names) != len(weights):
-            raise ValueError(f"Number of loss functions ({len(names)}) and weights "
-                             f"({len(weights)}) should match")
+        if len(self._config.functions) != len(self._config.weights):
+            raise ValueError(f"Number of loss functions ({len(self._config.functions)}) and "
+                             f"weights ({len(self._config.weights)}) should match")
 
         functions = nn.ModuleDict()
         weight_dict: dict[str, float] = {}
-        for name, weight in zip(names, weights):
+        for name, weight in zip(self._config.functions, self._config.weights):
             if name is None or name == "none" or weight <= 0.0:
                 continue
             functions[name] = get_loss_function(name, self._color_order)
@@ -207,17 +228,17 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         Returns
         -------
-        The unweighted loss scalar for each loss function with masks and multipliers applied
+        The unweighted loss for each spatial loss function with masks and multipliers applied
         """
         retval: dict[str, torch.Tensor] = {}
         for name in self._spatial:
             loss: torch.Tensor = self._functions[name](y_true, y_pred)
-            if self._use_mask and meta.mask_face is not None:
+            if self._config.use_mask and meta.mask_face is not None:
                 loss *= meta.mask_face[index]
-            if self._eye_multiplier > 1. and meta.mask_eye is not None:
-                loss += loss * meta.mask_eye[index] * self._eye_multiplier
-            if self._mouth_multiplier > 1. and meta.mask_mouth is not None:
-                loss += loss * meta.mask_mouth[index] * self._mouth_multiplier
+            if self._config.eye_multiplier > 1. and meta.mask_eye is not None:
+                loss += loss * meta.mask_eye[index] * self._config.eye_multiplier
+            if self._config.mouth_multiplier > 1. and meta.mask_mouth is not None:
+                loss += loss * meta.mask_mouth[index] * self._config.mouth_multiplier
             retval[name] = loss.mean(dim=tuple(range(1, loss.ndim)))
         logger.trace("[Loss] Spatial loss: %s", retval)  # type:ignore[attr-defined]
         return retval
@@ -258,7 +279,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                 continue
             mask = masks[index]
             inputs.append((y_true * mask, y_pred * mask))
-            weights.append(self._eye_multiplier if m_type == "eye" else self._mouth_multiplier)
+            weights.append(self._config.eye_multiplier if m_type == "eye"
+                           else self._config.mouth_multiplier)
         logger.trace("[Loss] masked inputs: %s, weights: %s",  # type:ignore[attr-defined]
                      [[x.shape for x in i] for i in inputs], weights)
         return inputs, weights
@@ -283,10 +305,10 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         Returns
         -------
-        The unweighted loss scalar for each loss function with masks and multipliers applied
+        The unweighted loss for each non-spatial loss function with masks and multipliers applied
         """
         retval: dict[str, torch.Tensor] = {}
-        if not self._use_mask:
+        if not self._config.use_mask:
             inputs = [(y_true, y_pred)]
             weights = [1.0]
         else:
@@ -300,10 +322,47 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         logger.trace("[Loss] Non-spatial loss: %s", retval)  # type:ignore[attr-defined]
         return retval
 
+    def _get_identity_loss(self,
+                           y_true_all: list[torch.Tensor],
+                           swap_pred: list[torch.Tensor],
+                           meta: BatchMeta) -> torch.Tensor:
+        """Obtain the unweighted loss values for the identity loss function
+
+        Parameters
+        ----------
+        y_true_all
+            The ground truth batch of images for all outputs for a side of the model
+        swap_pred
+            The batch of swapped model predictions for each model input
+        meta
+            The meta information for the batch
+
+        Returns
+        -------
+        The unweighted loss for the identity loss function
+        """
+        assert self._identity_function is not None
+        assert len(meta.side_index) == 1
+        if self._image_idx is None:
+            self._image_idx = next(i for i in reversed(range(len(y_true_all)))
+                                   if y_true_all[i].shape[1] != 1)
+            logger.debug("[LossCollator] Set target image index to %s", self._image_idx)
+
+        y_true = y_true_all[self._image_idx]
+        # TODO receive stacked?
+        id_loss = [self._identity_function(y_true,
+                                           y_pred,
+                                           meta.side_index[0],
+                                           meta.image_indices)
+                   for y_pred in swap_pred]
+
+        return torch.mean((torch.stack(id_loss)), dim=0)
+
     def forward(self,
                 y_true_all: list[torch.Tensor],
                 y_pred_all: list[torch.Tensor],
-                meta: BatchMeta) -> BatchLoss:
+                meta: BatchMeta,
+                swap_pred: list[torch.Tensor]) -> BatchLoss:
         """Call the loss functions, reduce to batch dimension, apply masks and weighting and obtain
         the weighted and unweighted per function values and the weighted total loss scalar
 
@@ -315,6 +374,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             The batch of model predictions for all outputs for a side of the model
         meta
             The meta information for the batch
+        swap_pred
+            The swap predictions from the model if an identity loss is being used
 
         Returns
         -------
@@ -323,11 +384,13 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         all_unweighted: list[dict[str, torch.Tensor]] = []
         all_weighted: list[dict[str, torch.Tensor]] = []
         mask_loss = None
-        for idx, (y_true, y_pred) in enumerate(zip(y_true_all, y_pred_all)):
 
-            # TODO remove once channels first
-            y_true = y_true.permute(0, 3, 1, 2)
-            y_pred = y_pred.permute(0, 3, 1, 2)
+        # TODO remove once channels first
+        y_true_all = [x.permute(0, 3, 1, 2) for x in y_true_all]
+        y_pred_all = [x.permute(0, 3, 1, 2) for x in y_pred_all]
+        swap_pred = [x.permute(0, 3, 1, 2) for x in swap_pred]
+
+        for idx, (y_true, y_pred) in enumerate(zip(y_true_all, y_pred_all)):
 
             if y_true.shape[1] == 1:
                 assert self._mask_loss_function is not None
@@ -339,6 +402,11 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             unweighted |= self._get_non_spatial_loss(y_true, y_pred, meta, idx)
             all_unweighted.append(unweighted)
             all_weighted.append({k: v * self._weights[k] for k, v in unweighted.items()})
+
+        if self._identity_function is not None:
+            identity_loss = self._get_identity_loss(y_true_all, swap_pred, meta)
+            all_unweighted[-1]["identity"] = identity_loss
+            all_weighted[-1]["identity"] = identity_loss * self._config.identity_weight
 
         retval = BatchLoss(unweighted=all_unweighted,
                            weighted=all_weighted,

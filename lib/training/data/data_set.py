@@ -561,6 +561,11 @@ class MultiDataset(Dataset):
         self._indices = self._shuffle_indices()
         self._is_random = is_random
 
+    @property
+    def num_images(self) -> tuple[int, ...]:
+        """The number of images contained within each dataset in input order"""
+        return tuple(len(d) for d in self._datasets)
+
     def __repr__(self) -> str:
         """ Pretty print for logging """
         params = f"datasets={self._datasets}, is_random={self._is_random}"

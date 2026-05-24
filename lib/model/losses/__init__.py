@@ -10,10 +10,13 @@ from .feature_loss import LPIPSLoss
 from .loss import (FocalFrequencyLoss, GeneralizedLoss, GradientLoss,
                    LaplacianPyramidLoss, LInfNorm, LogCosh)
 from .flip import LDRFLIPLoss
+from .identity_loss import IdentityLoss
 from .perceptual_loss import GMSDLoss, MSSIMLoss, SSIMLoss
 
 
-def get_loss_function(name: str, color_order: T.Literal["bgr", "rgb"] = "bgr") -> nn.Module:
+def get_loss_function(name: str,
+                      color_order: T.Literal["bgr", "rgb"] = "bgr",
+                      kwargs: dict[str, T.Any] | None = None) -> nn.Module:
     """Get the associated log function for the given configuration file name
 
     Parameters
@@ -21,7 +24,9 @@ def get_loss_function(name: str, color_order: T.Literal["bgr", "rgb"] = "bgr") -
     name
         The name of the Loss function as specified in the training config file
     color_order
-        For flip/lpips only. The color order that the model is training in
+        For flip/lpips/identity only. The color order that the model is training in
+    kwargs
+        Additional loss function specific keyword arguments. Default: ``None``
 
     Returns
     -------
@@ -30,6 +35,7 @@ def get_loss_function(name: str, color_order: T.Literal["bgr", "rgb"] = "bgr") -
     valid = {"ffl": FocalFrequencyLoss,
              "flip": LDRFLIPLoss,
              "gmsd": GMSDLoss,
+             "identity": IdentityLoss,
              "l_inf_norm": LInfNorm,
              "laploss": LaplacianPyramidLoss,
              "logcosh": LogCosh,
@@ -45,10 +51,10 @@ def get_loss_function(name: str, color_order: T.Literal["bgr", "rgb"] = "bgr") -
     if name not in valid:
         raise FaceswapError(f"'{name}' is not a valid Loss function. Choose from: {list(valid)}")
 
-    kwargs: dict[str, T.Any] = {}
+    kwargs = {} if kwargs is None else kwargs
     if name in ("mae", "mse"):
         kwargs["reduction"] = "none"
-    if name == "flip" or name.startswith("lpips_"):
+    if name in ("flip", "identity") or name.startswith("lpips_"):
         kwargs["color_order"] = color_order
     if name.startswith("lpips_"):
         kwargs["trunk_network"] = name.rsplit("_", maxsplit=1)[-1]
