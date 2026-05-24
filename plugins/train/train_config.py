@@ -431,32 +431,32 @@ class Loss(GlobalSection):
             "susceptible to outliers and typically produces slightly blurrier results."),
         choices=["mae", "mse"],
         fixed=False)
-    eye_multiplier = ConfigItem(
-        datatype=int,
-        default=3,
+    eye_weight = ConfigItem(
+        datatype=float,
+        default=1.0,
         group=_("loss"),
         info=_(
             "The amount of priority to give to the eyes.\n\nThe value given here is as a "
             "multiplier of the main loss score. For example:"
-            "\n\t 1 - The eyes will receive the same priority as the rest of the face. "
-            "\n\t 10 - The eyes will be given a score 10 times higher than the rest of "
+            "\n\t 1.0 - The eyes will receive the same priority as the rest of the face. "
+            "\n\t 10.0 - The eyes will be given a score 10 times higher than the rest of "
             "the face."
             "\n\nNB: Penalized Mask Loss must be enable to use this option."),
-        min_max=(1, 40),
+        min_max=(1.0, 10.0),
         rounding=1,
         fixed=False)
-    mouth_multiplier = ConfigItem(
-        datatype=int,
-        default=2,
+    mouth_weight = ConfigItem(
+        datatype=float,
+        default=1.0,
         group=_("loss"),
         info=_(
             "The amount of priority to give to the mouth.\n\nThe value given here is as a "
             "multiplier of the main loss score. For Example:"
-            "\n\t 1 - The mouth will receive the same priority as the rest of the face. "
-            "\n\t 10 - The mouth will be given a score 10 times higher than the rest of "
+            "\n\t 1.0 - The mouth will receive the same priority as the rest of the face. "
+            "\n\t 10.0 - The mouth will be given a score 10 times higher than the rest of "
             "the face."
             "\n\nNB: Penalized Mask Loss must be enable to use this option."),
-        min_max=(1, 40),
+        min_max=(1.0, 10.0),
         rounding=1,
         fixed=False)
     penalized_mask_loss = ConfigItem(

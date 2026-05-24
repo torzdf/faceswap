@@ -72,9 +72,9 @@ class LossConfig:
         function
     use_mask
         ``True`` if loss should be masked as `penalize mask loss` has been selected
-    eye_multiplier
+    eye_weight
         The amount of extra weighting to apply to the eye area
-    mouth_multiplier
+    mouth_weight
         The amount of extra weighting to apply to the mouth area
     mask_loss
         The loss function to use if learn_mask is enabled
@@ -88,9 +88,9 @@ class LossConfig:
     function"""
     use_mask: bool
     """``True`` if loss should be masked as `penalize mask loss` has been selected"""
-    eye_multiplier: float
+    eye_weight: float
     """The amount of extra weighting to apply to the eye area"""
-    mouth_multiplier: float
+    mouth_weight: float
     """The amount of extra weighting to apply to the mouth area"""
     mask_loss: str | None
     """The loss function to use if learn_mask is enabled"""
@@ -235,10 +235,10 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             loss: torch.Tensor = self._functions[name](y_true, y_pred)
             if self._config.use_mask and meta.mask_face is not None:
                 loss *= meta.mask_face[index]
-            if self._config.eye_multiplier > 1. and meta.mask_eye is not None:
-                loss += loss * meta.mask_eye[index] * self._config.eye_multiplier
-            if self._config.mouth_multiplier > 1. and meta.mask_mouth is not None:
-                loss += loss * meta.mask_mouth[index] * self._config.mouth_multiplier
+            if self._config.eye_weight > 1. and meta.mask_eye is not None:
+                loss += loss * meta.mask_eye[index] * self._config.eye_weight
+            if self._config.mouth_weight > 1. and meta.mask_mouth is not None:
+                loss += loss * meta.mask_mouth[index] * self._config.mouth_weight
             retval[name] = loss.mean(dim=tuple(range(1, loss.ndim)))
         logger.trace("[Loss] Spatial loss: %s", retval)  # type:ignore[attr-defined]
         return retval
@@ -279,8 +279,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                 continue
             mask = masks[index]
             inputs.append((y_true * mask, y_pred * mask))
-            weights.append(self._config.eye_multiplier if m_type == "eye"
-                           else self._config.mouth_multiplier)
+            weights.append(self._config.eye_weight if m_type == "eye"
+                           else self._config.mouth_weight)
         logger.trace("[Loss] masked inputs: %s, weights: %s",  # type:ignore[attr-defined]
                      [[x.shape for x in i] for i in inputs], weights)
         return inputs, weights

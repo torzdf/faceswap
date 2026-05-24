@@ -131,8 +131,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                    mod_cfg.Loss.loss_weight_3() / 100.,
                                    mod_cfg.Loss.loss_weight_4() / 100.],
                           use_mask=mod_cfg.Loss.penalized_mask_loss(),
-                          eye_multiplier=mod_cfg.Loss.eye_multiplier(),
-                          mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
+                          eye_weight=mod_cfg.Loss.eye_weight(),
+                          mouth_weight=mod_cfg.Loss.mouth_weight(),
                           mask_loss=(None if not mod_cfg.Loss.learn_mask()
                                      else mod_cfg.Loss.mask_loss_function()),
                           identity_backend="ir-101" if plugin.config.identity_loss else None)  # TODO config

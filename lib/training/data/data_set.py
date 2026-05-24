@@ -385,9 +385,9 @@ class TrainSet(_BaseSet):
         if cfg.Loss.mask_type() is not None and (cfg.Loss.learn_mask() or
                                                  cfg.Loss.penalized_mask_loss()):
             retval.append(cfg.Loss.mask_type())
-        if cfg.Loss.penalized_mask_loss() and cfg.Loss.eye_multiplier() > 1:
+        if cfg.Loss.penalized_mask_loss() and cfg.Loss.eye_weight() > 1.0:
             retval.append("eye")
-        if cfg.Loss.penalized_mask_loss() and cfg.Loss.mouth_multiplier() > 1:
+        if cfg.Loss.penalized_mask_loss() and cfg.Loss.mouth_weight() > 1.0:
             retval.append("mouth")
         logger.debug("[%s] Configured masks: %s", self._name, retval)
         return retval
