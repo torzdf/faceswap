@@ -48,13 +48,17 @@ class BatchMeta:
     """The eye mask if eye loss multipliers > 1 for each output in NCHW order"""
     mask_mouth: list[torch.Tensor] | None = None
     """The mouth mask if mouth loss multipliers > 1 for each output in NCHW order"""
+    offsets: torch.Tensor | None = None
+    """The normalized offsets between training centering and legacy centering if requested"""
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = ", ".join(f"{k}={(v if v is None or isinstance(v, tuple)
-                                   else format_array(v) if isinstance(v, np.ndarray)
-                                   else [(x.shape, x.dtype) for x in v])}"
-                           for k, v in self.__dict__.items())
+        params = ", ".join(
+            f"{k}={(v if v is None or isinstance(v, tuple)
+                    else format_array(v) if isinstance(v, np.ndarray)
+                    else (v.shape, v.dtype) if isinstance(v, torch.Tensor)
+                    else [(x.shape, x.dtype) for x in v])}"
+            for k, v in self.__dict__.items())
         return f"{self.__class__.__name__}({params})"
 
     def __getitem__(self, key: int) -> BatchMeta:
@@ -77,7 +81,8 @@ class BatchMeta:
                          image_indices=self.image_indices[:, key],
                          mask_face=mask_dict["mask_face"],
                          mask_eye=mask_dict["mask_eye"],
-                         mask_mouth=mask_dict["mask_mouth"])
+                         mask_mouth=mask_dict["mask_mouth"],
+                         offsets=None if self.offsets is None else self.offsets[:, key])
 
     def to(self, device: str | torch.Device) -> T.Self:
         """Place all contained tensors onto the given device
@@ -421,7 +426,9 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         assert indices.shape[0] == 2, "Only 2 inputs allowed for WTL"
         return self._landmarks.get_close_landmarks(indices)
 
-    def __call__(self, data: list[tuple[tuple[npt.NDArray[np.uint8], int], ...]]
+    def __call__(self, data: list[tuple[tuple[npt.NDArray[np.uint8],
+                                              int,
+                                              npt.NDArray[np.float32]], ...]]
                  ) -> tuple[list[torch.Tensor], list[torch.Tensor], BatchMeta]:
         """Prepare the loaded samples for feeding the model, creating targets and applying
         augmentation
@@ -430,7 +437,9 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         ----------
         data
             Batch of data tuples with the loaded stacked image and masks from each loader in the
-            first position and the image file index for each item in the batch in the 2nd
+            first position, image file index for each item in the batch in the 2nd and normalized
+            offsets from training to legacy centering (or nan array if not requested) in 3rd
+            position
 
         Returns
         -------
@@ -444,10 +453,12 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         """
         shape = data[0][0][0].shape
         batch = np.empty((self._num_inputs, self._batch_size, *shape), dtype=np.uint8)
-        indices = np.empty((self._num_inputs, self._batch_size), dtype=np.int64)
+        indices = np.empty((self._batch_size, self._num_inputs), dtype=np.int64)
+        offsets = np.empty((self._batch_size, self._num_inputs, 2), dtype=np.float32)
         for idx in range(self._num_inputs):
             batch[idx] = [d[0][idx] for d in data]
-            indices[idx] = [d[1][idx] for d in data]
+            indices[:, idx] = [d[1][idx] for d in data]
+            offsets[:, idx] = [d[2][idx] for d in data]
 
         batch = batch.reshape(-1, *shape)
         landmarks = self._get_landmarks_pairs(indices)
@@ -484,8 +495,9 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         feed = feed.reshape(self._num_inputs, self._batch_size, *feed.shape[1:])
         inputs = [torch.from_numpy(x) for x in feed]
         meta = BatchMeta(side_index=tuple(range(self._num_inputs)),
-                         image_indices=indices.T,
-                         **masks)
+                         image_indices=indices,
+                         **masks,
+                         offsets=None if np.any(np.isnan(offsets)) else torch.from_numpy(offsets))
         return inputs, targets, meta
 
 

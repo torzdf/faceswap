@@ -95,7 +95,7 @@ def get_sorted_images(folder: str) -> list[str]:
 
 
 class _MaskProcessing:  # pylint:disable=too-many-instance-attributes
-    """ Handle the extraction and processing of masks from faceswap PNG headers
+    """Handle the extraction and processing of masks from faceswap PNG headers
 
     Parameters
     ----------
@@ -137,14 +137,14 @@ class _MaskProcessing:  # pylint:disable=too-many-instance-attributes
         self._area_kernel = size // 16
 
     def __repr__(self) -> str:
-        """ Pretty print for logging """
+        """Pretty print for logging"""
         params = (f"side={repr(self._side)}, size={repr(self._dims[0])}, coverage_ratio="
                   f"{repr(self._coverage)}, centering={repr(self._centering)}, "
                   f"y_offset={repr(self._y_offset)}")
         return f"{self.__class__.__name__}({params})"
 
     def _check_mask_exists(self, masks: list[str], mask_type: str, filename: str) -> None:
-        """ Check that the requested mask exists in the given masks dictionary
+        """Check that the requested mask exists in the given masks dictionary
 
         Parameters
         ----------
@@ -355,11 +355,14 @@ class TrainSet(_BaseSet):
     size
         The size to return samples at. This should be the maximum of the model input/output
         size for train sets or the model input size for preview sets
+    return_offset
+        ``True`` to return offset information from legacy centering to training centering
     """
     def __init__(self,
                  side: str,
                  image_folder: str,
-                 size: int) -> None:
+                 size: int,
+                 return_offset: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__(side, image_folder)
         self._size = size
@@ -369,10 +372,13 @@ class TrainSet(_BaseSet):
                                      self._coverage,
                                      self._centering,
                                      self._y_offset)
+        self._return_offset = return_offset
+        self._nan_array = np.full((2, ), np.nan, dtype=np.float32)
 
     def __repr__(self) -> str:
         """ Pretty print for logging """
-        return (f"{super().__repr__()[:-1]}, size={repr(self._size)})")
+        return (f"{super().__repr__()[:-1]}, size={repr(self._size)}, "
+                f"return_offset={repr(self._return_offset)})")
 
     def _get_configured_masks(self) -> list[str]:
         """Obtain a list of configured training masks
@@ -392,7 +398,8 @@ class TrainSet(_BaseSet):
         logger.debug("[%s] Configured masks: %s", self._name, retval)
         return retval
 
-    def __getitem__(self, index: int) -> tuple[npt.NDArray[np.uint8], int]:
+    def __getitem__(self, index: int
+                    ) -> tuple[npt.NDArray[np.uint8], int, npt.NDArray[np.float32] | None]:
         """Obtain the next item from the data loader
 
         Parameters
@@ -407,6 +414,9 @@ class TrainSet(_BaseSet):
             stacked into a single array
         index
             The image file index
+        offset
+            The normalized offset from training centering to legacy centering or NaN array if not
+            requested
         """
         filename = self._image_list[index]
         logger.trace("[%s] Loading image %s: %s",  # type:ignore[attr-defined]
@@ -422,9 +432,11 @@ class TrainSet(_BaseSet):
         for i, mask_type in enumerate(self._mask_types):
             retval[..., 3 + i] = self._mask(meta.alignments.mask, mask_type, filename, face)
 
-        logger.trace("[%s] images and masks: %s",  # type:ignore[attr-defined]
-                     self._name, format_array(retval))
-        return retval, index
+        offset = face.pose.offset[self._centering] if self._return_offset else self._nan_array
+
+        logger.trace("[%s] idx: %s, images and masks: %s, offset: %s",  # type:ignore[attr-defined]
+                     self._name, index, format_array(retval), offset)
+        return retval, index, offset
 
 
 class PreviewSet(_BaseSet):

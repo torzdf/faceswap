@@ -67,7 +67,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         self._color_order: T.Literal["bgr", "rgb"] = T.cast(T.Literal["bgr", "rgb"],
                                                             color_order.lower())
         self._sampler = tch_data.RandomSampler if sampler is None else sampler
-        self.loader = self._get_loader()
+        self.loader = self._get_loader(config.identity_loss)
         self._iterator = T.cast(T.Iterator[tuple[list[torch.Tensor],
                                                  list[torch.Tensor],
                                                  "BatchMeta"]],
@@ -85,8 +85,13 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
-    def _get_loader(self) -> DataLoader:
+    def _get_loader(self, identity_loss: bool) -> DataLoader:
         """Obtain the dataloaders for each input/output for the model
+
+        Parameters
+        ----------
+        identity_loss
+            ``True`` if identity_loss is enabled
 
         Returns
         -------
@@ -100,7 +105,13 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                            "Lowering to %s", num_workers, max_proc, max_proc - 1)
             num_workers = max_proc - 1
 
-        data_sets = tuple(TrainSet(get_label(i, len(self._config.folders)), f, self._process_size)
+        get_offset = identity_loss and (mod_cfg.Loss.identity_weight() > 0.0 or
+                                        mod_cfg.Loss.dissimilarity_weight() > 0.0)
+
+        data_sets = tuple(TrainSet(get_label(i, len(self._config.folders)),
+                                   f,
+                                   self._process_size,
+                                   get_offset)
                           for i, f in enumerate(self._config.folders))
         train_set = MultiDataset(data_sets, is_random=True)
         collate_fn = Collate(self._input_size,
