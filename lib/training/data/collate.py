@@ -310,6 +310,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
     landmarks
         The landmark matching object for the (A and B) sides of the model if warp_to_landmarks is
         enabled otherwise ``None``
+    identity_loss
+        ``True`` if identity loss has been enabled
     """
     _mask_types = ("mask_face", "mask_eye", "mask_mouth")
     """The masks that are stacked to the end of the targets in the order they are stacked"""
@@ -319,13 +321,15 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                  output_sizes: tuple[int, ...],
                  color_order: T.Literal["bgr", "rgb"],
                  config: TrainConfig,
-                 landmarks: LandmarkMatcher | None) -> None:
+                 landmarks: LandmarkMatcher | None,
+                 identity_loss: bool) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"{self.__class__.__name__}"
         self._input_size = input_size
         self._output_sizes = output_sizes
         self._color_order = color_order.lower()
         self._config = config
+        self._identity_loss = identity_loss
 
         self._num_inputs = len(config.folders)
         self._batch_size = config.batch_size
@@ -344,9 +348,182 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         params = {f"{k}"[1:]: format_array(v) if isinstance(v, np.ndarray) else v
                   for k, v in self.__dict__.items()
                   if k in ("_input_size", "_output_sizes", "_color_order",
-                           "_config", "_landmarks")}
+                           "_config", "_landmarks", "identity_loss")}
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
+
+    def _collate_inbound(self, data: list[tuple[tuple[npt.NDArray[np.uint8],
+                                                int,
+                                                npt.NDArray[np.float32]], ...]]
+                         ) -> tuple[npt.NDArray[np.uint8],
+                                    npt.NDArray[np.int64],
+                                    npt.NDArray[np.float32] | None]:
+        """Collate the data received from the dataloaders into arrays
+
+        Parameters
+        ----------
+        data
+            Batch of data tuples with the loaded stacked image and masks from each loader in the
+            first position, image file index for each item in the batch in the 2nd and normalized
+            offsets from training to legacy centering (or nan array if not requested) in 3rd
+            position
+
+        Returns
+        -------
+        batch
+            The batch of loaded images in shape (num_inputs * batch_size, H, W, C)
+        indices
+            The image indices in shape (batch_size, num_inputs)
+        offsets
+            The offsets for taking training images to legacy centered images for identity loss in
+            shape (batch_size, num_inputs, 2) or ``None`` if identity loss is not enabled
+        """
+        shape = data[0][0][0].shape
+        batch = np.empty((self._num_inputs, self._batch_size, *shape), dtype=np.uint8)
+        indices = np.empty((self._batch_size, self._num_inputs), dtype=np.int64)
+        if self._identity_loss:
+            offsets = np.empty((self._batch_size, self._num_inputs, 2), dtype=np.float32)
+        else:
+            offsets = None
+
+        for idx in range(self._num_inputs):
+            batch[idx] = [d[0][idx] for d in data]
+            indices[:, idx] = [d[1][idx] for d in data]
+            if offsets is not None:
+                offsets[:, idx] = [d[2][idx] for d in data]
+
+        batch = batch.reshape(-1, *shape)
+
+        logger.trace(  # type:ignore[attr-defined]
+            "[Collate] Collated dataset input: batch: %s, indices: %s, offsets: %s",
+            format_array(batch),
+            format_array(indices),
+            offsets if offsets is None else format_array(offsets))
+        return batch, indices, offsets
+
+    def _get_landmarks_pairs(self, indices: npt.NDArray[np.int64]
+                             ) -> npt.NDArray[np.float32] | None:
+        """Get a pair of matching source landmarks and closely selected destination landmarks
+        for Warp to Landmarks for each of the inputs
+
+        Parameters
+        ----------
+        indices
+            The (num_inputs, batch_size) face file image indices to obtain the landmarks pairs for
+
+        Returns
+        -------
+        2 sets of landmarks in shape (num_inputs * batch_size, 2, 68, 2). On the 3rd dimension,
+        position 0 are the source points. position 1 the randomly selected closest match points.
+        ``None`` if Warp to Landmarks is disabled
+        """
+        if not self._config.warp or self._landmarks is None:
+            return None
+        assert indices.shape[0] == 2, "Only 2 inputs allowed for WTL"
+        return self._landmarks.get_close_landmarks(indices)
+
+    def _create_inputs(self, images: npt.NDArray[np.uint8]) -> list[torch.Tensor]:
+        """Create the inputs to the model
+
+        Parameters
+        ----------
+        images
+            The images at processing size in shape (num_inputs * batch_size, H, W, C)
+
+        Returns
+        -------
+        List of float32 image tensors at model input size of len(num_inputs) in shape
+        (batch_size, H, W, C)
+        """
+        if self._resize_inputs:
+            feed = to_float32(np.array([cv2.resize(image,
+                                                   (self._input_size, self._input_size),
+                                                   interpolation=cv2.INTER_AREA)
+                                        for image in images]))
+        else:
+            feed = to_float32(images)
+
+        retval = [torch.from_numpy(x)
+                  for x in feed.reshape(self._num_inputs, self._batch_size, *feed.shape[1:])]
+
+        logger.trace("[Collate] inputs: %s",  # type:ignore[attr-defined]
+                     [(x.shape, x.dtype) for x in retval])
+        return retval
+
+    def _get_identity_inputs_targets(self, images: npt.NDArray[np.uint8]
+                                     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Obtain the non-augmented inputs and targets when identity loss is enabled
+
+        Parameters
+        ----------
+        images
+            The collated batch of images from the data loaders
+
+        Returns
+        -------
+        inputs
+            The non-augmented inputs for identity loss. Empty list if identity loss not enabled
+        targets
+            The non-augmented targets for identity loss. Empty list if identity loss not enabled
+        """
+        if not self._identity_loss:
+            return [], []
+        targets = images[..., :3].copy()
+
+        if self._color_order == "rgb":
+            targets = targets[..., 2::-1]
+
+        inputs = self._create_inputs(targets)
+        targets = to_float32(targets.reshape(self._num_inputs,
+                                             self._batch_size,
+                                             *targets.shape[1:]).swapaxes(0, 1))
+        t_targets = [torch.from_numpy(targets)]
+
+        logger.trace("[Collate] identity inputs: %s, targets: %s",  # type:ignore[attr-defined]
+                     [(x.shape, x.dtype) for x in inputs],
+                     [(x.shape, x.dtype) for x in t_targets])
+        return inputs, t_targets
+
+    def _augment(self,
+                 images: npt.NDArray[np.uint8],
+                 landmarks: npt.NDArray[np.float32] | None,
+                 warp: bool) -> npt.NDArray[np.uint8]:
+        """Augment the images
+
+        Parameters
+        ----------
+        images
+            The batch of images to augment in shape (num_inputs * batch_size, H, W, C)
+        landmarks
+            The landmarks to augment
+        warp
+            ``True`` to perform warp augmentation. ``False`` to perform non-warp augmentation.
+
+        Returns
+        -------
+        The augmented images
+        """
+        if warp:
+            if self._config.warp and landmarks is not None and self._landmarks is not None:
+                images = self._aug.warp(images,
+                                        to_landmarks=True,
+                                        batch_src_points=landmarks[:, 0],
+                                        batch_dst_points=landmarks[:, 1])
+            elif self._config.warp:
+                images = self._aug.warp(images, to_landmarks=False)
+        else:
+            if self._config.augment_color:
+                images[..., :3] = self._aug.color_adjust(images[..., :3])
+
+            self._aug.transform(images, landmarks)
+
+            if self._config.flip:
+                self._aug.random_flip(images, landmarks)
+
+        logger.trace(  # type:ignore[attr-defined]
+            "[Collate] Augmented. warp: %s, images: %s, landmarks: %s",
+            warp, format_array(images), None if landmarks is None else format_array(landmarks))
+        return images
 
     def _create_targets(self, batch: npt.NDArray[np.uint8]
                         ) -> tuple[list[torch.Tensor],
@@ -405,27 +582,6 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                                                               for k, v in masks.items()})
         return targets, masks
 
-    def _get_landmarks_pairs(self, indices: npt.NDArray[np.int64]
-                             ) -> npt.NDArray[np.float32] | None:
-        """Get a pair of matching source landmarks and closely selected destination landmarks
-        for Warp to Landmarks for each of the inputs
-
-        Parameters
-        ----------
-        indices
-            The (num_inputs, batch_size) face file image indices to obtain the landmarks pairs for
-
-        Returns
-        -------
-        2 sets of landmarks in shape (num_inputs * batch_size, 2, 68, 2). On the 3rd dimension,
-        position 0 are the source points. position 1 the randomly selected closest match points.
-        ``None`` if Warp to Landmarks is disabled
-        """
-        if not self._config.warp or self._landmarks is None:
-            return None
-        assert indices.shape[0] == 2, "Only 2 inputs allowed for WTL"
-        return self._landmarks.get_close_landmarks(indices)
-
     def __call__(self, data: list[tuple[tuple[npt.NDArray[np.uint8],
                                               int,
                                               npt.NDArray[np.float32]], ...]]
@@ -451,53 +607,33 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         meta
             The meta information for the batch
         """
-        shape = data[0][0][0].shape
-        batch = np.empty((self._num_inputs, self._batch_size, *shape), dtype=np.uint8)
-        indices = np.empty((self._batch_size, self._num_inputs), dtype=np.int64)
-        offsets = np.empty((self._batch_size, self._num_inputs, 2), dtype=np.float32)
-        for idx in range(self._num_inputs):
-            batch[idx] = [d[0][idx] for d in data]
-            indices[:, idx] = [d[1][idx] for d in data]
-            offsets[:, idx] = [d[2][idx] for d in data]
-
-        batch = batch.reshape(-1, *shape)
+        batch, indices, offsets = self._collate_inbound(data)
         landmarks = self._get_landmarks_pairs(indices)
 
-        if self._config.augment_color:
-            batch[..., :3] = self._aug.color_adjust(batch[..., :3])
+        identity_inputs, identity_targets = self._get_identity_inputs_targets(batch)
 
-        self._aug.transform(batch, landmarks)
+        self._augment(batch, landmarks, warp=False)
 
-        if self._config.flip:
-            self._aug.random_flip(batch, landmarks)
         if self._color_order == "rgb":
             batch[..., :3] = batch[..., [2, 1, 0]]
 
         targets, masks = self._create_targets(batch)
+        targets += identity_targets
 
         feed = batch[..., :3]
-        if self._config.warp and landmarks is not None and self._landmarks is not None:
-            feed = self._aug.warp(feed,
-                                  to_landmarks=True,
-                                  batch_src_points=landmarks[:, 0],
-                                  batch_dst_points=landmarks[:, 1])
-        elif self._config.warp:
-            feed = self._aug.warp(feed, to_landmarks=False)
+        feed = self._augment(feed, landmarks, warp=True)
 
-        if self._resize_inputs:
-            feed = to_float32(np.array([cv2.resize(image,
-                                                   (self._input_size, self._input_size),
-                                                   interpolation=cv2.INTER_AREA)
-                                        for image in feed]))
-        else:
-            feed = to_float32(feed)
-
-        feed = feed.reshape(self._num_inputs, self._batch_size, *feed.shape[1:])
-        inputs = [torch.from_numpy(x) for x in feed]
+        inputs = self._create_inputs(feed) + identity_inputs
         meta = BatchMeta(side_index=tuple(range(self._num_inputs)),
                          image_indices=indices,
                          **masks,
-                         offsets=None if np.any(np.isnan(offsets)) else torch.from_numpy(offsets))
+                         offsets=None if offsets is None else torch.from_numpy(offsets))
+
+        logger.trace(  # type:ignore[attr-defined]
+            "[Collate] Returning inputs: %s, targets: %s, meta: %s",
+            [(x.shape, x.dtype) for x in inputs],
+            [(x.shape, x.dtype) for x in targets],
+            meta)
         return inputs, targets, meta
 
 

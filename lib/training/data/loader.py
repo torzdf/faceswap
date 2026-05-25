@@ -105,20 +105,21 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                            "Lowering to %s", num_workers, max_proc, max_proc - 1)
             num_workers = max_proc - 1
 
-        get_offset = identity_loss and (mod_cfg.Loss.identity_weight() > 0.0 or
-                                        mod_cfg.Loss.dissimilarity_weight() > 0.0)
+        use_identity_loss = identity_loss and (mod_cfg.Loss.identity_weight() > 0.0 or
+                                               mod_cfg.Loss.dissimilarity_weight() > 0.0)
 
         data_sets = tuple(TrainSet(get_label(i, len(self._config.folders)),
                                    f,
                                    self._process_size,
-                                   get_offset)
+                                   use_identity_loss)
                           for i, f in enumerate(self._config.folders))
         train_set = MultiDataset(data_sets, is_random=True)
         collate_fn = Collate(self._input_size,
                              self._output_sizes,
                              self._color_order,
                              self._config,
-                             landmarks=self._landmarks)
+                             landmarks=self._landmarks,
+                             identity_loss=use_identity_loss)
         retval = DataLoader(dataset=train_set,
                             batch_size=self._config.batch_size,
                             sampler=self._sampler(train_set),
