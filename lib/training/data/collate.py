@@ -310,6 +310,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
     landmarks
         The landmark matching object for the (A and B) sides of the model if warp_to_landmarks is
         enabled otherwise ``None``
+    learn_mask
+        ``True`` if learn mask has been enabled and requires an output target
     identity_loss
         ``True`` if identity loss has been enabled
     """
@@ -322,6 +324,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                  color_order: T.Literal["bgr", "rgb"],
                  config: TrainConfig,
                  landmarks: LandmarkMatcher | None,
+                 learn_mask: bool,
                  identity_loss: bool) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"{self.__class__.__name__}"
@@ -329,6 +332,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         self._output_sizes = output_sizes
         self._color_order = color_order.lower()
         self._config = config
+        self._learn_mask = learn_mask
         self._identity_loss = identity_loss
 
         self._num_inputs = len(config.folders)
@@ -348,7 +352,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         params = {f"{k}"[1:]: format_array(v) if isinstance(v, np.ndarray) else v
                   for k, v in self.__dict__.items()
                   if k in ("_input_size", "_output_sizes", "_color_order",
-                           "_config", "_landmarks", "identity_loss")}
+                           "_config", "_landmarks", "_learn_mask", "_identity_loss")}
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
@@ -576,6 +580,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                                      for out in reshaped]
              for idx in range(reshaped[0].shape[-1] - 3)}
         )
+        if self._learn_mask:
+            targets.append(masks["mask_face"][-1].permute(0, 1, 3, 4, 2))
 
         logger.trace("[%s] Processed targets: %s, masks: %s",  # type:ignore[attr-defined]
                      self._name, [t.shape for t in targets], {k: [x.shape for x in v]

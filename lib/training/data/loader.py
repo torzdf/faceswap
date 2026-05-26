@@ -67,7 +67,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         self._color_order: T.Literal["bgr", "rgb"] = T.cast(T.Literal["bgr", "rgb"],
                                                             color_order.lower())
         self._sampler = tch_data.RandomSampler if sampler is None else sampler
-        self.loader = self._get_loader(config.identity_loss)
+        self.loader = self._get_loader()
         self._iterator = T.cast(T.Iterator[tuple[list[torch.Tensor],
                                                  list[torch.Tensor],
                                                  "BatchMeta"]],
@@ -85,7 +85,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
-    def _get_loader(self, identity_loss: bool) -> DataLoader:
+    def _get_loader(self) -> DataLoader:
         """Obtain the dataloaders for each input/output for the model
 
         Parameters
@@ -105,8 +105,8 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                            "Lowering to %s", num_workers, max_proc, max_proc - 1)
             num_workers = max_proc - 1
 
-        use_identity_loss = identity_loss and (mod_cfg.Loss.identity_weight() > 0.0 or
-                                               mod_cfg.Loss.dissimilarity_weight() > 0.0)
+        use_identity_loss = self._config.identity_loss and (
+            mod_cfg.Loss.identity_weight() > 0.0 or mod_cfg.Loss.dissimilarity_weight() > 0.0)
 
         data_sets = tuple(TrainSet(get_label(i, len(self._config.folders)),
                                    f,
@@ -119,6 +119,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                              self._color_order,
                              self._config,
                              landmarks=self._landmarks,
+                             learn_mask=mod_cfg.Loss.learn_mask(),
                              identity_loss=use_identity_loss)
         retval = DataLoader(dataset=train_set,
                             batch_size=self._config.batch_size,
@@ -160,9 +161,6 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
             inputs, targets, meta = next(self._iterator)
             self._epoch += 1
 
-        if self._learn_mask:  # Add the face mask as it's own target
-            assert meta.mask_face is not None
-            targets += [meta.mask_face[-1].permute(0, 1, 3, 4, 2)]
         logger.trace(  # type:ignore[attr-defined]
             "[TrainLoader] input_shapes: %s, target_shapes: %s, meta: %s",
             [i.shape for i in inputs], [t.shape for t in targets], meta)
