@@ -7,6 +7,7 @@ import typing as T
 
 import cv2
 import numpy as np
+import torch
 
 from lib.utils import get_module_objects
 
@@ -457,7 +458,7 @@ def batch_sub_crop(images: npt.NDArray[np.uint8 | np.float32],
     gathered = np.take_along_axis(flat,
                                   lin_idx.reshape(batch_size, -1)[..., None],
                                   axis=1)
-    return gathered.reshape(batch_size, out_size, out_size, 3)
+    return gathered.reshape(batch_size, out_size, out_size, channels)
 
 
 ImageDTypeT = T.TypeVar("ImageDTypeT", np.uint8, np.float32)
@@ -566,6 +567,53 @@ def points_to_68(landmarks: npt.NDArray[np.float32],
     if is_batched:
         return retval
     return retval[0]
+
+# Torch versions
+
+
+def batch_sub_crop_torch(images: torch.Tensor,  # pylint:disable=too-many-locals
+                         offsets: torch.Tensor,
+                         out_size: int,
+                         base_grid: tuple[torch.Tensor, torch.Tensor] | None = None
+                         ) -> torch.Tensor:
+    """Obtain aligned sub-crops from larger aligned images. Handles OOB. Outputs are replicate
+    padded. PyTorch version
+
+    Parameters
+    ----------
+    images
+        The (N, H, W, C) full size extracted images
+    offsets
+        The (N, x, y) offsets to shift the sub-crops.
+    out_size
+        The output size of the sub-crop
+    base_grid
+        Pre-computed base mesh grid used to build crop indices. Should be a tuple (yy, xx) where
+        each entry is a torch tensor (long) of shape (out_size, out_size) of row/column indices
+        starting at 0, Providing this avoids rebuilding the meshgrid on every call.
+        Default: ``None`` (calculate within the function)
+    """
+    batch_size, channels, height, width = images.shape
+    device = images.device
+
+    if base_grid is None:
+        yy, xx = torch.meshgrid(torch.arange(out_size, dtype=torch.long, device=device),
+                                torch.arange(out_size, dtype=torch.long, device=device),
+                                indexing="ij")
+    else:
+        yy, xx = base_grid
+
+    x_idx = xx.unsqueeze(0) + offsets[:, 0].view(batch_size, 1, 1)
+    y_idx = yy.unsqueeze(0) + offsets[:, 1].view(batch_size, 1, 1)
+    x_idx = x_idx.clamp(0, width - 1)
+    y_idx = y_idx.clamp(0, height - 1)
+    lin_idx = y_idx * width + x_idx
+
+    flat = images.reshape(batch_size, channels, height * width)
+    gathered = torch.gather(flat,
+                            dim=2,
+                            index=lin_idx.reshape(batch_size, 1, -1).expand(-1, channels, -1))
+    return gathered.reshape(batch_size, channels, out_size, out_size)
 
 
 __all__ = get_module_objects(__name__)
