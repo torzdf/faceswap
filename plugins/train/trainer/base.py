@@ -43,7 +43,7 @@ class TrainConfig:
     cache_landmarks
         ``True`` to cache landmarks from the other side for Warp to landmarks
     identity_loss
-        ``True`` to enable identity loss
+        ``True`` to if identity loss has been selected in command line arguments
     use_lr_finder
         ``True`` to use the learning rate finder. Default: ``False``
     snapshot interval

@@ -455,6 +455,39 @@ class Loss(GlobalSection):
             "the image without the facial mask, reconstruction errors will be "
             "ignored while the masked face area is prioritized. May increase "
             "overall quality by focusing attention on the core face area."))
+    identity_backbone = ConfigItem(
+        datatype=str,
+        default="ir-101",
+        group=_("identity"),
+        info=_(
+            "The backbone to use for the Identity model."
+            "\n\tir-101 - InsightFace ResNet-101 (100 layers). The Standard backbone"
+            "\n\tir-50 - InsightFace ResNet-50 (50 layers). Lower VRAM model. Slightly less "
+            "accurate."),
+        choices=["ir-101", "ir-50"],
+        gui_radio=True,
+        fixed=False)
+    identity_weight = ConfigItem(
+        datatype=float,
+        default=1.0,
+        group=_("identity"),
+        info=_(
+            "The amount of weight to apply to the identity loss function\n\n") + _LOSS_WEIGHT_HELP,
+        min_max=(0.0, 10.0),
+        rounding=1,
+        fixed=False)
+    dissimilarity_weight = ConfigItem(
+        datatype=float,
+        default=0.0,
+        group=_("identity"),
+        info=_(
+            "Dissimilarity measures how different the swapped face is from the original face. "
+            "This should generally be set lower than the identity loss function.\n"
+            "The amount of weight to apply to the identity dissimilarity loss "
+            "function\n\n") + _LOSS_WEIGHT_HELP,
+        min_max=(0.0, 10.0),
+        rounding=1,
+        fixed=False)
     mask_type = ConfigItem(
         datatype=str,
         default="extended",
