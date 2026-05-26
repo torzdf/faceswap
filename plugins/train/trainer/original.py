@@ -52,11 +52,19 @@ class Trainer(TrainerBase):
         The loss for each input to the model in order (A, B, ...)
         """
         num_sides = len(inputs)
+
+        identity_inputs = identity_targets = None
+        if self.config.identity_loss:
+            num_sides //= 2
+            identity_inputs = inputs[-num_sides:]
+            inputs = inputs[:-num_sides]
+            identity_targets = targets.pop(-1)
+
         predictions = self.model.model(inputs, training=True)
         num_outputs = len(predictions) // num_sides
 
         swap_predictions: dict[int, list[torch.Tensor]] = {i: [] for i in range(num_sides)}
-        if self.config.identity_loss:
+        if identity_inputs is not None and identity_targets is not None:
             # TODO it would be more efficient to re-use the encoder outputs from the original
             # predictions and just roll the down-streams from that point rather than feeding the
             # entire model again. May be complex to do with our plugin architecture though and not
@@ -68,11 +76,10 @@ class Trainer(TrainerBase):
 
             # TODO get rolled target for dissim
             for shift in range(1, num_sides):
-                rolled = inputs[shift:] + inputs[:shift]
+                rolled = identity_inputs[shift:] + identity_inputs[:shift]
                 swap_pred = self.model.model(rolled, training=True)
                 logger.trace("[Trainer] swap outputs for side %s: %s",  # type:ignore[attr-defined]
                              shift, [x.shape for x in swap_pred])
-                # TODO zero array and assign?
                 for inp_idx in range(num_sides):
                     swap_predictions[inp_idx].append(swap_pred[inp_idx * num_outputs + image_idx])
             logger.trace("[Trainer] Swap predictions: %s",  # type:ignore[attr-defined]
@@ -99,11 +106,12 @@ class Trainer(TrainerBase):
             self.loss_func(y_true_all=[t[:, i] for t in targets],
                            y_pred_all=predictions[i * num_outputs:i * num_outputs + num_outputs],
                            meta=meta[i],
+                           swap_true=identity_targets,
                            swap_pred=swap_predictions[i])
             for i in range(num_sides)
             ]
 
-        logger.trace("Losses: %s", losses)  # type:ignore[attr-defined]
+        logger.trace("[Original] Losses: %s", losses)  # type:ignore[attr-defined]
         return losses
 
     def _backwards_and_apply(self, loss: list[BatchLoss], optimizer: Optimizer) -> None:
