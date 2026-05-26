@@ -22,7 +22,6 @@ from .state import State
 
 if T.TYPE_CHECKING:
     import argparse
-    import numpy as np
 
 
 logger = logging.getLogger(__name__)
@@ -299,20 +298,6 @@ class ModelBase():  # pylint:disable=too-many-instance-attributes
         weights.load(self._io.model_exists)
         weights.freeze()
         logger.debug("Compiled Model: %s", self.model)
-
-    def add_history(self, loss: np.ndarray) -> None:
-        """Add the current iteration's loss history to :attr:`_io.history`.
-
-        Called from the trainer after each iteration, for tracking loss drop over time between
-        save iterations.
-
-        Parameters
-        ----------
-        loss
-            The loss values for the A and B side for the current iteration. This should be the
-            collated loss values for each side.
-        """
-        self._io.history.append(float(sum(loss)))
 
 
 __all__ = get_module_objects(__name__)

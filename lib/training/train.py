@@ -29,6 +29,8 @@ from .optimizer import Optimizer
 if T.TYPE_CHECKING:
     import numpy.typing as npt
     from collections.abc import Callable
+    from lib.align.constants import CenteringType
+    from plugins.train.model._base import ModelBase
     from plugins.train.trainer.base import TrainerBase
     from .data.data_set import MultiDataset
     from .loss import BatchLoss
@@ -40,6 +42,209 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore",
                         message="You might experience inconsistencies",
                         category=UserWarning)
+
+
+class LossHandler:
+    """Handles the logging and output of loss values from the model
+
+    Parameters
+    ----------
+    model
+        The model that is being trained
+    device
+        The device that is being used for training
+    """
+    def __init__(self, model: ModelBase, device: torch.Device) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._model = model
+        self._device = device
+        self._nan_protection = mod_cfg.nan_protection()
+
+        self._tensorboard = self._set_tensorboard()
+        self._averages: dict[T.Literal["unweighted", "weighted"], dict[str, torch.Tensor]] = {}
+        self._loss_count = 0
+
+    def __repr__(self) -> str:
+        """Pretty print for logging"""
+        params = ", ".join(f"{k[1:]}={repr(v)}" for k, v in self.__dict__.items()
+                           if k in ("_model", "_device"))
+        return f"{self.__class__.__name__}({params})"
+
+    def _set_tensorboard(self) -> TorchTensorBoard | None:
+        """Set up Tensorboard callback for logging loss.
+
+        Bypassed if command line option "no-logs" has been selected.
+
+        Returns
+        -------
+        Tensorboard object for the the current training session. ``None`` if Tensorboard logging is
+        not selected
+        """
+        if self._model.state.current_session["no_logs"]:
+            logger.verbose("TensorBoard logging disabled")  # type: ignore
+            return None
+        logger.debug("[LossHandler] Setting up TensorBoard Logging")
+        log_dir = os.path.join(str(self._model.io.model_dir),
+                               f"{self._model.name}_logs",
+                               f"session_{self._model.state.session_id}")
+        tensorboard = TorchTensorBoard(log_dir=log_dir,
+                                       write_graph=True,
+                                       update_freq="batch")
+        tensorboard.set_model(self._model.model)
+        logger.verbose("Enabled TensorBoard Logging")  # type: ignore
+        return tensorboard
+
+    def _reset_averages(self, names: list[str] | None = None) -> None:
+        """Reset the loss averages to zero
+
+        Parameters
+        ----------
+        names
+            The name of the loss functions to track when initially setting up
+        """
+        names = list(self._averages["unweighted"]) if names is None else names
+        self._averages = {w: {k: torch.zeros((1, ), dtype=torch.float32, device=self._device)
+                              for k in names}
+                          for w in ("unweighted", "weighted")}
+        self._loss_count = 0
+        logger.debug("[LossHandler] Reset loss averages: %s", self._averages)
+
+    def _log_tensorboard(self, loss: list[BatchLoss]) -> None:
+        """Log current loss to Tensorboard log files
+
+        Parameters
+        ----------
+        loss
+            The detached loss scalars for the batch on the training device in order (A, B, ...)
+        """
+        if not self._tensorboard:
+            return
+        logger.trace("[LossHandler] Updating TensorBoard log: %s", loss)  # type: ignore
+        logs: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
+            "total": T.cast(torch.Tensor, sum(x.total for x in loss))}
+        for i, out in enumerate(loss):
+            lbl = get_label(i, len(loss))
+            for idx, (w, u) in enumerate(zip(out.weighted, out.unweighted)):
+                key = lbl if len(out.unweighted) == 1 else f"{lbl}_{idx}"
+                weighted = {k: v.mean() for k, v in w.items()}
+                unweighted = {k: v.mean() for k, v in u.items()}
+                logs[f"face_{key}"] = T.cast(torch.Tensor, sum(weighted.values()))
+                logs[f"weighted_{key}"] = weighted
+                logs[f"unweighted_{key}"] = unweighted
+            if out.mask is not None:
+                logs[f"mask_{lbl}"] = out.mask.mean()
+        self._tensorboard.on_train_batch_end(self._model.iterations, logs=logs)
+
+    def _handle_nan(self, loss: list[BatchLoss]) -> None:
+        """Handle NaNs detected in loss
+
+        Raises
+        ------
+        FaceswapError
+            If a NaN is detected, a :class:`FaceswapError` will be raised
+        """
+        if not self._nan_protection:
+            return
+        if all(torch.isfinite(val.total).all() for val in loss):
+            return
+
+        loss_str = ", ".join(f"Loss {get_label(i, len(loss))}: {round(x.total.item(), 6)}"
+                             for i, x in enumerate(loss))
+        msg = f"NaN Detected. {loss_str}"
+        failed = ", ".join(f"{key}({get_label(i, len(loss))})"
+                           for i, out in enumerate(loss)
+                           for unweighted in out.unweighted
+                           for key, sub_loss in unweighted.items()
+                           if not torch.isfinite(sub_loss).all())
+        if failed:
+            msg += f". The loss function(s) that NaN'd: {failed}"
+        logger.critical(msg)
+        raise FaceswapError("A NaN was detected and you have NaN protection enabled. Training "
+                            "has been terminated.")
+
+    def _update_averages(self, loss: list[BatchLoss]) -> None:
+        """Store the total running weighted and unweighted averages for each loss function since
+        the last save iteration.
+
+        Parameters
+        ----------
+        loss
+            The list of detached loss outputs on the training device in order (A, B, ...)
+        """
+        contrib = [x.get_contributions() for x in loss]
+        totals = {w: {k: sum(d[w][k] for d in contrib) for k in contrib[0][w]} for w in contrib[0]}
+        if not self._averages:
+            self._reset_averages(names=list(totals["unweighted"]))
+        self._loss_count += 1
+        self._averages = {a: {k: self._averages[a][k] + (totals[a][k] -
+                                                         self._averages[a][k]) / self._loss_count
+                              for k in self._averages[a]}
+                          for a in self._averages}
+
+    def _print_loss(self, loss: list[BatchLoss]) -> None:
+        """Outputs the loss for the current iteration to the console.
+
+        Parameters
+        ----------
+        The detached loss output from the model on the training device in order (A, B, ...
+        """
+        totals = {i: x.total.item() for i, x in enumerate(loss)}
+        output = ", ".join(f"Loss {get_label(k, len(totals))}: {v:.5f}"
+                           for k, v in totals.items())
+        timestamp = time.strftime("%H:%M:%S")
+        output = f"[{timestamp}] [#{self._model.iterations:05d}] {output}"
+        print(f"{output}", end="\r")
+
+    def __call__(self, loss: list[BatchLoss]) -> None:
+        """Handle the logging and output of loss values for a batch
+
+        Parameters
+        ----------
+        loss
+            The collated attached loss values on the training device in order (A, B, ...)
+        """
+        loss = [x.detach() for x in loss]
+        self._handle_nan(loss)
+        self._log_tensorboard(loss)
+        self._update_averages(loss)
+        self._print_loss(loss)
+
+    def _output_contributions(self) -> None:
+        """Output the contributions for each loss function since the last save"""
+        totals = {w: sum(m.values()) for w, m in self._averages.items()}
+        ratios = {w: {k: round(((v / totals[w]) * 100.).item(), 1) for k, v in m.items()}
+                  for w, m in self._averages.items()}
+        msg = "Ratios since save [Weighted (Unweighted)]: "
+        msg += ", ".join(f"{k}: {ratios['weighted'][k]}% ({ratios['unweighted'][k]}%)"
+                         for k in ratios["unweighted"])
+        logger.info(msg)
+
+    def on_save(self) -> float:
+        """Logging actions to perform when the model is saved
+
+        Returns
+        -------
+        The average total loss since the last save iteration
+        """
+        assert self._tensorboard is not None  # TODO why does this work? Test with no-logs
+        self._tensorboard.on_save()
+        self._output_contributions()
+
+        retval = T.cast(torch.Tensor, sum(self._averages["weighted"].values())).item()
+        self._reset_averages()
+
+        logger.debug("[LossHandler] Average total since last save: %s", retval)
+        return retval
+
+    def close(self) -> None:
+        """Stop Tensorboard logging.
+
+        Tensorboard logging needs to be explicitly shutdown on training termination.
+        """
+        if not self._tensorboard:
+            return
+        logger.debug("[LossHandler] Ending Tensorboard Session: %s", self._tensorboard)
+        self._tensorboard.on_train_end()
 
 
 class Trainer:  # pylint:disable=too-many-instance-attributes
@@ -96,7 +301,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._timelapse_loader = self._get_timelapse_loader()
 
         self._model.state.add_session_batchsize(plugin.batch_size)
-        self._tensorboard = self._set_tensorboard()
+        self._loss_handler = LossHandler(self._model, self._device)
+
         self._samples = Samples(self._model.coverage_ratio,
                                 mod_cfg.Loss.learn_mask() or mod_cfg.Loss.penalized_mask_loss(),
                                 trn_cfg.Augmentation.mask_opacity(),
@@ -122,11 +328,12 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         plugin
             The plugin that is training the model
         """
+        id_loss = T.cast(T.Literal["ir-101", "ir-50"], mod_cfg.Loss.identity_backbone())
         conf = LossConfig(functions=[mod_cfg.Loss.loss_function(),
                                      mod_cfg.Loss.loss_function_2(),
                                      mod_cfg.Loss.loss_function_3(),
                                      mod_cfg.Loss.loss_function_4()],
-                          weights=[1.0,
+                          weights=[mod_cfg.Loss.loss_weight(),
                                    mod_cfg.Loss.loss_weight_2(),
                                    mod_cfg.Loss.loss_weight_3(),
                                    mod_cfg.Loss.loss_weight_4()],
@@ -135,11 +342,14 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                           mouth_weight=mod_cfg.Loss.mouth_weight(),
                           mask_loss=(None if not mod_cfg.Loss.learn_mask()
                                      else mod_cfg.Loss.mask_loss_function()),
-                          identity_backend="ir-101" if plugin.config.identity_loss else None)  # TODO config
+                          identity_backend=id_loss if plugin.config.identity_loss else None,
+                          identity_weight=mod_cfg.Loss.identity_weight(),
+                          identity_dissimilarity_weight=mod_cfg.Loss.dissimilarity_weight(),
+                          centering=T.cast("CenteringType", mod_cfg.centering()),
+                          coverage=mod_cfg.coverage() / 100.)
         loss = LossCollator(conf,
                             color_order=self._model.color_order,
-                            smallest_output=min(x[1] for x in self._model.output_shapes
-                                                if x[-1] != 1),
+                            output_sizes=[x[1] for x in self._model.output_shapes if x[-1] != 1],
                             image_counts=T.cast("MultiDataset",
                                                 self._train_loader.loader.dataset).num_images)
         plugin.register_loss(loss)
@@ -260,32 +470,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         logger.debug("[Trainer] No learning rate finder rate. Not setting")
         return False
 
-    def _set_tensorboard(self) -> TorchTensorBoard | None:
-        """Set up Tensorboard callback for logging loss.
-
-        Bypassed if command line option "no-logs" has been selected.
-
-        Returns
-        -------
-        Tensorboard object for the the current training session. ``None`` if Tensorboard logging is
-        not selected
-        """
-        if self._model.state.current_session["no_logs"]:
-            logger.verbose("TensorBoard logging disabled")  # type: ignore
-            return None
-        logger.debug("[Trainer] Enabling TensorBoard Logging")
-
-        logger.debug("[Trainer] Setting up TensorBoard Logging")
-        log_dir = os.path.join(str(self._model.io.model_dir),
-                               f"{self._model.name}_logs",
-                               f"session_{self._model.state.session_id}")
-        tensorboard = TorchTensorBoard(log_dir=log_dir,
-                                       write_graph=True,
-                                       update_freq="batch")
-        tensorboard.set_model(self._model.model)
-        logger.verbose("Enabled TensorBoard Logging")  # type: ignore
-        return tensorboard
-
     def toggle_mask(self) -> None:
         """Toggle the mask overlay on or off based on user input."""
         self._samples.toggle_mask_display()
@@ -295,7 +479,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
         Returns
         -------
-        The collated loss values detached and moved to CPU in order (A, B, ...)
+        The collated attached loss values on the training device in order (A, B, ...)
         """
         try:
             inputs, targets, meta = next(self._train_loader)
@@ -303,7 +487,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                             [t.to(self._device) for t in targets],
                                             self._optimizer,
                                             meta.to(self._device))
-            retval = [x.to_cpu() for x in loss]
         except OutOfMemoryError as err:
             msg = ("You do not have enough GPU memory available to train the selected model at "
                    "the selected settings. You can try a number of things:"
@@ -315,91 +498,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                    "\n4) Use a more lightweight model, or select the model's 'LowMem' option "
                    "(in config) if it has one.")
             raise FaceswapError(msg) from err
-        return retval
-
-    def _log_tensorboard(self, loss: list[BatchLoss]) -> None:
-        """Log current loss to Tensorboard log files
-
-        Parameters
-        ----------
-        loss
-            The loss scalars for the batch detached and moved to cpu in order (A, B, ...)
-        """
-        if not self._tensorboard:
-            return
-        logger.trace("[Trainer] Updating TensorBoard log: %s", loss)  # type: ignore
-        logs: dict[str, float | dict[str, float]] = {
-            "total": T.cast(torch.Tensor, sum(x.total for x in loss)).item()}
-        for i, out in enumerate(loss):
-            lbl = get_label(i, len(loss))
-            for idx, (w, u) in enumerate(zip(out.weighted, out.unweighted)):
-                key = lbl if len(out.unweighted) == 1 else f"{lbl}_{idx}"
-                weighted = {k: v.mean() for k, v in w.items()}
-                unweighted = {k: v.mean() for k, v in u.items()}
-                logs[f"face_{key}"] = T.cast(torch.Tensor, sum(weighted.values())).item()
-                logs[f"weighted_{key}"] = {k: v.item() for k, v in weighted.items()}
-                logs[f"unweighted_{key}"] = {k: v.item() for k, v in unweighted.items()}
-            if out.mask is not None:
-                logs[f"mask_{lbl}"] = out.mask.mean().item()
-        self._tensorboard.on_train_batch_end(self._model.iterations, logs=logs)
-
-    def _collate_and_store_loss(self, loss: list[BatchLoss]) -> np.ndarray:
-        """Collate the loss into totals for each side.
-
-        The losses are summed into a total for each side. Loss totals are added to
-        :attr:`model.state._history` to track the loss drop per save iteration for backup purposes.
-
-        If NaN protection is enabled, Checks for NaNs and raises an error if detected.
-
-        Parameters
-        ----------
-        loss
-            The list of loss scalars in order (A, B, ...)
-
-        Returns
-        -------
-        2 ``floats`` which is the total loss for each side (eg sum of face + mask loss)
-
-        Raises
-        ------
-        FaceswapError
-            If a NaN is detected, a :class:`FaceswapError` will be raised
-        """
-        # NaN protection
-        if mod_cfg.nan_protection() and not all(torch.isfinite(val.total).all() for val in loss):
-            loss_str = ", ".join(f"Loss {get_label(i, len(loss))}: {round(x.total.item(), 6)}"
-                                 for i, x in enumerate(loss))
-            msg = f"NaN Detected. {loss_str}"
-            failed = ", ".join(f"{key}({get_label(i, len(loss))})"
-                               for i, out in enumerate(loss)
-                               for unweighted in out.unweighted
-                               for key, sub_loss in unweighted.items()
-                               if not torch.isfinite(sub_loss).all())
-            if failed:
-                msg += f". The loss function(s) that NaN'd: {failed}"
-            logger.critical(msg)
-            raise FaceswapError("A NaN was detected and you have NaN protection enabled. Training "
-                                "has been terminated.")
-
-        combined_loss = np.array([x.total.item() for x in loss], dtype=np.float32)
-        self._model.add_history(combined_loss)
-        logger.trace("[Trainer] original loss: %s, combined_loss: %s",  # type:ignore[attr-defined]
-                     loss, combined_loss)
-        return combined_loss
-
-    def _print_loss(self, loss: np.ndarray) -> None:
-        """Outputs the loss for the current iteration to the console.
-
-        Parameters
-        ----------
-        The loss for each side. List should contain 2 ``floats`` side "a" in position 0 and side
-        "b" in position 1.
-         """
-        output = ", ".join([f"Loss {side}: {side_loss:.5f}"
-                            for side, side_loss in zip(("A", "B"), loss)])
-        timestamp = time.strftime("%H:%M:%S")
-        output = f"[{timestamp}] [#{self._model.iterations:05d}] {output}"
-        print(f"{output}", end="\r")
+        return loss
 
     def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
         """Obtain preview predictions from the model, chunking feeds into the model's batch size
@@ -540,23 +639,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                        self._model.iterations - 1 >= self._plugin.config.snapshot_interval and
                        (self._model.iterations - 1) % self._plugin.config.snapshot_interval == 0)
         loss = self.train_one_batch()
-        self._log_tensorboard(loss)
-        total_loss = self._collate_and_store_loss(loss)
-        self._print_loss(total_loss)
+        self._loss_handler(loss)
         if do_snapshot:
             self._model.io.snapshot()
         self._update_viewers(viewer, do_timelapse)
-
-    def _clear_tensorboard(self) -> None:
-        """Stop Tensorboard logging.
-
-        Tensorboard logging needs to be explicitly shutdown on training termination. Called from
-        :class:`scripts.train.Train` when training is stopped.
-         """
-        if not self._tensorboard:
-            return
-        logger.debug("[Trainer] Ending Tensorboard Session: %s", self._tensorboard)
-        self._tensorboard.on_train_end()
 
     def save(self, is_exit: bool = False) -> None:
         """Save the model
@@ -566,11 +652,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         is_exit
             ``True`` if save has been called on model exit. Default: ``False``
         """
-        self._model.io.save(self._optimizer, is_exit=is_exit)
-        assert self._tensorboard is not None
-        self._tensorboard.on_save()
+        average_loss = self._loss_handler.on_save()
+        self._model.io.save(average_loss, self._optimizer, is_exit=is_exit)
         if is_exit:
-            self._clear_tensorboard()
+            self._loss_handler.close()
 
 
 __all__ = get_module_objects(__name__)

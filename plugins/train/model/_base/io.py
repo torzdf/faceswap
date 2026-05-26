@@ -94,8 +94,6 @@ class IO():
         self._is_predict = is_predict
         self._model_dir = model_dir
         self._do_save_optimizer = save_optimizer
-        self._history: list[float] = []
-        """Loss history for current save iteration"""
         self._backup = Backup(self._model_dir, self._plugin.name)
         self._update_legacy()
 
@@ -114,11 +112,6 @@ class IO():
         """``True`` if a model of the type being loaded exists within the model folder location
         otherwise ``False``."""
         return os.path.isfile(self.filename)
-
-    @property
-    def history(self) -> list[float]:
-        """list of loss history for the current save iteration."""
-        return self._history
 
     @property
     def multiple_models_in_folder(self) -> list[str] | None:
@@ -265,23 +258,6 @@ class IO():
             self._save_optimizer(optimizer)
         self._plugin.state.save()
 
-    def _get_save_average(self) -> float:
-        """Return the average loss since the last save iteration and reset historical loss
-
-        Returns
-        -------
-        The average loss since the last save iteration
-        """
-        logger.debug("[IO] Getting save averages")
-        if not self._history:
-            logger.debug("[IO] No loss in history")
-            retval = 0.0
-        else:
-            retval = sum(self._history) / len(self._history)
-            self._history = []  # Reset historical loss
-        logger.debug("[IO] Average loss since last save: %s", round(retval, 5))
-        return retval
-
     def _should_backup(self, save_average: float) -> bool:
         """Check whether the loss average for this save iteration is the lowest that has been
         seen.
@@ -317,33 +293,44 @@ class IO():
         logger.debug("[IO] Should backup: %s", backup)
         return backup
 
-    def _maybe_backup(self) -> tuple[float, bool]:
+    def _maybe_backup(self, average_loss: float) -> bool:
         """Backup the model if total average loss has dropped for the save iteration
+
+        Parameters
+        ----------
+        average_loss
+            The average total loss since the last save iteration
 
         Returns
         -------
-        average_loss
-            The total loss average since the last save iteration
         backed_up
             ``True`` if the model was backed up
         """
-        save_average = self._get_save_average()
-        should_backup = self._should_backup(save_average)
-        if not save_average or not should_backup:
+        if not average_loss:
+            logger.debug("[IO] Not backing up model as no loss provided (save_average: %s)",
+                         average_loss)
+            return False
+        should_backup = self._should_backup(average_loss)
+        if not should_backup:
             logger.debug("[IO] Not backing up model (save_average: %s, should_backup: %s)",
-                         save_average, should_backup)
-            return save_average, False
+                         average_loss, should_backup)
+            return False
 
         logger.debug("[IO] Backing up model")
         self._backup.backup_model(self.filename)
         self._backup.backup_model(self._plugin.state.filename)
-        return save_average, True
+        return True
 
-    def save(self, optimizer: Optimizer | None = None, is_exit: bool = False) -> None:
+    def save(self,
+             average_loss: float = 0.0,
+             optimizer: Optimizer | None = None,
+             is_exit: bool = False) -> None:
         """Backup and save the model and state file.
 
         Parameters
         ----------
+        average_loss
+            The average total loss since the last save iteration
         optimizer
             The current optimizer in use for the model if it should be saved. Default: ``None``
         is_exit
@@ -355,11 +342,11 @@ class IO():
         logger.info("Saving Model...")
 
         self._save_model(optimizer, is_exit)
-        save_average, backed_up = self._maybe_backup()
+        backed_up = self._maybe_backup(average_loss)
 
         msg = "[Saved model]"
-        if save_average:
-            msg += f" - Average total loss since last save: {save_average:.5f}"
+        if average_loss:
+            msg += f" - Average total loss since last save: {average_loss:.5f}"
         if backed_up:
             msg += " [Model backed up]"
         logger.info(msg)
