@@ -342,7 +342,7 @@ class Loss(GlobalSection):
         datatype=float,
         default=1.0,
         group=_("loss"),
-        info=_("The amount of weight to apply to the main loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        info=_("The amount of weight to apply to the main loss function.") + _LOSS_WEIGHT_HELP,
         min_max=(0.0, 10.0),
         rounding=3,
         fixed=False)
@@ -362,7 +362,7 @@ class Loss(GlobalSection):
         datatype=float,
         default=1.0,
         group=_("loss"),
-        info=_("The amount of weight to apply to the 2nd loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        info=_("The amount of weight to apply to the 2nd loss function.") + _LOSS_WEIGHT_HELP,
         min_max=(0.0, 10.0),
         rounding=3,
         fixed=False)
@@ -380,7 +380,7 @@ class Loss(GlobalSection):
         datatype=float,
         default=0.0,
         group=_("loss"),
-        info=_("The amount of weight to apply to the 3rd loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        info=_("The amount of weight to apply to the 3rd loss function.") + _LOSS_WEIGHT_HELP,
         min_max=(0.0, 10.0),
         rounding=3,
         fixed=False)
@@ -399,7 +399,7 @@ class Loss(GlobalSection):
         datatype=float,
         default=0.0,
         group=_("loss"),
-        info=_("The amount of weight to apply to the 4th loss function.\n\n") + _LOSS_WEIGHT_HELP,
+        info=_("The amount of weight to apply to the 4th loss function.") + _LOSS_WEIGHT_HELP,
         min_max=(0.0, 10.0),
         rounding=3,
         fixed=False)
@@ -472,7 +472,7 @@ class Loss(GlobalSection):
         default=1.0,
         group=_("identity"),
         info=_(
-            "The amount of weight to apply to the identity loss function\n\n") + _LOSS_WEIGHT_HELP,
+            "The amount of weight to apply to the identity loss function.") + _LOSS_WEIGHT_HELP,
         min_max=(0.0, 10.0),
         rounding=1,
         fixed=False)
@@ -481,12 +481,24 @@ class Loss(GlobalSection):
         default=0.0,
         group=_("identity"),
         info=_(
-            "Dissimilarity measures how different the swapped face is from the original face. "
-            "This should generally be set lower than the identity loss function.\n"
             "The amount of weight to apply to the identity dissimilarity loss "
-            "function\n\n") + _LOSS_WEIGHT_HELP,
+            "function.\n\nDissimilarity measures how different the swapped face is from the "
+            "original face. This should generally be set lower than the identity loss function.\n"
+            ) + _LOSS_WEIGHT_HELP,
         min_max=(0.0, 10.0),
         rounding=1,
+        fixed=False)
+    identity_warmup = ConfigItem(
+        datatype=int,
+        default=1000,
+        group=_("identity"),
+        info=_(
+            "The number of iterations to warm up the identity loss functions before hitting "
+            "their target weight.\n\n The identity function caches data as it is processed, so "
+            "early updates can be detrimental to model performance. Warming up the identity "
+            "functions more gradually introduces the functions to the model."),
+        min_max=(0, 10000),
+        rounding=100,
         fixed=False)
     mask_type = ConfigItem(
         datatype=str,

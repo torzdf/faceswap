@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 # TODO custom config file loading
 # TODO centralize swap-prediction for identity loss for dist training
-# TODO output loss ratios at each save iter
 
 class Train():
     """The Faceswap Training Process.

@@ -107,8 +107,14 @@ class LossConfig:  # pylint:disable=too-many-instance-attributes
         The amount of extra weighting to apply to the mouth area
     mask_loss
         The loss function to use if learn_mask is enabled
-    identity_loss
+    identity_backend
         The identity loss functions to use
+    identity_weight
+        The weighting to use for identity loss
+    identity_dissimilarity_weight
+        The weighting to use for identity dissimilarity loss
+    identity_warmup
+        The number of steps to warmup identity loss for
     centering
         The centering type that the model is training at (for identity loss)
     coverage
@@ -133,6 +139,8 @@ class LossConfig:  # pylint:disable=too-many-instance-attributes
     """The weighting to use for identity loss"""
     identity_dissimilarity_weight: float
     """The weighting to use for identity dissimilarity loss"""
+    identity_warmup: int
+    """The number of steps to warmup identity loss for"""
     centering: CenteringType
     """The centering type that the model is training at (for identity loss)"""
     coverage: float
@@ -177,6 +185,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             else get_loss_function("identity",
                                    color_order=color_order,
                                    kwargs={"backbone": config.identity_backend,
+                                           "warmup_steps": config.identity_warmup,
                                            "input_size": max(output_sizes),
                                            "centering": config.centering,
                                            "coverage": config.coverage,

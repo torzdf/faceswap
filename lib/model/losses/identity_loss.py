@@ -34,6 +34,8 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         The `"bgr"` or `"rgb"` color order of the incoming images
     backbone
         The model backbone to use
+    warmup_steps
+        The number of iterations before outputting at full strength
     input_size
         The input size to the loss function (ie: the model output size)
     centering
@@ -51,13 +53,14 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
     def __init__(self,
                  color_order: T.Literal["bgr", "rgb"],
                  backbone: T.Literal["ir-50", "ir-101"],
+                 warmup_steps: int,
                  input_size: int,
                  centering: CenteringType,
                  coverage: float,
                  image_counts: tuple[int, ...]) -> None:
         logger.debug(parse_class_init(locals()))
-        self._backbone = backbone
         self._color_order = color_order
+        self._backbone = backbone
         self._image_counts = image_counts
         self._padding_diff, self._crop_size, self._base_size = self._get_crop_data(
             centering,
@@ -68,6 +71,12 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         self._seen_targets = [set() for _ in range(len(image_counts))]
         self._cache_full = [False for _ in range(len(image_counts))]
         self._cache_counts = [0 for _ in range(len(image_counts))]
+
+        self._warmup: dict[T.Literal["warmup_steps", "steps", "is_warmed_up"], T.Any] = {
+            "warmup_steps": warmup_steps,
+            "steps": {"dissim": 0, "sim": 0},
+            "is_warmed_up": warmup_steps <= 0}
+
         self.register_buffer("_identities",
                              torch.zeros((len(image_counts), 512), dtype=torch.float32))
 
@@ -200,8 +209,41 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         self._seen_targets[target_index].update(indices_to_cache)
 
         if len(self._seen_targets[target_index]) == self._image_counts[target_index]:
-            logger.info("[Identity Loss] Cache full for side %s", target_index)
+            logger.debug("[Identity Loss] Cache full for side %s", target_index)
             self._cache_full[target_index] = True
+
+    def _do_warm_up(self, loss: torch.Tensor, is_dissim: bool) -> torch.Tensor:
+        """Scale the output loss function based on the number of steps seen and the configured
+        number of warmup steps
+
+        Parameters
+        ----------
+        loss
+            The full strength loss output
+        is_dissim
+            ``True`` if value is for dissimilarity. ``False`` for similarity
+
+        Returns
+        -------
+        The scaled loss for warmup
+        """
+        if self._warmup["is_warmed_up"]:
+            return loss
+
+        self._warmup["steps"]["dissim" if is_dissim else "sim"] += 1
+        steps = set(x for x in self._warmup["steps"].values() if x != 0)
+        current = int(np.ceil(max(steps) / len(self._image_counts)))
+        factor = current / self._warmup["warmup_steps"]
+        retval = loss * factor
+
+        if len(steps) != 1:  # between sim + dissim
+            return retval
+
+        if current >= self._warmup["warmup_steps"]:
+            logger.debug("[IdentityLoss] Identity Loss warmup complete")
+            self._warmup["is_warmed_up"] = True
+
+        return retval
 
     def forward(self,
                 y_true: torch.Tensor,
@@ -236,6 +278,7 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         -------
         The similarity or dissimilarity between the predicted swapped images and the target images
         """
+        is_dissim = side_index != target_index
         if not self._cache_full[target_index]:
             self._cache_target_identities(y_true,
                                           target_index,
@@ -244,9 +287,12 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         feed = self._prepare_images(y_pred, offsets[:, side_index])
         swap_identities = self._net(feed)
-        retval = self._cosine_similarity(swap_identities, self._identities[target_index])
-        if side_index == target_index:
-            retval = 1.0 - retval
+        loss = self._cosine_similarity(swap_identities, self._identities[target_index])
+        if is_dissim:
+            loss = torch.clamp(loss, min=0)
+        else:
+            loss = 1.0 - loss
+        retval = self._do_warm_up(loss, is_dissim)
         return retval
 
 

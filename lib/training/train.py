@@ -345,6 +345,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                           identity_backend=id_loss if plugin.config.identity_loss else None,
                           identity_weight=mod_cfg.Loss.identity_weight(),
                           identity_dissimilarity_weight=mod_cfg.Loss.dissimilarity_weight(),
+                          identity_warmup=mod_cfg.Loss.identity_warmup(),
                           centering=T.cast("CenteringType", mod_cfg.centering()),
                           coverage=mod_cfg.coverage() / 100.)
         loss = LossCollator(conf,
