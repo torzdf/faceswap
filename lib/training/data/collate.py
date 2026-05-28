@@ -37,52 +37,28 @@ class BatchMeta:
     All lists are of len(number model outputs per side) with tensors in shape (batch_size,
     num_inputs, 1, H, W)
     """
-    side_index: tuple[int, ...]
-    """The input side index/indices that are contained within this batch"""
     image_indices: npt.NDArray[np.int64]
     """The image indices for each of the images within the batch in shape
     (batch_size, num_inputs). Used for downstream tracking"""
     mask_face: list[torch.Tensor] | None = None
-    """The selected face mask for penalized loss/learn mask for each output in NCHW order"""
+    """The face mask for penalized loss/learn mask for each output in channel first order"""
     mask_eye: list[torch.Tensor] | None = None
-    """The eye mask if eye loss multipliers > 1 for each output in NCHW order"""
+    """The eye mask if eye loss multipliers > 1 for each output in channel first order"""
     mask_mouth: list[torch.Tensor] | None = None
-    """The mouth mask if mouth loss multipliers > 1 for each output in NCHW order"""
+    """The mouth mask if mouth loss multipliers > 1 for each output in channel first order"""
     offsets: torch.Tensor | None = None
-    """The normalized offsets between training centering and legacy centering if requested"""
+    """The normalized offsets between training centering and legacy centering if requested in
+    shape (N, num_inputs, 2)"""
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
         params = ", ".join(
-            f"{k}={(v if v is None or isinstance(v, tuple)
+            f"{k}={(v if v is None
                     else format_array(v) if isinstance(v, np.ndarray)
                     else (v.shape, v.dtype) if isinstance(v, torch.Tensor)
                     else [(x.shape, x.dtype) for x in v])}"
             for k, v in self.__dict__.items())
         return f"{self.__class__.__name__}({params})"
-
-    def __getitem__(self, key: int) -> BatchMeta:
-        """Obtain a copy of the BatchMeta object for a specific model input index
-
-        Parameters
-        ----------
-        key
-            The input id to obtain data for
-
-        Returns
-        -------
-        The meta data for a specific model input. image_indices will be a 1D array of image indices
-        for the requested model input index. All other Data will be populated in lists of length
-        num_outputs in shape (batch_size, 1, H, W)
-        """
-        mask_dict = {k: None if v is None else [x[:, key] for x in v]
-                     for k, v in self.__dict__.items() if k.startswith("mask")}
-        return BatchMeta(side_index=(self.side_index[key], ),
-                         image_indices=self.image_indices[:, key],
-                         mask_face=mask_dict["mask_face"],
-                         mask_eye=mask_dict["mask_eye"],
-                         mask_mouth=mask_dict["mask_mouth"],
-                         offsets=None if self.offsets is None else self.offsets[:, key])
 
     def to(self, device: str | torch.Device) -> T.Self:
         """Place all contained tensors onto the given device
@@ -98,7 +74,7 @@ class BatchMeta:
         """
         for k in list(self.__dict__):
             v = self.__dict__[k]
-            if k in ("side_index", "image_indices") or v is None:
+            if k == "image_indices" or v is None:
                 continue
             if isinstance(v, list):
                 self.__dict__[k] = [x.to(device) for x in v]
@@ -630,8 +606,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         feed = self._augment(feed, landmarks, warp=True)
 
         inputs = self._create_inputs(feed) + identity_inputs
-        meta = BatchMeta(side_index=tuple(range(self._num_inputs)),
-                         image_indices=indices,
+        meta = BatchMeta(image_indices=indices,
                          **masks,
                          offsets=None if offsets is None else torch.from_numpy(offsets))
 

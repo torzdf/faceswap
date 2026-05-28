@@ -21,6 +21,8 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# TODO y_true/y_pred order check
+
 @dataclass
 class BatchLoss:
     """Dataclass for holding Loss values for a batch of data"""
@@ -55,9 +57,9 @@ class BatchLoss:
         -------
         weighted and unweighted total contributions to the final loss cost
         """
-        unweighted = {k: T.cast(torch.Tensor, sum([d[k].mean() for d in self.unweighted])).detach()
+        unweighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.unweighted)).detach()
                       for k in self.unweighted[0]}
-        weighted = {k: T.cast(torch.Tensor, sum([d[k].mean() for d in self.weighted])).detach()
+        weighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.weighted)).detach()
                     for k in self.weighted[0]}
         if "identity" in list(self.unweighted)[-1]:
             unweighted["identity"] = self.unweighted[-1]["identity"].mean().detach()
@@ -87,7 +89,7 @@ class BatchLoss:
 
 
 @dataclass
-class LossConfig:
+class LossConfig:  # pylint:disable=too-many-instance-attributes
     """Dataclass to hold configuration options for Loss Functions
 
     Parameters
@@ -107,6 +109,10 @@ class LossConfig:
         The loss function to use if learn_mask is enabled
     identity_loss
         The identity loss functions to use
+    centering
+        The centering type that the model is training at (for identity loss)
+    coverage
+        The coverage that the model is training at (for identity loss)
     """
     functions: list[str]
     """List of lost function names from configuration file to collate for loss calculation"""
@@ -248,6 +254,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
     def _get_spatial_loss(self,
                           y_true: torch.Tensor,
                           y_pred: torch.Tensor,
+                          side_index: int,
                           meta: BatchMeta,
                           index: int) -> dict[str, torch.Tensor]:
         """Obtain the unweighted loss values for the spatial loss functions
@@ -258,6 +265,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             The ground truth batch of images
         y_pred
             The batch of model predictions
+        side_index
+            The side of the model that is calling the loss function
         meta
             The meta information for the batch
         index
@@ -271,11 +280,11 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         for name in self._spatial:
             loss: torch.Tensor = self._functions[name](y_true, y_pred)
             if self._config.use_mask and meta.mask_face is not None:
-                loss *= meta.mask_face[index]
+                loss *= meta.mask_face[index][:, side_index]
             if self._config.eye_weight > 1. and meta.mask_eye is not None:
-                loss += loss * meta.mask_eye[index] * self._config.eye_weight
+                loss += loss * meta.mask_eye[index][:, side_index] * self._config.eye_weight
             if self._config.mouth_weight > 1. and meta.mask_mouth is not None:
-                loss += loss * meta.mask_mouth[index] * self._config.mouth_weight
+                loss += loss * meta.mask_mouth[index][:, side_index] * self._config.mouth_weight
             retval[name] = loss.mean(dim=tuple(range(1, loss.ndim)))
         logger.trace("[Loss] Spatial loss: %s", retval)  # type:ignore[attr-defined]
         return retval
@@ -283,6 +292,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
     def _get_masked_inputs(self,
                            y_true: torch.Tensor,
                            y_pred: torch.Tensor,
+                           side_index: int,
                            meta: BatchMeta,
                            index: int
                            ) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], list[float]]:
@@ -294,6 +304,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             The ground truth batch of images
         y_pred
             The batch of model predictions
+        side_index
+            The side of the model that is calling the loss function
         meta
             The meta information for the batch
         index
@@ -308,13 +320,13 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         """
         weights = [1.0]
         assert meta.mask_face is not None
-        face_mask = meta.mask_face[index]
+        face_mask = meta.mask_face[index][:, side_index]
         inputs = [(y_true * face_mask, y_pred * face_mask)]
         for m_type in ("eye", "mouth"):
             masks: list[torch.Tensor] | None = getattr(meta, f"mask_{m_type}")
             if masks is None:
                 continue
-            mask = masks[index]
+            mask = masks[index][:, side_index]
             inputs.append((y_true * mask, y_pred * mask))
             weights.append(self._config.eye_weight if m_type == "eye"
                            else self._config.mouth_weight)
@@ -325,6 +337,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
     def _get_non_spatial_loss(self,
                               y_true: torch.Tensor,
                               y_pred: torch.Tensor,
+                              side_index: int,
                               meta: BatchMeta,
                               index: int) -> dict[str, torch.Tensor]:
         """Obtain the unweighted loss values for the non-spatial loss functions
@@ -335,6 +348,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             The ground truth batch of images
         y_pred
             The batch of model predictions
+        side_index
+            The side of the model that is calling the loss function
         meta
             The meta information for the batch
         index
@@ -349,7 +364,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             inputs = [(y_true, y_pred)]
             weights = [1.0]
         else:
-            inputs, weights = self._get_masked_inputs(y_true, y_pred, meta, index)
+            inputs, weights = self._get_masked_inputs(y_true, y_pred, side_index, meta, index)
 
         for name in self._non_spatial:
             losses = torch.stack([self._functions[name](inp_true, inp_pred) * weight
@@ -359,49 +374,14 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         logger.trace("[Loss] Non-spatial loss: %s", retval)  # type:ignore[attr-defined]
         return retval
 
-    def _get_identity_loss(self,
-                           swap_true: torch.Tensor,
-                           swap_pred: list[torch.Tensor],
-                           meta: BatchMeta) -> torch.Tensor:
-        """Obtain the unweighted loss values for the identity loss function
-
-        Parameters
-        ----------
-        swap_true
-            The ground truth batch of images for sides of the model in shape (batch_size,
-            num_inputs, H, W, C)
-        swap_pred
-            The batch of swapped model predictions for all model inputs
-        meta
-            The meta information for the batch
-
-        Returns
-        -------
-        The unweighted loss for the identity loss function
-        """
-        assert self._identity_function is not None
-        assert len(meta.side_index) == 1
-        side_idx = meta.side_index[0]
-
-        y_true = swap_true[:, side_idx]
-        id_loss = [self._identity_function(y_true,
-                                           y_pred,
-                                           side_idx,
-                                           meta.image_indices,
-                                           meta.offsets,
-                                           dissimilarity=False)
-                   for y_pred in swap_pred]
-
-        return torch.mean((torch.stack(id_loss)), dim=0)
-
-    def forward(self,
-                y_true_all: list[torch.Tensor],
-                y_pred_all: list[torch.Tensor],
-                meta: BatchMeta,
-                swap_true: torch.Tensor | None,
-                swap_pred: list[torch.Tensor]) -> BatchLoss:
-        """Call the loss functions, reduce to batch dimension, apply masks and weighting and obtain
-        the weighted and unweighted per function values and the weighted total loss scalar
+    def _get_standard_loss(self,
+                           y_true_all: list[torch.Tensor],
+                           y_pred_all: list[torch.Tensor],
+                           side_index: int,
+                           meta: BatchMeta) -> tuple[list[dict[str, torch.Tensor]],
+                                                     list[dict[str, torch.Tensor]],
+                                                     torch.Tensor | None]:
+        """Obtain the loss values for standard A->A, B->B, ... loss functions
 
         Parameters
         ----------
@@ -409,27 +389,23 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             The ground truth batch of images for all outputs for a side of the model
         y_pred_all
             The batch of model predictions for all outputs for a side of the model
+        side_index
+            The side of the model that is calling the loss function
         meta
             The meta information for the batch
-        swap_true
-            The targets for identity loss for all model inputs in shape (batch_size, num_inputs,
-            H, W, C) or ``None`` if identity loss is not enabled
-        swap_pred
-            The swap predictions from the model if an identity loss is being used
 
         Returns
         -------
-        The loss scalars for the batch
+        unweighted
+            The unweighted loss per item for each standard loss function for each output
+        weighted
+            The weighted loss per item for each standard loss function for each output
+        mask_loss
+            The loss for mask output if learn_mask is selected
         """
         all_unweighted: list[dict[str, torch.Tensor]] = []
         all_weighted: list[dict[str, torch.Tensor]] = []
         mask_loss = None
-
-        # TODO remove once channels first
-        y_true_all = [x.permute(0, 3, 1, 2) for x in y_true_all]
-        y_pred_all = [x.permute(0, 3, 1, 2) for x in y_pred_all]
-        swap_true = None if swap_true is None else swap_true.permute(0, 1, 4, 2, 3)
-        swap_pred = [x.permute(0, 3, 1, 2) for x in swap_pred]
 
         for idx, (y_true, y_pred) in enumerate(zip(y_true_all, y_pred_all)):
 
@@ -439,18 +415,181 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                 mask_loss = mask_loss.mean(dim=tuple(range(1, mask_loss.ndim)))
                 continue
 
-            unweighted = self._get_spatial_loss(y_true, y_pred, meta, idx)
-            unweighted |= self._get_non_spatial_loss(y_true, y_pred, meta, idx)
+            unweighted = self._get_spatial_loss(y_true, y_pred, side_index, meta, idx)
+            unweighted |= self._get_non_spatial_loss(y_true, y_pred, side_index, meta, idx)
             all_unweighted.append(unweighted)
             all_weighted.append({k: v * self._weights[k] for k, v in unweighted.items()})
 
-        if self._identity_function is not None and swap_true is not None:
-            identity_loss = self._get_identity_loss(swap_true, swap_pred, meta)
-            all_unweighted[-1]["identity"] = identity_loss
-            all_weighted[-1]["identity"] = identity_loss * self._config.identity_weight
+        logger.trace(  # type:ignore[attr-defined]
+            "[LossCollator] unweighted: %s, weighted: %s, mask_loss: %s",
+            all_unweighted, all_weighted, mask_loss)
 
-        retval = BatchLoss(unweighted=all_unweighted,
-                           weighted=all_weighted,
+        return all_unweighted, all_weighted, mask_loss
+
+    def _get_identity_loss(self,
+                           swap_true: torch.Tensor,
+                           swap_pred: list[torch.Tensor],
+                           side_index: int,
+                           meta: BatchMeta,
+                           dissim_indices: list[int]
+                           ) -> dict[T.Literal["identity", "identity_dissim"], torch.Tensor]:
+        """Obtain the unweighted loss values for the identity loss function
+
+        Parameters
+        ----------
+        swap_true
+            The ground truth batch of images for sides of the model in shape (batch_size,
+            num_inputs, H, W, C)
+        swap_pred
+            The batch of swapped model predictions for all model inputs
+        side_index
+            The side of the model that is calling the loss function
+        meta
+            The meta information for the batch
+        dissim_indices
+            The input indices relating to swap_true that should be used for identity dissimilarity
+            calculation if an identity loss is being used
+
+        Returns
+        -------
+        The unweighted loss for the identity similarity and dissimilarity loss functions
+        """
+        assert self._identity_function is not None
+
+        retval: dict[T.Literal["identity", "identity_dissim"], torch.Tensor] = {}
+
+        if self._config.identity_weight > 0.0:
+            id_loss = [self._identity_function(swap_true[:, side_index],
+                                               y_pred,
+                                               side_index,
+                                               side_index,
+                                               meta.image_indices[:, side_index],
+                                               meta.offsets)
+                       for y_pred in swap_pred]
+            logger.trace("[LossCollator] identity loss: %s", id_loss)  # type:ignore[attr-defined]
+            retval["identity"] = torch.stack(id_loss).mean(dim=0)
+
+        if self._config.identity_dissimilarity_weight <= 0.0:
+            return retval
+
+        dissim_loss = [self._identity_function(swap_true[:, tgt_idx],
+                                               y_pred,
+                                               side_index,
+                                               tgt_idx,
+                                               meta.image_indices[:, tgt_idx],
+                                               meta.offsets)
+                       for (y_pred, tgt_idx) in zip(swap_pred, dissim_indices)]
+
+        logger.trace(  # type:ignore[attr-defined]
+            "[LossCollator] identity_dissim loss. input_index: %s dissim_indices: %s: %s",
+            side_index, dissim_indices, dissim_loss)
+        retval["identity_dissim"] = torch.stack(dissim_loss).mean(dim=0)
+        return retval
+
+    def _get_swap_loss(self,
+                       swap_true: torch.Tensor | None,
+                       swap_pred: list[torch.Tensor],
+                       side_index: int,
+                       meta: BatchMeta,
+                       dissim_indices: list[int]
+                       ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Obtain the loss values for swap A->B, B->A, ... loss functions
+
+        Parameters
+        ----------
+        swap_true
+            The ground truth batch of images for sides of the model in shape (batch_size,
+            num_inputs, H, W, C)
+        swap_pred
+            The batch of swapped model predictions for all model inputs
+        side_index
+            The side of the model that is calling the loss function
+        meta
+            The meta information for the batch
+        dissim_indices
+            The input indices relating to swap_true that should be used for identity dissimilarity
+            calculation if an identity loss is being used
+
+        Returns
+        -------
+        unweighted
+            The unweighted loss per item for each swap loss function
+        weighted
+            The weighted loss per item for each swap loss function
+        """
+        unweighted = {}
+        weighted = {}
+
+        if self._identity_function is not None and swap_true is not None:
+            unweighted = T.cast(dict[str, torch.Tensor],
+                                self._get_identity_loss(swap_true,
+                                                        swap_pred,
+                                                        side_index,
+                                                        meta,
+                                                        dissim_indices))
+            mul = {"identity": self._config.identity_weight,
+                   "identity_dissim": self._config.identity_dissimilarity_weight}
+            weighted = {k: v * mul[k] for k, v in unweighted.items()}
+
+        logger.trace(  # type:ignore[attr-defined]
+            "[LossCollator] unweighted: %s, weighted : %s",
+            unweighted, weighted)
+        return unweighted, weighted
+
+    def forward(self,
+                y_true_all: list[torch.Tensor],
+                y_pred_all: list[torch.Tensor],
+                side_index: int,
+                meta: BatchMeta,
+                swap_true: torch.Tensor | None,
+                swap_pred: list[torch.Tensor],
+                dissim_indices: list[int]) -> BatchLoss:
+        """Call the loss functions, reduce to batch dimension, apply masks and weighting and obtain
+        the weighted and unweighted per function values and the weighted total loss scalar
+
+        Parameters
+        ----------
+        y_true_all
+            The ground truth batch of images for all outputs for a side of the model
+        y_pred_all
+            The batch of model predictions for all outputs for a side of the model
+        side_index
+            The side of the model that is calling the loss function
+        meta
+            The meta information for the batch
+        swap_true
+            The targets for identity loss for all model inputs in shape (batch_size, num_inputs,
+            H, W, C) or ``None`` if identity loss is not enabled
+        swap_pred
+            The swap predictions from the model if an identity loss is being used
+        dissim_indices
+            The input indices relating to swap_true that should be used for identity dissimilarity
+            calculation if an identity loss is being used
+
+        Returns
+        -------
+        The loss scalars for the batch
+        """
+        # TODO remove once channels first
+        y_true_all = [x.permute(0, 3, 1, 2) for x in y_true_all]
+        y_pred_all = [x.permute(0, 3, 1, 2) for x in y_pred_all]
+        swap_true = None if swap_true is None else swap_true.permute(0, 1, 4, 2, 3)
+        swap_pred = [x.permute(0, 3, 1, 2) for x in swap_pred]
+
+        unweighted, weighted, mask_loss = self._get_standard_loss(y_true_all,
+                                                                  y_pred_all,
+                                                                  side_index,
+                                                                  meta)
+        swap_unweighted, swap_weighted = self._get_swap_loss(swap_true,
+                                                             swap_pred,
+                                                             side_index,
+                                                             meta,
+                                                             dissim_indices)
+        unweighted[-1] |= swap_unweighted
+        weighted[-1] |= swap_weighted
+
+        retval = BatchLoss(unweighted=unweighted,
+                           weighted=weighted,
                            mask=mask_loss)
         logger.trace("[Loss] %s", retval)  # type:ignore[attr-defined]
         return retval

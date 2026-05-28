@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # TODO y-offset
 
 
-class IdentityLoss(nn.Module):
+class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
     """Loss function that calculates the identity vectors of the swapped output of the model
     against the mean of the source dataset's identity vectors
 
@@ -59,6 +59,7 @@ class IdentityLoss(nn.Module):
         logger.debug(parse_class_init(locals()))
         self._backbone = backbone
         self._color_order = color_order
+        self._image_counts = image_counts
         self._padding_diff, self._crop_size, self._base_size = self._get_crop_data(
             centering,
             coverage,
@@ -164,7 +165,7 @@ class IdentityLoss(nn.Module):
 
     def _cache_target_identities(self,
                                  targets: torch.Tensor,
-                                 side_index: int,
+                                 target_index: int,
                                  image_ids: npt.NDArray[np.int64],
                                  offsets: torch.Tensor) -> None:
         """Obtain the identities for any images in the given batch that have not yet been cached
@@ -174,39 +175,46 @@ class IdentityLoss(nn.Module):
         ----------
         targets
             The target identity images
-        side_index
+        target_index
             The side index of the model that the target identity images belong to
         image_ids
             The image ids of the target identity images
         offsets
-            The offsets to shift training images to legacy centering
+            The offsets to shift the target images to legacy centering
         """
-        indices_to_cache = set(image_ids.tolist()).difference(self._seen_targets[side_index])
+        indices_to_cache = set(image_ids.tolist()).difference(self._seen_targets[target_index])
         if not indices_to_cache:
-            logger.info("[Identity Loss] Cache full for side %s", side_index)
-            self._cache_full[side_index] = True
             return
 
         logger.debug(  # type:ignore[attr-defined]
-            "[IdentityLoss] Caching identities for side %s: %s", side_index, indices_to_cache)
+            "[IdentityLoss] Caching identities for side %s: %s", target_index, indices_to_cache)
 
         mask = np.isin(image_ids, list(indices_to_cache))
         feed = self._prepare_images(targets[mask],  # pyright:ignore[reportArgumentType]
                                     offsets[mask])  # pyright:ignore[reportArgumentType]
         identities = T.cast(torch.Tensor, self._net(feed)).mean(dim=0)
-        self._cache_counts[side_index] += 1
-        self._identities[side_index] += ((identities - self._identities[side_index]) /
-                                         self._cache_counts[side_index])
-        self._seen_targets[side_index].update(indices_to_cache)
+        self._cache_counts[target_index] += 1
+        self._identities[target_index] += ((identities - self._identities[target_index]) /
+                                           self._cache_counts[target_index])
+        self._seen_targets[target_index].update(indices_to_cache)
+
+        if len(self._seen_targets[target_index]) == self._image_counts[target_index]:
+            logger.info("[Identity Loss] Cache full for side %s", target_index)
+            self._cache_full[target_index] = True
 
     def forward(self,
                 y_true: torch.Tensor,
                 y_pred: torch.Tensor,
                 side_index: int,
+                target_index: int,
                 image_ids: npt.NDArray[np.int64],
-                offsets: torch.Tensor,
-                dissimilarity: bool) -> torch.Tensor:
-        """Run forward pass through the identity loss function
+                offsets: torch.Tensor) -> torch.Tensor:
+        """Run forward pass through the identity loss function.
+
+        Note: if side_index == target_index then this is a similarity calculation (that is y_true
+        and y_pred should be resolving to the same identities). If side_index != target_index then
+        this is a dissimilarity calculation(that is y_true and y_pred should be resolving to
+        different identities)
 
         Parameters
         ----------
@@ -215,24 +223,28 @@ class IdentityLoss(nn.Module):
         y_pred
             The predicted swapped images generated from the original alternate identities
         side_index
-            The side index of the model that the target identity images belong to
+            The side index of the model that y_pred belong to
+        target_index
+            The side index of the model that y_true belongs to
         image_ids
             The image ids of the target identity images
         offsets
             The offsets to shift training images to legacy centering
-        dissimilarity
-            ``True`` to calculate the identity dissimilarity ``False`` to calculate the identity
-            similarity
 
         Returns
         -------
         The similarity or dissimilarity between the predicted swapped images and the target images
         """
-        if not self._cache_full[side_index]:
-            self._cache_target_identities(y_true, side_index, image_ids, offsets)
-        swap_identities = self._net(self._prepare_images(y_pred, offsets))
-        retval = self._cosine_similarity(swap_identities, self._identities[side_index])
-        if not dissimilarity:
+        if not self._cache_full[target_index]:
+            self._cache_target_identities(y_true,
+                                          target_index,
+                                          image_ids,
+                                          offsets[:, target_index])
+
+        feed = self._prepare_images(y_pred, offsets[:, side_index])
+        swap_identities = self._net(feed)
+        retval = self._cosine_similarity(swap_identities, self._identities[target_index])
+        if side_index == target_index:
             retval = 1.0 - retval
         return retval
 

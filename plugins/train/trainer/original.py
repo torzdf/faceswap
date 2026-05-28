@@ -64,6 +64,7 @@ class Trainer(TrainerBase):
         num_outputs = len(predictions) // num_sides
 
         swap_predictions: dict[int, list[torch.Tensor]] = {i: [] for i in range(num_sides)}
+        swap_dissim_indices: dict[int, list[int]] = {i: [] for i in range(num_sides)}
         if identity_inputs is not None and identity_targets is not None:
             # TODO it would be more efficient to re-use the encoder outputs from the original
             # predictions and just roll the down-streams from that point rather than feeding the
@@ -74,40 +75,28 @@ class Trainer(TrainerBase):
             image_idx = next(i for i in reversed(range(num_outputs))
                              if predictions[:num_outputs][i].shape[-1] != 1)
 
-            # TODO get rolled target for dissim
+            dsm_targets = list(range(num_sides))
             for shift in range(1, num_sides):
                 rolled = identity_inputs[shift:] + identity_inputs[:shift]
                 swap_pred = self.model.model(rolled, training=True)
                 logger.trace("[Trainer] swap outputs for side %s: %s",  # type:ignore[attr-defined]
                              shift, [x.shape for x in swap_pred])
-                for inp_idx in range(num_sides):
+                for inp_idx, dsm_tgt in enumerate(dsm_targets[shift:] + dsm_targets[:shift]):
                     swap_predictions[inp_idx].append(swap_pred[inp_idx * num_outputs + image_idx])
-            logger.trace("[Trainer] Swap predictions: %s",  # type:ignore[attr-defined]
-                         {k: [x.shape for x in v] for k, v in swap_predictions.items()})
-
-        # 2 inputs
-        #t <class 'list'> 1 [torch.Size([16, 2, 64, 64, 3])]
-        #p <class 'list'> 2 [torch.Size([16, 64, 64, 3]), torch.Size([16, 64, 64, 3])]
-        #                    A->A                         B->B
-        #s <class 'dict'> 2 {0: [torch.Size([16, 64, 64, 3])], 1: [torch.Size([16, 64, 64, 3])]}
-        #                    B->A                              A->B
-        # 3 inputs
-        #t <class 'list'> 1 [torch.Size([16, 3, 64, 64, 3])]
-        #p <class 'list'> 3 [torch.Size([16, 64, 64, 3]), torch.Size([16, 64, 64, 3]), torch.Size([16, 64, 64, 3])]
-        #                   # A->A                        B->B                         C->C
-        #s <class 'dict'> 6 {0: [torch.Size([16, 64, 64, 3]), torch.Size([16, 64, 64, 3])],
-        #                        B->A                         C->A
-        #                    1: [torch.Size([16, 64, 64, 3]), torch.Size([16, 64, 64, 3])],
-        #                        C->B                         A->B
-        #                    2: [torch.Size([16, 64, 64, 3]), torch.Size([16, 64, 64, 3])]}
-        #                        A->C                         B->C
+                    swap_dissim_indices[inp_idx].append(dsm_tgt)
+            logger.trace(  # type:ignore[attr-defined]
+                "[Trainer] Swap predictions: %s, swap_dissim_indices: %s",
+                {k: [x.shape for x in v] for k, v in swap_predictions.items()},
+                swap_dissim_indices)
 
         losses: list[BatchLoss] = [
             self.loss_func(y_true_all=[t[:, i] for t in targets],
                            y_pred_all=predictions[i * num_outputs:i * num_outputs + num_outputs],
-                           meta=meta[i],
+                           side_index=i,
+                           meta=meta,
                            swap_true=identity_targets,
-                           swap_pred=swap_predictions[i])
+                           swap_pred=swap_predictions[i],
+                           dissim_indices=swap_dissim_indices[i])
             for i in range(num_sides)
             ]
 
