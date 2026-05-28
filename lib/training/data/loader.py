@@ -120,6 +120,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                              self._config,
                              landmarks=self._landmarks,
                              learn_mask=mod_cfg.Loss.learn_mask(),
+                             y_offset=mod_cfg.vertical_offset() / 100.,
                              identity_loss=use_identity_loss)
         retval = DataLoader(dataset=train_set,
                             batch_size=self._config.batch_size,

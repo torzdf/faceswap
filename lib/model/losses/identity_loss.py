@@ -22,7 +22,6 @@ if T.TYPE_CHECKING:
     from lib.model.networks.insightface_resnet import IRNet
 
 logger = logging.getLogger(__name__)
-# TODO y-offset
 
 
 class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
@@ -153,7 +152,9 @@ class IdentityLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         -------
         The images prepared for feeding the identity model
         """
-        # TODO color order
+        if self._color_order == "bgr":
+            images = torch.flip(images, dims=[1])
+
         scaled_offsets = torch.round(
             -offsets * self._base_size + self._padding_diff).to(torch.int32)
         cropped = batch_sub_crop_torch(images,

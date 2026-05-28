@@ -288,6 +288,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         enabled otherwise ``None``
     learn_mask
         ``True`` if learn mask has been enabled and requires an output target
+    y_offset
+        The vertical offset requested for training the model
     identity_loss
         ``True`` if identity loss has been enabled
     """
@@ -301,6 +303,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                  config: TrainConfig,
                  landmarks: LandmarkMatcher | None,
                  learn_mask: bool,
+                 y_offset: float,
                  identity_loss: bool) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"{self.__class__.__name__}"
@@ -309,6 +312,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         self._color_order = color_order.lower()
         self._config = config
         self._learn_mask = learn_mask
+        self._y_offset = y_offset
         self._identity_loss = identity_loss
 
         self._num_inputs = len(config.folders)
@@ -327,8 +331,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         """Pretty print for logging"""
         params = {f"{k}"[1:]: format_array(v) if isinstance(v, np.ndarray) else v
                   for k, v in self.__dict__.items()
-                  if k in ("_input_size", "_output_sizes", "_color_order",
-                           "_config", "_landmarks", "_learn_mask", "_identity_loss")}
+                  if k in ("_input_size", "_output_sizes", "_color_order", "_config",
+                           "_landmarks", "_learn_mask", "_y_offset", "_identity_loss")}
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
@@ -371,6 +375,8 @@ class Collate:  # pylint:disable=too-many-instance-attributes
             indices[:, idx] = [d[1][idx] for d in data]
             if offsets is not None:
                 offsets[:, idx] = [d[2][idx] for d in data]
+                if self._y_offset:
+                    offsets[:, :, 1] -= self._y_offset / 2.
 
         batch = batch.reshape(-1, *shape)
 
