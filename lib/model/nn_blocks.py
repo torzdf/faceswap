@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Neural Network Blocks for faceswap.py. """
+"""Neural Network Blocks for faceswap.py."""
 from __future__ import annotations
 import logging
 import typing as T
@@ -24,20 +24,19 @@ _names: dict[str, int] = {}
 
 
 def _get_name(name: str) -> str:
-    """ Return unique layer name for requested block.
+    """Return unique layer name for requested block.
 
     As blocks can be used multiple times, auto appends an integer to the end of the requested
     name to keep all block names unique
 
     Parameters
     ----------
-    name: str
+    name
         The requested name for the layer
 
     Returns
     -------
-    str
-        The unique name for this layer
+    The unique name for this layer
     """
     _names[name] = _names.setdefault(name, -1) + 1
     name = f"{name}_{_names[name]}"
@@ -46,7 +45,7 @@ def _get_name(name: str) -> str:
 
 
 def reset_naming() -> None:
-    """ Reset the naming convention for nn_block layers to start from 0
+    """Reset the naming convention for nn_block layers to start from 0
 
     Used when a model needs to be rebuilt and the names for each build should be identical
     """
@@ -58,12 +57,12 @@ def reset_naming() -> None:
 #  << CONVOLUTIONS >>
 def _get_default_initializer(
         initializer: initializers.Initializer) -> initializers.Initializer:
-    """ Returns a default initializer of Convolutional Aware or HeUniform for convolutional
+    """Returns a default initializer of Convolutional Aware or HeUniform for convolutional
     layers.
 
     Parameters
     ----------
-    initializer: :class:`keras.initializers.Initializer` or None
+    initializer
         The initializer that has been passed into the model. If this value is ``None`` then a
         default initializer will be set to 'HeUniform'. If Convolutional Aware initialization
         has been enabled, then any passed through initializer will be replaced with the
@@ -71,9 +70,8 @@ def _get_default_initializer(
 
     Returns
     -------
-    :class:`keras.initializers.Initializer`
-        The kernel initializer to use for this convolutional layer. Either the original given
-        initializer, HeUniform or convolutional aware (if selected in config options)
+    The kernel initializer to use for this convolutional layer. Either the original given
+    initializer, HeUniform or convolutional aware (if selected in config options)
     """
     if isinstance(initializer, dict) and initializer.get("class_name", "") == "ConvolutionAware":
         logger.debug("Returning serialized initialized ConvAware initializer: %s", initializer)
@@ -92,7 +90,7 @@ def _get_default_initializer(
 
 
 class Conv2D():  # pylint:disable=too-many-ancestors,abstract-method
-    """ A standard Keras Convolution 2D layer with parameters updated to be more appropriate for
+    """A standard Keras Convolution 2D layer with parameters updated to be more appropriate for
     Faceswap architecture.
 
     Parameters are the same, with the same defaults, as a standard :class:`keras.layers.Conv2D`
@@ -101,11 +99,11 @@ class Conv2D():  # pylint:disable=too-many-ancestors,abstract-method
 
     Parameters
     ----------
-    padding: str, optional
+    padding
         One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
         slightly inconsistent across backends with `strides` != 1, as described
         `here <https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/>`_.
-    is_upscale: `bool`, optional
+    is_upscale
         ``True`` if the convolution is being called from an upscale layer. This causes the instance
         to check the user configuration options to see if ICNR initialization has been selected and
         should be applied. This should only be passed in as ``True`` from :class:`UpscaleBlock`
@@ -128,24 +126,23 @@ class Conv2D():  # pylint:disable=too-many-ancestors,abstract-method
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, *args, **kwargs) -> KerasTensor:
-        """ Call the Conv2D layer
+        """Call the Conv2D layer
 
         Parameters
         ----------
-        args : tuple
+        args
             Standard Conv2D layer call arguments
-        kwargs : dict[str, Any]
+        kwargs
             Standard Conv2D layer call keyword arguments
 
         Returns
         -------
-        :class: `keras.KerasTensor`
-            The Tensor from the Conv2D layer
+        The Tensor from the Conv2D layer
         """
         return self._conv2d(*args, **kwargs)
 
 class DepthwiseConv2D():  # noqa,pylint:disable=too-many-ancestors,abstract-method
-    """ A standard Keras Depthwise Convolution 2D layer with parameters updated to be more
+    """A standard Keras Depthwise Convolution 2D layer with parameters updated to be more
     appropriate for Faceswap architecture.
 
     Parameters are the same, with the same defaults, as a standard
@@ -154,11 +151,11 @@ class DepthwiseConv2D():  # noqa,pylint:disable=too-many-ancestors,abstract-meth
 
     Parameters
     ----------
-    padding: str, optional
+    padding
         One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
         slightly inconsistent across backends with `strides` != 1, as described
         `here <https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/>`_.
-    is_upscale: `bool`, optional
+    is_upscale
         ``True`` if the convolution is being called from an upscale layer. This causes the instance
         to check the user configuration options to see if ICNR initialization has been selected and
         should be applied. This should only be passed in as ``True`` from :class:`UpscaleBlock`
@@ -167,12 +164,12 @@ class DepthwiseConv2D():  # noqa,pylint:disable=too-many-ancestors,abstract-meth
     def __init__(self, *args, padding: str = "same", is_upscale: bool = False, **kwargs) -> None:
         logger.debug(parse_class_init(locals()))
         if kwargs.get("name", None) is None:
-            kwargs["name"] = _get_name("dwconv2d")
+            kwargs["name"] = _get_name("dw_conv2d")
         initializer = _get_default_initializer(kwargs.pop("depthwise_initializer", None))
         if is_upscale and cfg.icnr_init():
             initializer = ICNR(initializer=initializer)
             logger.debug("Using ICNR Initializer: %s", initializer)
-        self._deptwiseconv2d = layers.DepthwiseConv2D(
+        self._depthwise_conv2d = layers.DepthwiseConv2D(
             *args,
             padding=padding,
             depthwise_initializer=initializer,  # pyright:ignore[reportArgumentType]
@@ -180,25 +177,24 @@ class DepthwiseConv2D():  # noqa,pylint:disable=too-many-ancestors,abstract-meth
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, *args, **kwargs) -> KerasTensor:
-        """ Call the DepthwiseConv2D layer
+        """Call the DepthwiseConv2D layer
 
         Parameters
         ----------
-        args : tuple
+        args
             Standard DepthwiseConv2D layer call arguments
-        kwargs : dict[str, Any]
+        kwargs
             Standard DepthwiseConv2D layer call keyword arguments
 
         Returns
         -------
-        :class: `keras.KerasTensor`
-            The Tensor from the DepthwiseConv2D layer
+        The Tensor from the DepthwiseConv2D layer
         """
-        return self._deptwiseconv2d(*args, **kwargs)
+        return self._depthwise_conv2d(*args, **kwargs)
 
 
 class Conv2DOutput():
-    """ A Convolution 2D layer that separates out the activation layer to explicitly set the data
+    """A Convolution 2D layer that separates out the activation layer to explicitly set the data
     type on the activation to float 32 to fully support mixed precision training.
 
     The Convolution 2D layer uses default parameters to be more appropriate for Faceswap
@@ -210,19 +206,19 @@ class Conv2DOutput():
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int or tuple/list of 2 ints
+    kernel_size
         The height and width of the 2D convolution window. Can be a single integer to specify the
         same value for all spatial dimensions.
     activation: str, optional
         The activation function to apply to the output. Default: `"sigmoid"`
-    padding: str, optional
+    padding
         One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
         slightly inconsistent across backends with `strides` != 1, as described
         `here <https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/>`_.
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
     """
     def __init__(self,
@@ -242,24 +238,23 @@ class Conv2DOutput():
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Convolutional Output Layer.
+        """Call the Faceswap Convolutional Output Layer.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Convolution 2D Layer
+        The output tensor from the Convolution 2D Layer
         """
         var_x = self._conv(inputs)
         return self._activation(var_x)
 
 
 class Conv2DBlock():  # pylint:disable=too-many-instance-attributes
-    """ A standard Convolution 2D layer which applies user specified configuration to the
+    """A standard Convolution 2D layer which applies user specified configuration to the
     layer.
 
     Adds reflection padding if it has been selected by the user, and other post-processing
@@ -269,34 +264,34 @@ class Conv2DBlock():  # pylint:disable=too-many-instance-attributes
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. NB: If `use_depthwise` is ``True`` then a value must still be provided here,
         but it will be ignored. Default: 5
-    strides: tuple or int, optional
+    strides
         An integer or tuple/list of 2 integers, specifying the strides of the convolution along the
         height and width. Can be a single integer to specify the same value for all spatial
         dimensions. Default: `2`
-    padding: ["valid", "same"], optional
+    padding
         The padding to use. NB: If reflect padding has been selected in the user configuration
         options, then this argument will be ignored in favor of reflect padding. Default: `"same"`
-    normalization: str or ``None``, optional
+    normalization
         Normalization to apply after the Convolution Layer. Select one of "batch" or "instance".
         Set to ``None`` to not apply normalization. Default: ``None``
-    activation: str or ``None``, optional
+    activation
         The activation function to use. This is applied at the end of the convolution block. Select
         one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
         function. Default: `"leakyrelu"`
-    use_depthwise: bool, optional
+    use_depthwise
         Set to ``True`` to use a Depthwise Convolution 2D layer rather than a standard Convolution
         2D layer. Default: ``False``
-    relu_alpha: float
+    relu_alpha
         The alpha to use for LeakyRelu Activation. Default=`0.1`
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
     """
     def __init__(self,
@@ -329,25 +324,24 @@ class Conv2DBlock():  # pylint:disable=too-many-instance-attributes
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def _assert_arguments(self) -> None:
-        """ Validate the given arguments. """
+        """Validate the given arguments."""
         assert self._normalization in ("batch", "instance", None), (
             "normalization should be 'batch', 'instance' or None")
         assert self._activation in ("leakyrelu", "swish", "prelu", None), (
             "activation should be 'leakyrelu', 'prelu', 'swish' or None")
 
     def _get_layers(self) -> list[layers.Layer]:
-        """ Obtain the layer chain for the block
+        """Obtain the layer chain for the block
 
         Returns
         -------
-        list[:class:`keras.layers.Layer]
-            The layers, in the correct order, to pass the tensor through
+        The layers, in the correct order, to pass the tensor through
         """
         retval = []
         if self._use_reflect_padding:
             retval.append(ReflectionPadding2D(stride=self._strides[0],
                                               kernel_size=self._args[-1][0],  # type:ignore[index]
-                                              name=f"{self._name}_reflectionpadding2d"))
+                                              name=f"{self._name}_reflection_padding2d"))
 
         conv: layers.Layer = (
             DepthwiseConv2D if self._use_depthwise
@@ -361,7 +355,7 @@ class Conv2DBlock():  # pylint:disable=too-many-instance-attributes
 
         # normalization
         if self._normalization == "instance":
-            retval.append(InstanceNormalization(name=f"{self._name}_instancenorm"))
+            retval.append(InstanceNormalization(name=f"{self._name}_instance_norm"))
 
         if self._normalization == "batch":
             retval.append(layers.BatchNormalization(axis=3, name=f"{self._name}_batchnorm"))
@@ -378,17 +372,16 @@ class Conv2DBlock():  # pylint:disable=too-many-instance-attributes
         return retval
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Convolutional Layer.
+        """Call the Faceswap Convolutional Layer.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Convolution 2D Layer
+        The output tensor from the Convolution 2D Layer
         """
         var_x = inputs
         for layer in self._layers:
@@ -397,22 +390,22 @@ class Conv2DBlock():  # pylint:disable=too-many-instance-attributes
 
 
 class SeparableConv2DBlock():
-    """ Seperable Convolution Block.
+    """Separable Convolution Block.
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 5
-    strides: tuple or int, optional
+    strides
         An integer or tuple/list of 2 integers, specifying the strides of the convolution along
         the height and width. Can be a single integer to specify the same value for all spatial
         dimensions. Default: `2`
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Separable
         Convolutional 2D layer
     """
@@ -424,7 +417,7 @@ class SeparableConv2DBlock():
 
         initializer = _get_default_initializer(kwargs.pop("kernel_initializer", None))
 
-        name = _get_name(f"separableconv2d_{filters}")
+        name = _get_name(f"separable_conv2d_{filters}")
         self._conv = layers.SeparableConv2D(
             filters,
             kernel_size=kernel_size,
@@ -432,23 +425,22 @@ class SeparableConv2DBlock():
             padding="same",
             depthwise_initializer=initializer,  # pyright:ignore[reportArgumentType]
             pointwise_initializer=initializer,  # pyright:ignore[reportArgumentType]
-            name=f"{name}_seperableconv2d",
+            name=f"{name}_separable_conv2d",
             **kwargs)
         self._activation = layers.Activation("relu", name=f"{name}_relu")
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Separable Convolutional 2D Block.
+        """Call the Faceswap Separable Convolutional 2D Block.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Upscale Layer
+        The output tensor from the Upscale Layer
         """
         var_x = self._conv(inputs)
         return self._activation(var_x)
@@ -457,36 +449,35 @@ class SeparableConv2DBlock():
 #  << UPSCALING >>
 
 class UpscaleBlock():
-    """ An upscale layer for sub-pixel up-scaling.
+    """An upscale layer for sub-pixel up-scaling.
 
     Adds reflection padding if it has been selected by the user, and other post-processing
     if requested by the plugin.
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
-    padding: ["valid", "same"], optional
+    padding
         The padding to use. NB: If reflect padding has been selected in the user configuration
         options, then this argument will be ignored in favor of reflect padding. Default: `"same"`
-    scale_factor: int, optional
+    scale_factor
         The amount to upscale the image. Default: `2`
-    normalization: str or ``None``, optional
+    normalization
         Normalization to apply after the Convolution Layer. Select one of "batch" or "instance".
         Set to ``None`` to not apply normalization. Default: ``None``
-    activation: str or ``None``, optional
+    activation
         The activation function to use. This is applied at the end of the convolution block. Select
         one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
         function. Default: `"leakyrelu"`
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
     """
-
     def __init__(self,
                  filters: int,
                  kernel_size: int | tuple[int, int] = 3,
@@ -506,28 +497,27 @@ class UpscaleBlock():
                                  name=f"{name}_conv2d",
                                  is_upscale=True,
                                  **kwargs)
-        self._shuffle = PixelShuffler(name=f"{name}_pixelshuffler", size=scale_factor)
+        self._shuffle = PixelShuffler(name=f"{name}_pixel_shuffler", size=scale_factor)
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Convolutional Layer.
+        """Call the Faceswap Convolutional Layer.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Upscale Layer
+        The output tensor from the Upscale Layer
         """
         var_x = self._conv(inputs)
         return self._shuffle(var_x)
 
 
 class Upscale2xBlock():
-    """ Custom hybrid upscale layer for sub-pixel up-scaling.
+    """Custom hybrid upscale layer for sub-pixel up-scaling.
 
     Most of up-scaling is approximating lighting gradients which can be accurately achieved
     using linear fitting. This layer attempts to improve memory consumption by splitting
@@ -539,29 +529,29 @@ class Upscale2xBlock():
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
-    padding: ["valid", "same"], optional
+    padding
         The padding to use. Default: `"same"`
-    activation: str or ``None``, optional
+    activation
         The activation function to use. This is applied at the end of the convolution block. Select
         one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
         function. Default: `"leakyrelu"`
-    interpolation: ["nearest", "bilinear"], optional
+    interpolation
         Interpolation to use for up-sampling. Default: `"bilinear"`
-    scale_factor: int, optional
+    scale_factor
         The amount to upscale the image. Default: `2`
-    sr_ratio: float, optional
+    sr_ratio
         The proportion of super resolution (pixel shuffler) filters to use. Non-fast mode only.
         Default: `0.5`
-    fast: bool, optional
+    fast
         Use a faster up-scaling method that may appear more rugged. Default: ``False``
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
     """
     # TODO Class function this
@@ -605,17 +595,16 @@ class Upscale2xBlock():
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Upscale 2x Layer.
+        """Call the Faceswap Upscale 2x Layer.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Upscale Layer
+        The output tensor from the Upscale Layer
         """
         var_x = inputs
         var_x_sr = None
@@ -640,7 +629,7 @@ class Upscale2xBlock():
 
 
 class UpscaleResizeImagesBlock():
-    """ Upscale block that uses the Keras Backend function resize_images to perform the up scaling
+    """Upscale block that uses the Keras Backend function resize_images to perform the up scaling
     Similar in methodology to the :class:`Upscale2xBlock`
 
     Adds reflection padding if it has been selected by the user, and other post-processing
@@ -648,24 +637,24 @@ class UpscaleResizeImagesBlock():
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
-    padding: ["valid", "same"], optional
+    padding
         The padding to use. Default: `"same"`
-    activation: str or ``None``, optional
+    activation
         The activation function to use. This is applied at the end of the convolution block. Select
         one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
         function. Default: `"leakyrelu"`
-    scale_factor: int, optional
+    scale_factor
         The amount to upscale the image. Default: `2`
-    interpolation: ["nearest", "bilinear"], optional
+    interpolation
         Interpolation to use for up-sampling. Default: `"bilinear"`
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
     """
     def __init__(self,
@@ -691,29 +680,28 @@ class UpscaleResizeImagesBlock():
                                                   3,
                                                   strides=2,
                                                   padding=padding,
-                                                  name=f"{name}_convtrans")
+                                                  name=f"{name}_conv_trans")
         self._add = layers.Add()
 
         if activation == "leakyrelu":
-            self._acivation = layers.LeakyReLU(0.2, name=f"{name}_leakyrelu")
+            self._activation = layers.LeakyReLU(0.2, name=f"{name}_leakyrelu")
         if activation == "swish":
-            self._acivation = Swish(name=f"{name}_swish")
+            self._activation = Swish(name=f"{name}_swish")
         if activation == "prelu":
-            self._acivation = layers.PReLU(name=f"{name}_prelu")
+            self._activation = layers.PReLU(name=f"{name}_prelu")
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Resize Images Layer.
+        """Call the Faceswap Resize Images Layer.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Upscale Layer
+        The output tensor from the Upscale Layer
         """
         var_x = inputs
 
@@ -724,11 +712,11 @@ class UpscaleResizeImagesBlock():
 
         var_x = self._add([var_x_sr, var_x_us])
 
-        return self._acivation(var_x)
+        return self._activation(var_x)
 
 
 class UpscaleDNYBlock():
-    """ Upscale block that implements methodology similar to the Disney Research Paper using an
+    """Upscale block that implements methodology similar to the Disney Research Paper using an
     upsampling2D block and 2 x convolutions
 
     Adds reflection padding if it has been selected by the user, and other post-processing
@@ -740,22 +728,22 @@ class UpscaleDNYBlock():
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
-    activation: str or ``None``, optional
+    activation
         The activation function to use. This is applied at the end of the convolution block. Select
         one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
         function. Default: `"leakyrelu"`
-    size: int, optional
+    size
         The amount to upscale the image. Default: `2`
-    interpolation: ["nearest", "bilinear"], optional
+    interpolation
         Interpolation to use for up-sampling. Default: `"bilinear"`
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D
         layers
     """
@@ -772,59 +760,57 @@ class UpscaleDNYBlock():
         self._upsample = layers.UpSampling2D(size=size,
                                              interpolation=interpolation,
                                              name=f"{name}_upsample2d")
-        self._convs = [Conv2DBlock(filters,
-                                   kernel_size,
-                                   strides=1,
-                                   padding=padding,
-                                   activation=activation,
-                                   relu_alpha=0.2,
-                                   name=f"{name}_conv2d_{idx + 1}",
-                                   is_upscale=True,
-                                   **kwargs)
-                       for idx in range(2)]
+        self._convolutions = [Conv2DBlock(filters,
+                                          kernel_size,
+                                          strides=1,
+                                          padding=padding,
+                                          activation=activation,
+                                          relu_alpha=0.2,
+                                          name=f"{name}_conv2d_{idx + 1}",
+                                          is_upscale=True,
+                                          **kwargs)
+                              for idx in range(2)]
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the UpscaleDNY block
+        """Call the UpscaleDNY block
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the block
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output from the block
+        The output from the block
         """
         var_x = self._upsample(inputs)
-        for conv in (self._convs):
+        for conv in (self._convolutions):
             var_x = conv(var_x)
         return var_x
 
 
 # << OTHER BLOCKS >>
 class ResidualBlock():
-    """ Residual block from dfaker.
+    """Residual block from dfaker.
 
     Parameters
     ----------
-    filters: int
+    filters
         The dimensionality of the output space (i.e. the number of output filters in the
         convolution)
-    kernel_size: int, optional
+    kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
-    padding: ["valid", "same"], optional
+    padding
         The padding to use. Default: `"same"`
-    kwargs: dict
+    kwargs
         Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
 
     Returns
     -------
-    tensor
-        The output tensor from the Upscale layer
+    The output tensor from the Upscale layer
     """
     def __init__(self,
                  filters: int,
@@ -848,18 +834,17 @@ class ResidualBlock():
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def _get_layers(self) -> list[layers.Layer]:
-        """ Obtain the layer chain for the block
+        """Obtain the layer chain for the block
 
         Returns
         -------
-        list[:class:`keras.layers.Layer]
-            The layers, in the correct order, to pass the tensor through
+        The layers, in the correct order, to pass the tensor through
         """
         retval: list[layers.Layer] = []
         if self._use_reflect_padding:
             retval.append(ReflectionPadding2D(stride=1,
                                               kernel_size=self._kernel_size[0],
-                                              name=f"{self._name}_reflectionpadding2d_0"))
+                                              name=f"{self._name}_reflection_padding2d_0"))
 
         retval.append(Conv2D(self._filters,  # pyright:ignore[reportArgumentType]
                              kernel_size=self._kernel_size,
@@ -871,7 +856,7 @@ class ResidualBlock():
         if self._use_reflect_padding:
             retval.append(ReflectionPadding2D(stride=1,
                                               kernel_size=self._kernel_size[0],
-                                              name=f"{self._name}_reflectionpadding2d_1"))
+                                              name=f"{self._name}_reflection_padding2d_1"))
 
         kwargs = {key: val for key, val in self._kwargs.items() if key != "kernel_initializer"}
         if not cfg.conv_aware_init():
@@ -888,17 +873,16 @@ class ResidualBlock():
         return retval
 
     def __call__(self, inputs: KerasTensor) -> KerasTensor:
-        """ Call the Faceswap Residual Block.
+        """Call the Faceswap Residual Block.
 
         Parameters
         ----------
-        inputs: :class:`keras.KerasTensor`
+        inputs
             The input to the layer
 
         Returns
         -------
-        :class:`keras.KerasTensor`
-            The output tensor from the Upscale Layer
+        The output tensor from the Upscale Layer
         """
         var_x = inputs
         for layer in self._layers:
