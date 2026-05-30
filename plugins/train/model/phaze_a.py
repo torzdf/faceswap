@@ -12,7 +12,7 @@ import keras
 from keras import applications as kapp, layers as kl
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import (
+from lib.model.nn_blocks_legacy import (
     Conv2D, Conv2DBlock, Conv2DOutput, ResidualBlock, UpscaleBlock, Upscale2xBlock,
     UpscaleResizeImagesBlock, UpscaleDNYBlock)
 from lib.model.normalization import (

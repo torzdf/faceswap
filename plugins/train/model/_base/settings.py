@@ -16,7 +16,7 @@ import typing as T
 import keras
 from keras import config as k_config, dtype_policies, optimizers
 
-from lib.model.nn_blocks import reset_naming
+from lib.model.nn_blocks_legacy import reset_naming
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:

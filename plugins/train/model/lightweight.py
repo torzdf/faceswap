@@ -6,7 +6,7 @@
 
 from keras import Input, layers, Model as KModel
 
-from lib.model.nn_blocks import Conv2DOutput, Conv2DBlock, UpscaleBlock
+from lib.model.nn_blocks_legacy import Conv2DOutput, Conv2DBlock, UpscaleBlock
 from plugins.train.train_config import Loss as cfg_loss
 
 from .original import Model as OriginalModel

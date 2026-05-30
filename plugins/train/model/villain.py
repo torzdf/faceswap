@@ -6,7 +6,7 @@
 from keras import initializers, Input, layers, Model as KModel
 
 from lib.model.layers import PixelShuffler
-from lib.model.nn_blocks import (Conv2DOutput, Conv2DBlock, ResidualBlock, SeparableConv2DBlock,
+from lib.model.nn_blocks_legacy import (Conv2DOutput, Conv2DBlock, ResidualBlock, SeparableConv2DBlock,
                                  UpscaleBlock)
 from plugins.train.train_config import Loss as cfg_loss
 

@@ -6,7 +6,7 @@ import sys
 
 from keras import initializers, Input, layers, Model as KModel
 
-from lib.model.nn_blocks import Conv2DOutput, UpscaleBlock, ResidualBlock
+from lib.model.nn_blocks_legacy import Conv2DOutput, UpscaleBlock, ResidualBlock
 from plugins.train.train_config import Loss as cfg_loss
 from .original import Model as OriginalModel
 from . import dfaker_defaults as cfg

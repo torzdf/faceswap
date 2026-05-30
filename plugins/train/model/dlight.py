@@ -11,7 +11,7 @@ import logging
 
 from keras import layers, Input, Model as KModel
 
-from lib.model.nn_blocks import (Conv2DOutput, Conv2DBlock, ResidualBlock, UpscaleBlock,
+from lib.model.nn_blocks_legacy import (Conv2DOutput, Conv2DBlock, ResidualBlock, UpscaleBlock,
                                  Upscale2xBlock)
 from lib.utils import FaceswapError
 from plugins.train.train_config import Loss as cfg_loss
