@@ -12,14 +12,46 @@ from lib.utils import full_path_split, get_module_objects, PROJECT_ROOT
 
 if T.TYPE_CHECKING:
     from collections.abc import Callable
+    from torch import nn
     from plugins.extract.base import ExtractPlugin
-    from plugins.train.model._base import ModelBase
     from plugins.train.trainer.base import TrainerBase
 
 logger = logging.getLogger(__name__)
 
 
-def get_extractors() -> dict[str, list[str]]:  # noqa[C901]
+def _plugins_from_files(file_list: list[str], plugin_classes: list[str]):
+    """Parse the given file list for instances of the given plugin classes
+
+    Parameters
+    ----------
+    file_list
+        list of full paths to python files to scan for instances of the given plugin classes
+
+    Returns
+    -------
+    list of relative import paths for the discovered plugins from the project root
+    """
+    retval: list[str] = []
+    for f_path in file_list:
+        try:
+            with open(f_path, "r", encoding="utf-8") as pfile:
+                tree = ast.parse(pfile.read())
+        except Exception:  # pylint:disable=broad-except
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for base in node.bases:
+                if not isinstance(base, ast.Name):
+                    continue
+                if base.id in plugin_classes:
+                    rel_path = os.path.splitext(f_path.replace(PROJECT_ROOT, "")[1:])[0]
+                    retval.append(".".join(full_path_split(rel_path) + [node.name]))
+    return retval
+
+
+def _get_extractors() -> dict[str, list[str]]:
     """Obtain a dictionary of all available extraction plugins by plugin type
 
     Returns
@@ -32,31 +64,32 @@ def get_extractors() -> dict[str, list[str]]:  # noqa[C901]
                      and not f.startswith("_"))
     retval: dict[str, list[str]] = {}
     for fld in folders:
-        files = sorted(os.path.join(fld, fname) for fname in os.listdir(fld)
-                       if os.path.isfile(os.path.join(fld, fname))
+        files = sorted(f for fname in os.listdir(fld)
+                       if os.path.isfile(f := os.path.join(fld, fname))
                        and fname.endswith(".py")
                        and not fname.startswith("_")
                        and not fname.endswith("_defaults.py"))
-        mods = []
-        for fpath in files:
-            try:
-                with open(fpath, "r", encoding="utf-8") as pfile:
-                    tree = ast.parse(pfile.read())
-            except Exception:  # pylint:disable=broad-except
-                continue
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.ClassDef):
-                    continue
-                for base in node.bases:
-                    if not isinstance(base, ast.Name):
-                        continue
-                    if base.id in ("ExtractPlugin", "FacePlugin"):
-                        rel_path = os.path.splitext(fpath.replace(PROJECT_ROOT, "")[1:])[0]
-                        mods.append(".".join(full_path_split(rel_path) + [node.name]))
+        mods = _plugins_from_files(files, ["ExtractPlugin", "FacePlugin"])
         if mods:
             retval[os.path.basename(fld)] = list(sorted(mods))
-    logger.debug("Extraction plugins: %s", retval)
     return retval
+
+
+def _get_models() -> list[str]:
+    """Obtain a list of all trainable model plugins
+
+    Returns
+    -------
+    All available faceswap model names
+    """
+    root = os.path.join(PROJECT_ROOT, "plugins", "train", "model")
+    files = sorted(p for f in os.listdir(root)
+                   if os.path.isfile(p := os.path.join(root, f))
+                   and f.endswith(".py")
+                   and not f.startswith("_")
+                   and not f.endswith("_defaults.py"))
+
+    return _plugins_from_files(files, ["ModelPlugin"])
 
 
 class PluginLoader():
@@ -71,7 +104,28 @@ class PluginLoader():
     >>> align_plugins = PluginLoader.get_available_extractors('align')
     >>> aligner = PluginLoader.get_aligner('cv2-dnn')
     """
-    extract_plugins = get_extractors()
+    extract_plugins = _get_extractors()
+    model_plugins = _get_models()
+
+    @classmethod
+    def _import_plugin(cls, import_path: str) -> T.Any:
+        """Import the plugin class from the given full plugin import path
+
+        Parameters
+        ----------
+        path
+            The dot separated relative path to the plugin class
+
+        Returns
+        -------
+        the imported plugin class
+        """
+        mod, obj = import_path.rsplit(".", maxsplit=1)
+        logger.debug("[PluginLoader] Loading '%s' from '%s'", obj, mod)
+        module = import_module(mod)
+        retval = getattr(module, obj)
+        logger.debug("[PluginLoader] Loaded plugin: %s", retval)
+        return retval
 
     @classmethod
     def get_extractor(cls,
@@ -104,96 +158,9 @@ class PluginLoader():
         if real_name not in mods:
             raise ValueError(f"{name} is not a valid {plugin_type} plugin. Select from {mods}")
 
-        mod, obj = plugins[mods.index(real_name)].rsplit(".", maxsplit=1)
-        logger.debug("Loading '%s' from '%s'", plugin_type, name)
-
-        module = import_module(mod)
-
-        retval = getattr(module, obj)()
+        retval = cls._import_plugin(plugins[mods.index(real_name)])()
         logger.info("Loading %s from %s", plugin_type.title(), retval.name)
         return retval
-
-    @staticmethod
-    def get_model(name: str, disable_logging: bool = False) -> type[ModelBase]:
-        """Return requested training model plugin
-
-        Parameters
-        ----------
-        name
-            The name of the requested training model plugin
-        disable_logging
-            Whether to disable the INFO log message that the plugin is being imported.
-            Default: `False`
-
-        Returns
-        -------
-        A training model plugin
-        """
-        return PluginLoader._import("train.model", name, disable_logging)
-
-    @staticmethod
-    def get_trainer(name: str, disable_logging: bool = False) -> type[TrainerBase]:
-        """Return requested training trainer plugin
-
-        Parameters
-        ----------
-        name
-            The name of the requested training trainer plugin
-        disable_logging
-            Whether to disable the INFO log message that the plugin is being imported.
-            Default: `False`
-
-        Returns
-        -------
-        A training trainer plugin
-        """
-        return PluginLoader._import("train.trainer", name, disable_logging)
-
-    @staticmethod
-    def get_converter(category: str, name: str, disable_logging: bool = False) -> Callable:
-        """Return requested converter plugin
-
-        Converters work slightly differently to other faceswap plugins. They are created to do a
-        specific task (e.g. color adjustment, mask blending etc.), so multiple plugins will be
-        loaded in the convert phase, rather than just one plugin for the other phases.
-
-        Parameters
-        ----------
-        name
-            The name of the requested converter plugin
-        disable_logging
-            Whether to disable the INFO log message that the plugin is being imported.
-            Default: `False`
-
-        Returns
-        -------
-        A converter sub plugin
-        """
-        return PluginLoader._import(f"convert.{category}", name, disable_logging)
-
-    @staticmethod
-    def _import(attr: str, name: str, disable_logging: bool):
-        """Import the plugin's module
-
-        Parameters
-        ----------
-        name
-            The name of the requested plugin
-        disable_logging
-            Whether to disable the INFO log message that the plugin is being imported.
-
-        Returns
-        -------
-        A plugin
-        """
-        name = name.replace("-", "_")
-        ttl = attr.split(".")[-1].title()
-        if not disable_logging:
-            logger.info("Loading %s from %s plugin...", ttl, name.title())
-        attr = "model" if attr == "Trainer" else attr.lower()
-        mod = ".".join(("plugins", attr, name))
-        module = import_module(mod)
-        return getattr(module, ttl)
 
     @classmethod
     def get_available_extractors(cls,
@@ -236,21 +203,37 @@ class PluginLoader():
             plugins.insert(0, "none")
         return plugins
 
-    @staticmethod
-    def get_available_models() -> list[str]:
+    @classmethod
+    def get_model(cls, name: str) -> type[nn.Module]:
+        """Return requested training model plugin
+
+        Parameters
+        ----------
+        name
+            The name of the requested training model plugin
+
+        Returns
+        -------
+        A training model plugin
+        """
+        name = name.lower().replace("-", "_")
+        mods = [p.split(".")[-2] for p in cls.model_plugins]
+        if name not in mods:
+            raise ValueError(f"{name} is not a valid train plugin. Select from {mods}")
+
+        retval = cls._import_plugin(cls.model_plugins[mods.index(name)])
+        logger.info("Loading Model from %s plugin", name.title())
+        return retval
+
+    @classmethod
+    def get_available_models(cls) -> list[str]:
         """Return a list of available training models
 
         Returns
         -------
         A list of the available training model plugin names
         """
-        model_path = os.path.join(os.path.dirname(__file__), "train", "model")
-        models = sorted(item.name.replace(".py", "").replace("_", "-")
-                        for item in os.scandir(model_path)
-                        if not item.name.startswith("_")
-                        and not item.name.endswith("defaults.py")
-                        and item.name.endswith(".py"))
-        return models
+        return list(sorted(x.split(".")[-2].replace("_", "-") for x in cls.model_plugins))
 
     @staticmethod
     def get_default_model() -> str:
@@ -262,6 +245,70 @@ class PluginLoader():
         """
         models = PluginLoader.get_available_models()
         return 'original' if 'original' in models else models[0]
+
+    @staticmethod
+    def _import(attr: str, name: str, disable_logging: bool):
+        """Import the plugin's module
+
+        Parameters
+        ----------
+        name
+            The name of the requested plugin
+        disable_logging
+            Whether to disable the INFO log message that the plugin is being imported.
+
+        Returns
+        -------
+        A plugin
+        """
+        name = name.replace("-", "_")
+        ttl = attr.split(".")[-1].title()
+        if not disable_logging:
+            logger.info("Loading %s from %s plugin...", ttl, name.title())
+        attr = "model" if attr == "Trainer" else attr.lower()
+        mod = ".".join(("plugins", attr, name))
+        module = import_module(mod)
+        return getattr(module, ttl)
+
+    @staticmethod
+    def get_trainer(name: str, disable_logging: bool = False) -> type[TrainerBase]:
+        """Return requested training trainer plugin
+
+        Parameters
+        ----------
+        name
+            The name of the requested training trainer plugin
+        disable_logging
+            Whether to disable the INFO log message that the plugin is being imported.
+            Default: `False`
+
+        Returns
+        -------
+        A training trainer plugin
+        """
+        return PluginLoader._import("train.trainer", name, disable_logging)
+
+    @staticmethod
+    def get_converter(category: str, name: str, disable_logging: bool = False) -> Callable:
+        """Return requested converter plugin
+
+        Converters work slightly differently to other faceswap plugins. They are created to do a
+        specific task (e.g. color adjustment, mask blending etc.), so multiple plugins will be
+        loaded in the convert phase, rather than just one plugin for the other phases.
+
+        Parameters
+        ----------
+        name
+            The name of the requested converter plugin
+        disable_logging
+            Whether to disable the INFO log message that the plugin is being imported.
+            Default: `False`
+
+        Returns
+        -------
+        A converter sub plugin
+        """
+        return PluginLoader._import(f"convert.{category}", name, disable_logging)
 
     @staticmethod
     def get_available_convert_plugins(convert_category: str, add_none: bool = True) -> list[str]:
