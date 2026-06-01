@@ -131,6 +131,8 @@ class Info:
         self._structure = _Structure(model)
         self._output_shapes = []
         self._input_shapes = []
+        self._input_size: int = 0
+        self._output_size: int = 0
 
     def __repr__(self) -> str:
         """Better logging"""
@@ -160,6 +162,26 @@ class Info:
             inputs = self._structure.structure[self._model_info[0]].input_shapes
             self._input_shapes = [tuple(inp for inp in side) for side in inputs]
         return T.cast(list[tuple[int, int, int]], self._input_shapes)
+
+    @property
+    def input_size(self) -> int:
+        """The pixel input size to the model, regardless of side"""
+        if not self._input_size:
+            input_sizes = set(x[1] for x in self.input_shapes)
+            assert len(input_sizes) == 1, f"Multiple input sizes not supported. Got {input_sizes}"
+            self._input_size = input_sizes.pop()
+        return self._input_size
+
+    @property
+    def output_size(self) -> int:
+        """The largest pixel image output size from the model, regardless of side"""
+        if not self._output_size:
+            max_out_sizes = set(max(out[1] for out in side if out[0] != 1)
+                                for side in self.output_shapes)
+            assert len(max_out_sizes) == 1, (
+                f"All sides should have the same output size. Got {max_out_sizes}")
+            self._output_size = max_out_sizes.pop()
+        return self._output_size
 
     @property
     def summary(self) -> str:  # TODO

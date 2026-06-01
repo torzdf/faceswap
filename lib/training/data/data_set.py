@@ -533,7 +533,7 @@ class PreviewSet(_BaseSet):
             in_img[..., :3] = in_img[..., [2, 1, 0]]
             out_img[..., :3] = out_img[..., [2, 1, 0]]
 
-        feed = torch.from_numpy(to_float32(in_img))
+        feed = torch.from_numpy(to_float32(in_img.transpose(2, 0, 1)))
         target = torch.from_numpy(to_float32(out_img))
         logger.trace("[%s] feed: %s (%s), target: %s (%s)",  # type:ignore[attr-defined]
                      self._name, feed.shape, feed.dtype, target.shape, target.dtype)

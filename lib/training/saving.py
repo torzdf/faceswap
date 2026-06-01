@@ -92,7 +92,7 @@ class ModelIO:
                      "checkpoint" if save_optimizer else "weights",
                      fname)
         print("\x1b[2K", end="\r")  # Clear last line
-        logger.info("Saving Model...")
+        logger.verbose("Saving Model...")  # type:ignore[attr-defined]
 
         state_dict = self._model.state_dict()
         if not save_optimizer:

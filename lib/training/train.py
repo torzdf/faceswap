@@ -48,8 +48,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
     """Handles the feeding of training images to Faceswap models, the generation of Tensorboard
     logs and the creation of sample/time-lapse preview images.
 
-    All Trainer plugins must inherit from this class.
-
     Parameters
     ----------
     plugin
@@ -71,10 +69,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                  timelapse_output: str = "") -> None:
         logger.debug(parse_class_init(locals()))
         self._plugin = plugin
-        self._preview = preview
-        self._timelapse_folders = [] if timelapse_folders is None else timelapse_folders
-        self._timelapse_output = timelapse_output
 
+        # TODO IO to FaceswapModel
         self._model = FaceswapModel(plugin.model_name, len(plugin.config.folders))
         self._io = ModelIO(self._model, plugin.config.model_folder)
         self._model.optimizer = Optimizer(self._model.plugin,
@@ -84,16 +80,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._model.optimizer.load_state_dict(T.cast(dict[str, T.Any],
                                               self._model.state_dict().get("optimizer", {})))
         self._model_info = Info(self._model.plugin)
-
-        max_out_sizes = set(max([out[1] for out in side if out[0] != 1])
-                            for side in self._model_info.output_shapes)
-        assert len(max_out_sizes) == 1, (
-            f"All sides should have the same output size. Got {max_out_sizes}")
-        self._out_size = max_out_sizes.pop()
-
-        input_sizes = set(x[1] for x in self._model_info.input_shapes)
-        assert len(input_sizes) == 1, f"Multiple input sizes not supported. Got {input_sizes}"
-        self._input_size = input_sizes.pop()
 
         self._device = get_device()
         self._configure_model()
@@ -105,21 +91,24 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
             logger.debug("[Trainer] Exiting from LR Finder")
             return
 
-        self._preview_loader = self._get_preview_loader()
-        self._timelapse_loader = self._get_timelapse_loader()
-
+        self._tester = Tester(self._plugin,
+                              self._model_info,
+                              self._device,
+                              preview,
+                              timelapse_folders,
+                              timelapse_output)
         self._tensorboard = self._set_tensorboard()
-        self._samples = Samples(mod_cfg.coverage() / 100.,
-                                mod_cfg.Loss.learn_mask() or mod_cfg.Loss.penalized_mask_loss(),
-                                trn_cfg.Augmentation.mask_opacity(),
-                                trn_cfg.Augmentation.mask_color())
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = ", ".join(f"{k[1:]}={repr(v)}" for k, v in self.__dict__.items()
-                           if k in ("_plugin", "_preview", "_timelapse_folders",
-                                    "_timelapse_output"))
-        return f"{self.__class__.__name__}({params})"
+        warmup = T.cast(Optimizer, self._model.optimizer)._warmup
+        params = {"plugin": self._plugin,
+                  "preview": self._tester._preview,
+                  "warmup_steps": 0 if warmup is None else warmup.steps,
+                  "timelapse_folders": self._tester._timelapse_folders,
+                  "timelapse_output": self._tester._timelapse_output}
+        s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
+        return f"{self.__class__.__name__}({s_params})"
 
     @property
     def exit_early(self) -> bool:
@@ -167,58 +156,12 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
         assert len(set(x for side in out_sizes
                        for x in side)) == len(out_sizes[0]), "Sizes for each output must match"
-        retval = TrainLoader(self._input_size,
+        retval = TrainLoader(self._model_info.input_size,
                              tuple(out_sizes[0]),
                              "rgb" if self._model.plugin.is_rgb else "bgr",
                              self._plugin.config,
                              self._plugin.sampler)
         logger.debug("[Trainer] data loader: %s", retval)
-        return retval
-
-    def _get_preview_loader(self) -> PreviewLoader | None:
-        """Get the loader for generating previews whilst training the model
-
-        Returns
-        -------
-        The loader for generating preview images during training or ``None`` if previews are
-        disabled
-        """
-        if not self._preview:
-            return None
-        retval = PreviewLoader(self._input_size,
-                               self._out_size,
-                               "rgb" if self._model.plugin.is_rgb else "bgr",
-                               self._plugin.config.folders,
-                               trn_cfg.Augmentation.preview_images(),
-                               torch.utils.data.RandomSampler)
-        logger.debug("[Trainer] Preview data loader: %s", retval)
-        return retval
-
-    def _get_timelapse_loader(self) -> PreviewLoader | None:
-        """Get the loader for generating timelapse images whilst training the model
-
-        Returns
-        -------
-        The loaders for timelapse preview images during training or ``None`` if previews are
-        disabled
-        """
-        if not self._timelapse_folders or not self._timelapse_output:
-            return None
-        num_images = trn_cfg.Augmentation.preview_images()
-        avail_images = min(len([fname for fname in os.listdir(folder)
-                                if os.path.splitext(fname)[-1].lower() == ".png"])
-                           for folder in self._timelapse_folders)
-        num_samples = min(num_images, avail_images)
-        logger.debug("[Train] preview count: %s, available_images: %s, timelapse count: %s",
-                     num_images, avail_images, num_samples)
-        retval = PreviewLoader(self._input_size,
-                               self._out_size,
-                               "rgb" if self._model.plugin.is_rgb else "bgr",
-                               self._timelapse_folders,
-                               trn_cfg.Augmentation.preview_images(),
-                               torch.utils.data.SequentialSampler,
-                               num_samples=num_samples)
-        logger.debug("[Trainer] Preview data loader: %s", retval)
         return retval
 
     def _handle_lr_finder(self) -> bool:  # TODO
@@ -291,7 +234,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
     def toggle_mask(self) -> None:
         """Toggle the mask overlay on or off based on user input."""
-        self._samples.toggle_mask_display()
+        self._tester.toggle_mask()
 
     def train_one_batch(self) -> list[BatchLoss]:
         """Process a single batch through the model and obtain the loss
@@ -404,107 +347,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         output = f"[{timestamp}] [#{self._model.state.iterations:05d}] {output}"
         print(f"{output}", end="\r")
 
-    def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
-        """Obtain preview predictions from the model, chunking feeds into the model's batch size
-
-        Parameters
-        ----------
-        feed
-            The input tensor to obtain predictions from the model in shape (num_sides, N, height,
-            width, 3)
-
-        Returns
-        -------
-        The predictions from the model for the given preview feed
-        """
-        batch_size = self._plugin.batch_size
-        ndim = 4 if mod_cfg.Loss.learn_mask() else 3
-        retval = np.empty((feed.shape[0], feed.shape[1], self._out_size, self._out_size, ndim),
-                          dtype=np.float32)
-        for idx in range(0, feed.shape[1], batch_size):
-            feed_batch = feed[:, idx:idx + batch_size]
-            feed_size = feed_batch.shape[1]
-            is_padded = feed_size < batch_size
-
-            if is_padded:
-                holder = torch.empty((feed_batch.shape[0], batch_size, *feed_batch.shape[2:]),
-                                     dtype=feed.dtype)
-                logger.debug("[Trainer] Padding undersized batch of shape %s to %s",
-                             feed_batch.shape, holder.shape)
-                holder[:, :feed_size] = feed_batch
-                feed_batch = holder
-            with torch.inference_mode():
-                out = [x.cpu().numpy() for x in self._model.plugin(list(feed_batch))
-                       if x.shape[1] == self._out_size]  # Filter multi-scale output
-            if mod_cfg.Loss.learn_mask():  # Apply mask to alpha channel
-                out = [np.concatenate(out[i:i + 2], axis=-1) for i in range(0, len(out), 2)]
-            out_arr = np.stack(out, axis=0)
-            if is_padded:
-                out_arr = out_arr[:, :feed_size]
-            retval[:, idx:idx + feed_size] = out_arr
-        return retval
-
-    def _update_viewers(self,  # pylint:disable=too-many-locals
-                        viewer: Callable[[np.ndarray, str], None] | None,
-                        do_timelapse: bool = False) -> None:
-        """Update the preview viewer and timelapse output
-
-        Parameters
-        ----------
-        viewer
-            The function that will display the preview image
-        do_timelapse
-            ``True`` to generate a timelapse preview image
-        """
-        if (viewer is None or self._preview_loader is None) and not do_timelapse:
-            return
-
-        if do_timelapse:
-            assert self._timelapse_loader is not None
-            loader = self._timelapse_loader
-        else:
-            assert self._preview_loader is not None
-            loader = self._preview_loader
-        feed, target = next(loader)
-
-        num_sides = feed.shape[0]
-        ndim = 4 if mod_cfg.Loss.learn_mask() else 3
-        predictions: npt.NDArray[np.float32] = np.empty((num_sides,
-                                                         num_sides,
-                                                         target.shape[1],
-                                                         self._out_size,
-                                                         self._out_size,
-                                                         ndim),
-                                                        dtype=np.float32)
-        logger.debug("[Trainer] feed: %s, target: %s, predictions_holder: %s",
-                     feed.shape, target.shape, predictions.shape)
-        for side_idx in range(num_sides):
-            rolled_feed = torch.roll(feed, shifts=side_idx, dims=0)
-            pred = self._get_predictions(rolled_feed)
-            for input_idx in range(num_sides):
-                original_idx = (input_idx - side_idx) % num_sides
-                predictions[original_idx, side_idx] = pred[input_idx]
-
-        targets = target.cpu().numpy()
-        if self._model.plugin.color_order == "rgb":
-            predictions[..., :3] = predictions[..., 2::-1]
-            targets[..., :3] = targets[..., 2::-1]
-        logger.debug("[Trainer] Got preview images: predictions: %s, targets: %s",
-                     format_array(predictions), format_array(targets))
-
-        samples = self._samples.get_preview(predictions, targets)
-
-        if do_timelapse:
-            filename = os.path.join(self._timelapse_output, str(int(time.time())) + ".jpg")
-            cv2.imwrite(filename, samples)
-            logger.debug("[Trainer] Created time-lapse: '%s'", filename)
-            return
-
-        if viewer is not None:
-            viewer(samples,
-                   "Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
-                   "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
-
     def train_one_step(self,
                        viewer: Callable[[np.ndarray, str], None] | None,
                        do_timelapse: bool = False) -> None:
@@ -550,7 +392,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         if do_snapshot:
             pass  # TODO
             # self._model.io.snapshot()
-        self._update_viewers(viewer, do_timelapse)
+        if viewer is not None:
+            self._tester(viewer, do_timelapse)
 
     def _clear_tensorboard(self) -> None:
         """Stop Tensorboard logging.
@@ -578,6 +421,213 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._tensorboard.on_save()
         if is_exit:
             self._clear_tensorboard()
+
+
+class Tester:
+    """Responsible for running tests through the model for previews/timelapses
+
+    Parameters
+    ----------
+    plugin
+        The faceswap model plugin to obtain previews from
+    model_info
+        The object containing information about the loaded model
+    device
+        The device that the model resides on
+    preview
+        ``True`` to generate previews
+    timelapse_folders
+        The input folders to create timelapse images from. Default: ``None`` (no timelapse)
+    timelapse_output
+        The folder to output timelapse images. Default: "" (no timelapse)
+    """
+    def __init__(self,
+                 plugin: TrainerBase,
+                 model_info: Info,
+                 device: torch.Device,
+                 preview: bool,
+                 timelapse_folders: list[str] | None = None,
+                 timelapse_output: str = "") -> None:
+        logger.debug(parse_class_init(locals()))
+        self._plugin = plugin
+        self._model_info = model_info
+        self._device = device
+        self._preview = preview
+        self._timelapse_folders = [] if timelapse_folders is None else timelapse_folders
+        self._timelapse_output = timelapse_output
+        self._batch_size = trn_cfg.Augmentation.preview_images()
+        self._samples = Samples(mod_cfg.coverage() / 100.,
+                                mod_cfg.Loss.learn_mask() or mod_cfg.Loss.penalized_mask_loss(),
+                                trn_cfg.Augmentation.mask_opacity(),
+                                trn_cfg.Augmentation.mask_color())
+
+        self._preview_loader = self._get_preview_loader()
+        self._timelapse_loader = self._get_timelapse_loader()
+
+    def __repr__(self) -> str:
+        """Pretty print for logging"""
+        params = ", ".join(f"{k[1:]}={repr(v)}" for k, v in self.__dict__.items()
+                           if k in ("_plugin", "_model_info", "_device", "_preview",
+                                    "_timelapse_folders", "_timelapse_output"))
+        return f"{self.__class__.__name__}({params})"
+
+    def _get_preview_loader(self) -> PreviewLoader | None:
+        """Get the loader for generating previews whilst training the model
+
+        Returns
+        -------
+        The loader for generating preview images during training or ``None`` if previews are
+        disabled
+        """
+        if not self._preview:
+            return None
+        retval = PreviewLoader(self._model_info.input_size,
+                               self._model_info.output_size,
+                               "rgb" if self._plugin.model.is_rgb else "bgr",
+                               self._plugin.config.folders,
+                               self._batch_size,
+                               torch.utils.data.RandomSampler)
+        logger.debug("[Trainer] Preview data loader: %s", retval)
+        return retval
+
+    def _get_timelapse_loader(self) -> PreviewLoader | None:
+        """Get the loader for generating timelapse images whilst training the model
+
+        Returns
+        -------
+        The loaders for timelapse preview images during training or ``None`` if previews are
+        disabled
+        """
+        if not self._timelapse_folders or not self._timelapse_output:
+            return None
+        num_images = trn_cfg.Augmentation.preview_images()
+        avail_images = min(len([fname for fname in os.listdir(folder)
+                                if os.path.splitext(fname)[-1].lower() == ".png"])
+                           for folder in self._timelapse_folders)
+        num_samples = min(num_images, avail_images)
+        logger.debug("[Train] preview count: %s, available_images: %s, timelapse count: %s",
+                     num_images, avail_images, num_samples)
+        retval = PreviewLoader(self._model_info.input_size,
+                               self._model_info.output_size,
+                               "rgb" if self._plugin.model.is_rgb else "bgr",
+                               self._timelapse_folders,
+                               self._batch_size,
+                               torch.utils.data.SequentialSampler,
+                               num_samples=num_samples)
+        logger.debug("[Trainer] Preview data loader: %s", retval)
+        return retval
+
+    def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
+        """Obtain preview predictions from the model, chunking feeds into the model's batch size
+
+        Parameters
+        ----------
+        feed
+            The input tensor to obtain predictions from the model in shape (num_sides, N, height,
+            width, 3)
+
+        Returns
+        -------
+        The predictions from the model for the given preview feed
+        """
+        ndim = 4 if mod_cfg.Loss.learn_mask() else 3
+        retval = np.empty((feed.shape[0],
+                           feed.shape[1],
+                           self._model_info.output_size,
+                           self._model_info.output_size, ndim),
+                          dtype=np.float32)
+        for idx in range(0, feed.shape[1], self._batch_size):
+            feed_batch = feed[:, idx:idx + self._batch_size]
+            feed_size = feed_batch.shape[1]
+            is_padded = feed_size < self._batch_size
+
+            if is_padded:
+                holder = torch.empty((feed_batch.shape[0],
+                                      self._batch_size,
+                                      *feed_batch.shape[2:]),
+                                     dtype=feed.dtype)
+                logger.debug("[Trainer] Padding undersized batch of shape %s to %s",
+                             feed_batch.shape, holder.shape)
+                holder[:, :feed_size] = feed_batch
+                feed_batch = holder
+
+            with torch.inference_mode():
+                out = [y.cpu().numpy().transpose(0, 2, 3, 1)
+                       for x in self._plugin.model(list(feed_batch.to(self._device)))
+                       for y in x
+                       if y.shape[2] == self._model_info.output_size]  # Filter multi-scale output
+            if mod_cfg.Loss.learn_mask():  # Apply mask to alpha channel
+                out = [np.concatenate(out[i:i + 2], axis=-1) for i in range(0, len(out), 2)]
+            out_arr = np.stack(out, axis=0)
+            if is_padded:
+                out_arr = out_arr[:, :feed_size]
+            retval[:, idx:idx + feed_size] = out_arr
+        return retval
+
+    def __call__(self,  # pylint:disable=too-many-locals
+                 viewer: Callable[[np.ndarray, str], None],
+                 do_timelapse: bool) -> None:
+        """Update the preview viewer and timelapse output
+
+        Parameters
+        ----------
+        viewer
+            The function that will display the preview image
+        do_timelapse
+            ``True`` to generate a timelapse preview image
+        """
+        if self._preview_loader is None and not do_timelapse:
+            return
+
+        if do_timelapse:
+            assert self._timelapse_loader is not None
+            loader = self._timelapse_loader
+        else:
+            assert self._preview_loader is not None
+            loader = self._preview_loader
+        feed, target = next(loader)
+
+        num_sides = feed.shape[0]
+        ndim = 4 if mod_cfg.Loss.learn_mask() else 3
+        predictions: npt.NDArray[np.float32] = np.empty((num_sides,
+                                                         num_sides,
+                                                         target.shape[1],
+                                                         self._model_info.output_size,
+                                                         self._model_info.output_size,
+                                                         ndim),
+                                                        dtype=np.float32)
+        logger.debug("[Trainer] feed: %s, target: %s, predictions_holder: %s",
+                     feed.shape, target.shape, predictions.shape)
+        for side_idx in range(num_sides):
+            rolled_feed = torch.roll(feed, shifts=side_idx, dims=0)
+            pred = self._get_predictions(rolled_feed)
+            for input_idx in range(num_sides):
+                original_idx = (input_idx - side_idx) % num_sides
+                predictions[original_idx, side_idx] = pred[input_idx]
+
+        targets = target.cpu().numpy()
+        if self._plugin.model.is_rgb:
+            predictions[..., :3] = predictions[..., 2::-1]
+            targets[..., :3] = targets[..., 2::-1]
+        logger.debug("[Trainer] Got preview images: predictions: %s, targets: %s",
+                     format_array(predictions), format_array(targets))
+
+        samples = self._samples.get_preview(predictions, targets)
+
+        if do_timelapse:
+            filename = os.path.join(self._timelapse_output, str(int(time.time())) + ".jpg")
+            cv2.imwrite(filename, samples)
+            logger.debug("[Trainer] Created time-lapse: '%s'", filename)
+            return
+
+        if viewer is not None:
+            viewer(samples,
+                   "Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
+                   "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
+
+    def toggle_mask(self) -> None:
+        """Toggle the preview mask display on or off"""
+        self._samples.toggle_mask_display()
 
 
 __all__ = get_module_objects(__name__)
