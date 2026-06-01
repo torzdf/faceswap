@@ -48,8 +48,10 @@ class SamePad2d(nn.Module):
         The padded tensor
         """
         height, width = inputs.shape[-2:]
-        pad_h = max((np.ceil(height / self.stride) - 1) * self.stride + self.kernel - height, 0)
-        pad_w = max((np.ceil(width / self.stride) - 1) * self.stride + self.kernel - width, 0)
+        pad_h = int(max((np.ceil(height / self.stride) - 1) * self.stride + self.kernel - height,
+                        0))
+        pad_w = int(max((np.ceil(width / self.stride) - 1) * self.stride + self.kernel - width,
+                        0))
         return F.pad(inputs, (pad_w // 2, pad_w - pad_w // 2,
                               pad_h // 2, pad_h - pad_h // 2))
 

@@ -369,7 +369,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                                                   *batch.shape[1:]).swapaxes(0, 1)
                         for _ in self._output_sizes]
 
-        targets = [torch.from_numpy(out[..., :3]) for out in reshaped]
+        targets = [torch.from_numpy(out[..., :3].transpose(0, 1, 4, 2, 3)) for out in reshaped]
         masks = BatchMeta(
             **{self._mask_types[idx]: [torch.from_numpy(out[..., 3 + idx][:, :, None, :, :])
                                        for out in reshaped]
@@ -459,7 +459,9 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         else:
             feed = to_float32(feed)
 
-        feed = feed.reshape(self._num_inputs, self._batch_size, *feed.shape[1:])
+        feed = feed.reshape(self._num_inputs,
+                            self._batch_size,
+                            *feed.shape[1:]).transpose(0, 1, 4, 2, 3)
         inputs = [torch.from_numpy(x) for x in feed]
         return inputs, targets, masks
 
