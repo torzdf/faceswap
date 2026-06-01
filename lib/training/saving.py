@@ -8,11 +8,12 @@ import typing as T
 
 import torch
 
+from lib.model.faceswap import KerasToTorch
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
-    from lib.model.state import FaceswapModel
+    from lib.model.faceswap import FaceswapModel
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +34,21 @@ class ModelIO:
 
         self._model = model
         self._model_dir = model_dir
+
         self._checkpoint_path = os.path.join(model_dir, f"{model.name}.ckpt")
         self._weights_path = os.path.join(model_dir, f"{model.name}.pth")
+        self._legacy_paths = (os.path.join(model_dir, f"{model.name}.keras"),
+                              os.path.join(model_dir, f"{model.name}.h5"))
         self._load_state_dict()
 
     def __repr__(self) -> str:
         """Cleaner Logging"""
         return f"{self.__class__.__name__}(model={self._model}, model_dir={repr(self._model_dir)})"
+
+    @property
+    def _legacy_exists(self) -> bool:
+        """``True`` if a legacy save file exists otherwise ``False``"""
+        return any(os.path.isfile(x) for x in self._legacy_paths)
 
     @property
     def _file_exists(self) -> bool:
@@ -65,16 +74,21 @@ class ModelIO:
     def _load_state_dict(self) -> None:
         """Load the model checkpoint data from disk to CPU into the FaceswapModel"""
         filename = self._get_latest_save()
-        if filename is None:
+        if filename is None and not self._legacy_exists:
             logger.debug("%s No save files exist. Not loading", self._name)
             self._model.load_state_dict({})  # Always call it to initialize the plugin
             return
-
-        state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
-                         float | dict[str, T.Any]] = torch.load(filename,
-                                                                map_location="cpu",
-                                                                weights_only=True)
-        logger.info("Loaded model from disk: '%s'", filename)
+        if filename is None:
+            logger.info("%s Migrating weights from Keras model", self._name)
+            state_dict = KerasToTorch(self._model,
+                                      next(f for f in self._legacy_paths
+                                           if os.path.exists(f))).state_dict()
+        else:
+            state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
+                             float | dict[str, T.Any]] = torch.load(filename,
+                                                                    map_location="cpu",
+                                                                    weights_only=True)
+            logger.debug("Loaded model from disk: '%s'", filename)
         logger.debug("%s Loaded state_dict version %s. Keys: %s",
                      self._name, state_dict.get("version", 0.0), list(state_dict))
         self._model.load_state_dict(state_dict)

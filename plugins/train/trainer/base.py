@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TrainConfig:
+class TrainConfig:  # pylint:disable=too-many-instance-attributes
     """Configuration for training a model
 
     Parameters
@@ -36,6 +36,8 @@ class TrainConfig:
         The folder that the model is to be loaded/saved to or from
     batch_size
         The batch size to load data from each of the loaders
+    warmup_steps
+        The number of steps to warm the learning rate up for
     augment_color
         ``True`` to perform color augmentation otherwise ``False``
     flip
@@ -56,6 +58,8 @@ class TrainConfig:
     """The folder that the model is to be loaded/saved to or from"""
     batch_size: int
     """The batch size to load data from each of the loaders"""
+    warmup_steps: int
+    """The number of steps to warm the learning rate up for"""
     augment_color: bool
     """``True`` to perform color augmentation otherwise ``False``"""
     flip: bool

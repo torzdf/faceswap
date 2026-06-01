@@ -16,7 +16,7 @@ from torch.cuda import OutOfMemoryError
 
 from lib.logger import format_array, parse_class_init
 from lib.model.model_info import Info
-from lib.model.state import FaceswapModel
+from lib.model.faceswap.state import FaceswapModel
 from lib.torch_utils import get_device
 from lib.training.preview import Samples
 from lib.training.data import get_label, PreviewLoader, TrainLoader
@@ -60,14 +60,18 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         The input folders to create timelapse images from. Default: ``None`` (no timelapse)
     timelapse_output
         The folder to output timelapse images. Default: "" (no timelapse)
+    config_file
+        The custom location to load configuration options from or ``None`` if default location
     """
     def __init__(self,
                  plugin: TrainerBase,
                  preview: bool,
-                 warmup_steps: int = 0,
                  timelapse_folders: list[str] | None = None,
-                 timelapse_output: str = "") -> None:
+                 timelapse_output: str = "",
+                 config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
+        mod_cfg.load_config(config_file=config_file)
+
         self._plugin = plugin
 
         # TODO IO to FaceswapModel
@@ -76,7 +80,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._model.optimizer = Optimizer(self._model.plugin,
                                           mod_cfg.Optimizer,
                                           mixed_precision=mod_cfg.mixed_precision(),
-                                          warmup_steps=warmup_steps)
+                                          warmup_steps=self._plugin.config.warmup_steps)
         self._model.optimizer.load_state_dict(T.cast(dict[str, T.Any],
                                               self._model.state_dict().get("optimizer", {})))
         self._model_info = Info(self._model.plugin)

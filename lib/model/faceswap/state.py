@@ -71,14 +71,15 @@ class FaceswapModel:
         """
         logger.debug("%s version: %s, state_dict keys: %s",
                      self._name, state_dict.get("version", 0.0), list(state_dict))
-        if not hasattr(self, "plugin"):
-            self.plugin = self._model_cls(self._num_identities)
         if "state" in state_dict:
             self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
         if "model" in state_dict:
             self.plugin.load_state_dict(T.cast(dict[str, T.Any], state_dict["model"]))
         if "optimizer" in state_dict and self.optimizer is not None:
             self.optimizer.load_state_dict(T.cast(dict[str, T.Any], state_dict["optimizer"]))
+
+        if not hasattr(self, "plugin"):
+            self.plugin = self._model_cls(self._num_identities)
 
     def to(self, device: torch.Device) -> None:
         """Load the model and optimizer to the given device

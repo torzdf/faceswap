@@ -295,6 +295,7 @@ class Train():
         config = TrainConfig(folders=self._images,
                              model_folder=self._args.model_dir,
                              batch_size=self._args.batch_size,
+                             warmup_steps=self._args.warmup,
                              augment_color=not self._args.no_augment_color,
                              flip=not self._args.no_flip,
                              warp=not self._args.no_warp,
@@ -302,12 +303,12 @@ class Train():
                              cache_landmarks=self._args.warp_to_landmarks,
                              lr_finder=self._args.use_lr_finder,
                              snapshot_interval=self._args.snapshot_interval)
-        retval = Trainer(PluginLoader.get_trainer(trainer)(self._args.trainer, config),
+        retval = Trainer(PluginLoader.get_trainer(trainer)(self._args.trainer, config),  # TODO Should config go to the trainer rather than plugin
                          self._args.preview or self._args.write_image or self._args.redirect_gui,
-                         warmup_steps=self._args.warmup,
                          timelapse_folders=[self._args.timelapse_input_a,
                                             self._args.timelapse_input_b],
-                         timelapse_output=self._args.timelapse_output)
+                         timelapse_output=self._args.timelapse_output,
+                         config_file=self._args.config_file)
         logger.debug("[Train] Loaded Trainer")
         return retval
 
