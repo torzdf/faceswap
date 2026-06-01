@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import typing as T
 
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -59,11 +58,11 @@ class Encoder(nn.Module):
         -------
         The output from the encoder
         """
-        x = F.leaky_relu(self.conv1(inputs), negative_slope=0.1, inplace=True)
-        x = F.leaky_relu(self.conv2(x), negative_slope=0.1, inplace=True)
-        x = F.leaky_relu(self.conv3(x), negative_slope=0.1, inplace=True)
+        x = self.conv1(inputs)
+        x = self.conv2(x)
+        x = self.conv3(x)
         if self.conv4 is not None:
-            x = F.leaky_relu(self.conv4(x), negative_slope=0.1, inplace=True)
+            x = self.conv4(x)
         x = self.dense1(x.flatten(start_dim=1))
         x = T.cast(torch.Tensor, self.dense2(x))
         x = x.reshape(x.shape[0], 1024, 4, 4)

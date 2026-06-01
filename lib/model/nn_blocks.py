@@ -7,8 +7,6 @@ import typing as T
 
 import torch
 from torch import nn
-from torch.nn import functional as F
-
 
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
@@ -42,12 +40,16 @@ class ConvBlockLegacy(nn.Module):
                  padding: T.Literal["same", "valid"] = "same") -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.pad = SamePad2d(kernel_size, stride) if padding == "same" else None
-        self.conv = nn.Conv2d(in_channels,
-                              out_channels,
-                              kernel_size=kernel_size,
-                              stride=stride,
-                              padding=0)
+        layers: list[nn.Module] = []
+        if padding == "same":
+            layers.append(SamePad2d(kernel_size, stride))
+        layers += [nn.Conv2d(in_channels,
+                             out_channels,
+                             kernel_size=kernel_size,
+                             stride=stride,
+                             padding=0),
+                   nn.LeakyReLU(negative_slope=0.1, inplace=True)]
+        self.block = nn.Sequential(*layers)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Faceswap Keras Convolutional Layer.
@@ -61,10 +63,7 @@ class ConvBlockLegacy(nn.Module):
         -------
         The output tensor from the Keras Convolutional Layer
         """
-        x = inputs
-        if self.pad is not None:
-            x = self.pad(x)
-        return self.conv(x)
+        return self.block(inputs)
 
 
 class UpscaleSubpixel(nn.Module):
@@ -85,12 +84,15 @@ class UpscaleSubpixel(nn.Module):
                  scale_factor: int = 2) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.conv = nn.Conv2d(in_channels,
-                              out_channels * scale_factor * scale_factor,
-                              3,
-                              stride=1,
-                              padding=1)
-        self.shuffle = nn.PixelShuffle(scale_factor)
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels,
+                      out_channels * scale_factor * scale_factor,
+                      3,
+                      stride=1,
+                      padding=1),
+            nn.LeakyReLU(negative_slope=0.1, inplace=True),
+            nn.PixelShuffle(scale_factor)
+            )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Upscale Subpixel Layer.
@@ -104,8 +106,7 @@ class UpscaleSubpixel(nn.Module):
         -------
         The output tensor from the Upscale Subpixel Layer
         """
-        x = F.leaky_relu(self.conv(inputs), negative_slope=0.1, inplace=True)
-        return self.shuffle(x)
+        return self.block(inputs)
 
 
 __all__ = get_module_objects(__name__)
