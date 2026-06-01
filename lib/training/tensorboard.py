@@ -14,6 +14,9 @@ from torch.utils.tensorboard import SummaryWriter
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
+if T.TYPE_CHECKING:
+    from plugins.train.model.base import ModelPlugin
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,7 +150,7 @@ class TorchTensorBoard(keras.callbacks.Callback):
         self._global_train_batch = 0
         self._previous_epoch_iterations = 0
 
-        self._model: keras.models.Model | None = None
+        self._model: ModelPlugin | None = None
         self._writers: dict[str, SummaryWriter] = {}
         logger.debug("Initialized %s", self.__class__.__name__)
 
@@ -161,15 +164,16 @@ class TorchTensorBoard(keras.callbacks.Callback):
     def _write_keras_model_summary(self) -> None:
         """Writes Keras graph network summary to TensorBoard."""
         assert self._model is not None
-        summary = self._model.to_json()
-        self._train_writer.add_text("keras", summary, global_step=0)
+        # TODO model summary
+        # summary = self._model.to_json()
+        # self._train_writer.add_text("keras", summary, global_step=0)
 
     def _write_keras_model_train_graph(self) -> None:
         """Writes Keras graph to TensorBoard."""
         # TODO implement
         logger.debug("Tensorboard graph logging not yet implemented")
 
-    def set_model(self, model: keras.models.Model) -> None:
+    def set_model(self, model: ModelPlugin) -> None:
         """Sets Keras model and writes graph if specified.
 
         Parameters

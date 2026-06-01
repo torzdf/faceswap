@@ -51,12 +51,9 @@ class Trainer(TrainerBase):
         -------
         The loss for each input to the model in order (A, B, ...)
         """
-        predictions = self.model.model(inputs, training=True)
+        predictions: list[list[torch.Tensor]] = self.model(inputs)
         num_sides = len(inputs)
-        num_outputs = len(predictions) // num_sides
-        losses = [self.loss_func([t[:, i] for t in targets],
-                                 predictions[i * num_outputs:i * num_outputs + num_outputs],
-                                 meta[i])
+        losses = [self.loss_func([t[:, i] for t in targets], predictions[i], meta[i])
                   for i in range(num_sides)]
         logger.trace("Losses: %s", losses)  # type:ignore[attr-defined]
         return losses

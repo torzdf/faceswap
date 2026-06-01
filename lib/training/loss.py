@@ -325,10 +325,6 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         mask_loss = None
         for idx, (y_true, y_pred) in enumerate(zip(y_true_all, y_pred_all)):
 
-            # TODO remove once channels first
-            y_true = y_true.permute(0, 3, 1, 2)
-            y_pred = y_pred.permute(0, 3, 1, 2)
-
             if y_true.shape[1] == 1:
                 assert self._mask_loss_function is not None
                 mask_loss = T.cast(torch.Tensor, self._mask_loss_function(y_true, y_pred))

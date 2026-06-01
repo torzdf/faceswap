@@ -18,7 +18,7 @@ if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
     from lib.training.loss import LossCollator, BatchLoss
     from lib.training.optimizer import Optimizer
-    from plugins.train.model._base import ModelBase
+    from plugins.train.model.base import ModelPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,8 @@ class TrainConfig:
     image_folders
         List of folders to be used as inputs to the model. Folders are provided in processing order
         (eg: [A, B, ...])
+    model_folder
+        The folder that the model is to be loaded/saved to or from
     batch_size
         The batch size to load data from each of the loaders
     augment_color
@@ -50,6 +52,8 @@ class TrainConfig:
     folders: list[str]
     """List of folders to be used as inputs to the model. Folders are provided in processing order
     (eg: [A, B, ...])"""
+    model_folder: str
+    """The folder that the model is to be loaded/saved to or from"""
     batch_size: int
     """The batch size to load data from each of the loaders"""
     augment_color: bool
@@ -58,6 +62,8 @@ class TrainConfig:
     """``False`` to disable warping ``True`` to enable warping"""
     warp: bool
     """``False`` to disable warping ``True`` to enable warping"""
+    no_logs: bool
+    """``True`` to disable Tensorboard logging, ``False`` to enable"""
     cache_landmarks: bool
     """``True`` to cache landmarks from the other side for Warp to landmarks"""
     lr_finder: bool = False
@@ -72,14 +78,14 @@ class TrainerBase(abc.ABC):
 
     Parameters
     ----------
-    model
-        The model plugin
+    model_name
+        The name of the Faceswap model to load
     config
         The Training Configuration options
     """
-    def __init__(self, model: ModelBase, config: TrainConfig) -> None:
-        self.model = model
-        """The model plugin to train the batch on"""
+    def __init__(self, model_name: str, config: TrainConfig) -> None:
+        self.model_name = model_name
+        """The plugin name of the model to be trained"""
         self.batch_size = config.batch_size
         """The batch size for each iteration to be trained through the model."""
         self.config = config
@@ -88,22 +94,33 @@ class TrainerBase(abc.ABC):
         """The data sampler that the data loader should use"""
         self.loss_func: LossCollator
         """The selected loss functions for the model"""
+        self.model: ModelPlugin
+        """The model plugin to be trained"""
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = f"model={repr(self.model)}, config={repr(self.config)}"
+        params = f"model_name={repr(self.model_name)}, config={repr(self.config)}"
         return f"{self.__class__.__name__}({params})"
 
-    def register_loss(self, loss: LossCollator) -> None:
-        """Registers the selected loss functions to the underlying model nn.module
+    def load_model(self, plugin: ModelPlugin, loss: LossCollator) -> None:
+        """Load the model plugin.
+
+        Set the given configured Faceswap model plugin to :attr:`model`
 
         Parameters
         ----------
+        plugin
+            The Faceswap model plugin to train
         loss
             The configured loss functions
+
+        Note: this must be done after lib.training.state.State has been loaded, so that config
+        values are correctly set prior to creating the model structure
         """
-        logger.debug("[%s] Registering loss: %s", self.__class__.__name__, loss)
-        self.model.model.add_module("loss_func", loss)
+        logger.debug("[%s] Loading model: %s, loss: %s", self.__class__.__name__, plugin, loss)
+        if hasattr(self, "model"):
+            raise RuntimeError("Model has already been initialized!")
+        self.model = plugin
         self.loss_func = loss
 
     @abc.abstractmethod

@@ -12,8 +12,8 @@ from lib.utils import full_path_split, get_module_objects, PROJECT_ROOT
 
 if T.TYPE_CHECKING:
     from collections.abc import Callable
-    from torch import nn
     from plugins.extract.base import ExtractPlugin
+    from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerBase
 
 logger = logging.getLogger(__name__)
@@ -204,7 +204,7 @@ class PluginLoader():
         return plugins
 
     @classmethod
-    def get_model(cls, name: str) -> type[nn.Module]:
+    def get_model(cls, name: str) -> type[ModelPlugin]:
         """Return requested training model plugin
 
         Parameters

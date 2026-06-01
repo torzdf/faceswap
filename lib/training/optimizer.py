@@ -19,8 +19,8 @@ from .lr_finder import LearningRateFinder
 from .lr_warmup import WarmupScheduler
 
 if T.TYPE_CHECKING:
-    from keras import Model as K_Model, Variable
-    from plugins.train.model._base import ModelBase as Model
+    from keras import Variable
+    from plugins.train.model.base import ModelPlugin
     from plugins.train.train_config import Optimizer as OptConfig
     from .train import Trainer
 
@@ -36,6 +36,7 @@ _OPTIMIZERS = {"adabelief": optimizers.AdaBelief,
                "rms-prop": torch.optim.RMSprop}
 
 
+# TODO keep for legacy weights update
 def get_parameter_group_ids(trainable_variables: list[Variable]
                             ) -> dict[int, T.Literal["decay", "no_decay"]]:
     """Obtain the index of each item in the keras model's trainable weights that belong to each
@@ -154,7 +155,7 @@ class Optimizer:
         The number of steps to warmup the learning rate for. Default: 0
     """
     def __init__(self,
-                 model: Model,
+                 model: ModelPlugin,
                  config: type[OptConfig],
                  mixed_precision: bool = False,
                  warmup_steps: int = 0) -> None:
@@ -168,15 +169,14 @@ class Optimizer:
             config.clipping_value(),
             config.autoclip_history())
 
-        self._optimizer = self._get_optimizer(model.model, config)
+        self._optimizer = self._get_optimizer(model, config)
         self._warmup = None if warmup_steps < 1 else WarmupScheduler(self._optimizer, warmup_steps)
         self._lr_scheduler: ExponentialLR | None = None
-
-        self._load_state(model)
 
         self._accumulation_count = 0
         self._session_steps = 0
 
+    # TODO keep this for weight porting
     @classmethod
     def _get_optimizer_kwargs(cls, config: type[OptConfig]) -> dict[str, T.Any]:
         """Obtain the keyword arguments for the requested optimizer from the user configuration
@@ -205,7 +205,7 @@ class Optimizer:
         logger.debug("[Optimizer] '%s' kwargs: %s", name, retval)
         return retval
 
-    def _get_optimizer(self, model: K_Model, config: type[OptConfig]) -> torch.optim.Optimizer:
+    def _get_optimizer(self, model: ModelPlugin, config: type[OptConfig]) -> torch.optim.Optimizer:
         """Obtain the configured optimizer the given configuration file options
 
         Parameters
@@ -230,7 +230,7 @@ class Optimizer:
         logger.debug("[Optimizer] Got optimizer '%s': %s", name, retval)
         return retval
 
-    def _get_parameter_groups(self, model: K_Model, weight_decay: float
+    def _get_parameter_groups(self, model: ModelPlugin, weight_decay: float
                               ) -> tuple[dict[T.Literal["params", "weight_decay"],
                                               list[nn.Parameter] | float],
                                          dict[T.Literal["params", "weight_decay"],
@@ -240,7 +240,7 @@ class Optimizer:
         Parameters
         ----------
         model
-            The keras model that is to be trained
+            The faceswap model that is to be trained
         weight_decay
             The amount of weight decay to apply
 
@@ -248,21 +248,17 @@ class Optimizer:
         -------
         The parameters that require weight decay in position 0 and no weight decay in position 1
         """
-        index_map = get_parameter_group_ids(model.trainable_variables)
-        groups: dict[T.Literal["decay", "no_decay"], list[nn.Parameter]] = {"decay": [],
-                                                                            "no_decay": []}
-        # pylint:disable=protected-access
-        for idx, var in enumerate(model.trainable_variables):
-            if not hasattr(var, "_value") or not isinstance(var._value, nn.Parameter):
-                raise RuntimeError(
-                    f"Cannot extract torch parameter from keras.Variable '{var.name}'. "
-                    "Keras version may have changed internal structure.")
-            groups[index_map[idx]].append(var._value)
+        decay, no_decay = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            dst = no_decay if param.ndim <= 1 or name.endswith(".bias") else decay
+            dst.append(param)
 
         retval: tuple[dict[T.Literal["params", "weight_decay"], list[nn.Parameter] | float],
                       dict[T.Literal["params", "weight_decay"], list[nn.Parameter] | float]] = (
-                          {"params": groups["decay"], "weight_decay": weight_decay},
-                          {"params": groups["no_decay"], "weight_decay": 0.0}
+                          {"params": decay, "weight_decay": weight_decay},
+                          {"params": no_decay, "weight_decay": 0.0}
                           )
 
         logger.debug("[Optimizer] decay params: %s, no_decay params: %s",
@@ -322,37 +318,20 @@ class Optimizer:
         state_dict
             The serialized data to load
         """
+        if not state_dict:
+            return
         logger.debug("[Optimizer] Loading state_dict")
+
+        if state_dict["version"] == 0.5:  # Migrating from keras optimizer
+            keras_state = self._from_legacy(state_dict)  # TODO validate
+            if keras_state is None:
+                return
+            state_dict = keras_state
+
         self._optimizer.load_state_dict(state_dict["optimizer"])
         if self._scaler is not None and state_dict.get("scaler") is not None:
             logger.debug("[Optimizer] Loading scaler state_dict: %s", state_dict["scaler"])
             self._scaler.load_state_dict(state_dict["scaler"])
-
-    def _load_state(self, model: Model) -> None:
-        """Load weights if resuming and optimizer weights exist within the model file.
-
-        Also handles migration of legacy Keras optimizer weights to torch optimizer
-
-        Parameters
-        ----------
-        model
-            The model that is to be trained
-        """
-        if not model.io.model_exists:
-            logger.debug("[Optimizer] Model file does not exist. Not loading state")
-            return
-
-        state = model.io.load_optimizer()
-        if state is None:
-            logger.debug("[Optimizer] No optimizer saved in model file")
-            return
-
-        if state["version"] == 0.5:  # Migrating from keras optimizer
-            state = self._from_legacy(state)
-            if state is None:
-                return
-
-        self.load_state_dict(state_dict=state)
 
     def backward(self, loss: torch.Tensor) -> None:
         """Perform the optimizer's backward pass

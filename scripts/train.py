@@ -29,7 +29,7 @@ from plugins.train.trainer.base import TrainConfig
 if T.TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
-    from plugins.train.model._base import ModelBase
+    from plugins.train.model.base import ModelPlugin
 
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,7 @@ class Train():
             self._load_model()
             return
         logger.debug("[Train] Starting Training Process")
-        logger.info("Training data directory: %s", self._args.model_dir)
+        logger.info("Model directory: %s", self._args.model_dir)
         thread = self._start_thread()
         # from lib.queue_manager import queue_manager; queue_manager.debug_monitor(1)
         err = self._monitor(thread)
@@ -248,8 +248,7 @@ class Train():
             sleep(0.5)  # Let preview instructions flush out to logger
             logger.debug("[Train] Commencing Training")
             logger.info("Loading data, this may take a while...")
-            model = self._load_model()
-            trainer = self._load_trainer(model)
+            trainer = self._load_trainer()
             if trainer.exit_early:
                 logger.debug("[Train] Trainer exits early")
                 self._stop = True
@@ -266,34 +265,22 @@ class Train():
         except Exception as err:
             raise err
 
-    def _load_model(self) -> ModelBase:
+    def _load_model_old(self) -> type[ModelPlugin]:
         """Load the model requested for training.
 
         Returns
         -------
-        The requested model plugin
+        The uninitialized requested model plugin
         """
         logger.debug("[Train] Loading Model")
-        model_dir = get_folder(self._args.model_dir)
-        model: ModelBase = PluginLoader.get_model(self._args.trainer)(
-            model_dir,
-            self._args,
-            predict=False)
-        model.build()
-        logger.debug("[Train] Loaded Model")
-        return model
+        return PluginLoader.get_model(self._args.trainer)
 
-    def _load_trainer(self, model: ModelBase) -> Trainer:
+    def _load_trainer(self) -> Trainer:
         """Load the trainer requested for training.
-
-        Parameters
-        ----------
-        model
-            The requested model plugin
 
         Returns
         -------
-        The model training loop with the requested trainer plugin loaded
+        The model training loop with the requested trainer plugin loaded for the requested model
         """
         logger.debug("[Train] Loading Trainer")
         trainer = "distributed" if self._args.distributed else "original"
@@ -306,14 +293,16 @@ class Train():
                 trainer = "original"
 
         config = TrainConfig(folders=self._images,
+                             model_folder=self._args.model_dir,
                              batch_size=self._args.batch_size,
                              augment_color=not self._args.no_augment_color,
                              flip=not self._args.no_flip,
                              warp=not self._args.no_warp,
+                             no_logs=self._args.no_logs,
                              cache_landmarks=self._args.warp_to_landmarks,
                              lr_finder=self._args.use_lr_finder,
                              snapshot_interval=self._args.snapshot_interval)
-        retval = Trainer(PluginLoader.get_trainer(trainer)(model, config),
+        retval = Trainer(PluginLoader.get_trainer(trainer)(self._args.trainer, config),
                          self._args.preview or self._args.write_image or self._args.redirect_gui,
                          warmup_steps=self._args.warmup,
                          timelapse_folders=[self._args.timelapse_input_a,
