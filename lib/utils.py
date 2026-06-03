@@ -961,4 +961,80 @@ class DebugTimes():
         self._interval = 1
 
 
+class Tabulate:
+    """Tabulate the given data. Data is expected to be formatted. Rows can be split over multiple
+    lines by inserting newline characters. Rows are bottom-aligned when split over multiple lines
+
+    Parameters
+    ---------
+    data
+        The data to display as list of lists of [rows[cols[data]]]. Header data in first row
+    padding
+        The amount of padding to pad each column. Default: 0
+    just
+        "ljust" for all left justified, "rjust" for all right justified or list of len(columns)
+        containing "ljust" or "rjust" for each column. Default: "ljust"
+    """
+    def __init__(self,
+                 data: list[list[str]],
+                 padding: int = 0,
+                 just: T.Literal["ljust", "rjust"] | list[T.Literal["ljust", "rjust"]] = "ljust"
+                 ) -> None:
+        if len(set(len(x) for x in data)) != 1:
+            raise RuntimeError("All Data rows must contain the same number of columns. Got "
+                               f"{[len(x) for x in data]}")
+
+        self._just = [just for _ in range(len(data[0]))] if isinstance(just, str) else just
+        if len(self._just) != len(data[0]):
+            raise RuntimeError("just must be either a string or a list in the number of columns"
+                               f"provided by data. data: {len(data[0])}, just: {len(self._just)}"
+                               f"{[len(x) for x in data]}")
+
+        self._data = [[c.split("\n") for c in row] for row in data]
+        self._column_widths = [max(max(len(x)
+                                       for x in r[col_idx])
+                                   for r in self._data) + padding
+                               for col_idx in range(len(self._data[0]))]
+        self._row_heights = [max(len(c) for c in row) for row in self._data]
+
+    @classmethod
+    def _format_cell(cls, data: str, height: int, width: int) -> str:
+        """Format the given data to fit in a cell of given lines and width
+
+        Parameters
+        ----------
+        data
+            The data from the cell to display
+        height
+            The number of additional lines (above 1) that this cell occupies
+        width
+            Width of the cell
+        """
+        has_rows = len(data) - len(data.replace("\n", ""))
+        if has_rows != height:
+            data = "\n" * (height - has_rows)
+        return data.ljust(width)
+
+    def __call__(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
+        """Output the table
+
+        Parameters
+        ----------
+        print_fn
+            The function to print the summary to
+        """
+        print_fn = print if print_fn is None else print_fn
+        divider = " | "
+        print_fn("-" * (sum(self._column_widths) + (len(divider) * len(self._column_widths))))
+        for row_idx, (row, height) in enumerate(zip(self._data, self._row_heights)):
+            for idx in range(height):  # TODO bottom align rows
+                abs_idx = [idx - (height - len(c)) for c in row]
+                cells = [c[i] if i >= 0 else "" for c, i in zip(row, abs_idx)]
+                just = ["ljust"
+                        for _ in range(len(self._column_widths))] if row_idx == 0 else self._just
+                print_fn(divider.join(getattr(x, j)(w)
+                                      for x, j, w in zip(cells, just, self._column_widths)))
+            print_fn("-" * (sum(self._column_widths) + (len(divider) * len(self._column_widths))))
+
+
 __all__ = get_module_objects(__name__)

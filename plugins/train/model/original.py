@@ -8,7 +8,6 @@ from.
 from __future__ import annotations
 
 import logging
-import typing as T
 
 import torch
 from torch import nn
@@ -42,6 +41,7 @@ class Encoder(nn.Module):
         self.conv4 = None if low_mem else ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
 
         feats = 512 if low_mem else 1024
+        self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(feats * 4 * 4, feats)
         self.dense2 = nn.Linear(feats, 1024 * 4 * 4)
         self.upscale = UpscaleSubpixel(1024, 512)
@@ -58,13 +58,15 @@ class Encoder(nn.Module):
         -------
         The output from the encoder
         """
-        x = self.conv1(inputs)
+        x: torch.Tensor = self.conv1(inputs)
         x = self.conv2(x)
         x = self.conv3(x)
         if self.conv4 is not None:
             x = self.conv4(x)
-        x = self.dense1(x.flatten(start_dim=1))
-        x = T.cast(torch.Tensor, self.dense2(x))
+
+        x = self.flatten(x)
+        x = self.dense1(x)
+        x = self.dense2(x)
         x = x.reshape(x.shape[0], 1024, 4, 4)
         return self.upscale(x)
 

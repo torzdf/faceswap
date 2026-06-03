@@ -15,7 +15,8 @@ import torch
 from torch.cuda import OutOfMemoryError
 
 from lib.logger import format_array, parse_class_init
-from lib.model.model_info import Info
+from lib.model.faceswap.model_info import Info
+from lib.model.faceswap.saving import ModelIO
 from lib.model.faceswap.state import FaceswapModel
 from lib.torch_utils import get_device
 from lib.training.preview import Samples
@@ -27,12 +28,12 @@ from plugins.train.trainer import trainer_config as trn_cfg
 
 from .loss import LossCollator
 from .optimizer import Optimizer
-from .saving import ModelIO
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt
     from collections.abc import Callable
     from plugins.train.trainer.base import TrainerBase
+    from plugins.train.model.base import ModelPlugin
     from .loss import BatchLoss
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,27 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore",
                         message="You might experience inconsistencies",
                         category=UserWarning)
+
+
+class ModelConfigure:
+    """Configures the model for training based on globally selected options"""
+
+    @classmethod
+    def _configure_initializers(cls, model: ModelPlugin):
+        for m in model.modules():
+            print(m.__class__.__name__)
+            if m.__class__.__name__ == "PixelShuffle":
+                print(m)
+                print(dir(m))
+                exit()
+        exit()
+        print(list(model.modules())[0])
+        # if mod_cfg.icnr_init():
+
+    @classmethod
+    def __call__(cls, model: ModelPlugin, is_new: bool):
+        if is_new:
+            cls._configure_initializers(model)
 
 
 class Trainer:  # pylint:disable=too-many-instance-attributes
@@ -54,8 +76,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         The plugin that will be processing each batch
     preview
         ``True`` to generate previews
-    warmup_steps
-        The number of steps to warmup the learning rate for. Default: 0
     timelapse_folders
         The input folders to create timelapse images from. Default: ``None`` (no timelapse)
     timelapse_output
@@ -75,8 +95,12 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._plugin = plugin
 
         # TODO IO to FaceswapModel
+        # TODO add state_dict functions to model plugin to load cfg options + re-init plugin.
+        # Rather than the class object -> load config -> init spaghetti we have now
         self._model = FaceswapModel(plugin.model_name, len(plugin.config.folders))
         self._io = ModelIO(self._model, plugin.config.model_folder)
+#        self._io.save(False)
+#        exit()
         self._model.optimizer = Optimizer(self._model.plugin,
                                           mod_cfg.Optimizer,
                                           mixed_precision=mod_cfg.mixed_precision(),
@@ -84,8 +108,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._model.optimizer.load_state_dict(T.cast(dict[str, T.Any],
                                               self._model.state_dict().get("optimizer", {})))
         self._model_info = Info(self._model.plugin)
+        self._model_info.summary(logger.verbose)  # type:ignore[attr-defined]
 
         self._device = get_device()
+        # ModelConfigure()(self._model.plugin, is_new=True)
         self._configure_model()
 
         self._train_loader = self._get_train_loader()

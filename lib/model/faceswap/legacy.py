@@ -44,7 +44,7 @@ class KerasModel:
 
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
-                     collected: None| dict[str, np.ndarray] = None) -> dict[str, np.ndarray]:
+                     collected: None | dict[str, np.ndarray] = None) -> dict[str, np.ndarray]:
         """Recurse through the data and collect model weights as numpy arrays
 
         Parameters
@@ -83,14 +83,13 @@ class KerasModel:
                            state_path)
             return {}
 
-        with open(state_path, "r") as s_file:
+        with open(state_path, "r", encoding="utf-8") as s_file:
             retval = json.load(s_file)
         logger.debug("[KerasModel] Loaded state: %s", retval)
         return retval
 
     def _load_keras_model(self):
         """Load the objects we require out of the keras model file"""
-
 
         with zipfile.ZipFile(self._model_path, "r") as z_file:
             name_list = z_file.namelist()
@@ -146,7 +145,7 @@ class KerasToTorch:
         """
         retval = {k: v for k, v in self._keras.state.items() if k != "mixed_precision_layers"}
         retval["sessions"] = {int(i): {"batch_size" if k == "batchsize" else k: v
-                                  for k, v in s.items() if k != "no_logs"}
+                                       for k, v in s.items() if k != "no_logs"}
                               for i, s in self._keras.state["sessions"].items()}
         logger.debug("[KerasToTorch] Cleaned state: %s", retval)
         return retval
@@ -180,7 +179,8 @@ class KerasToTorch:
                 elif weight.ndim == 2:
                     weight = weight.transpose(1, 0)
                 elif weight.ndim != 1:
-                    raise RuntimeError(f"Unhandled weight shape {weight.shape} for layer: '{weight}'")
+                    raise RuntimeError(f"Unhandled weight shape {weight.shape} for layer: "
+                                       f"'{weight}'")
 
             assert w_type in ("weight", "bias")
             retval[name] = retval.get(name, {}) | {w_type: weight}
@@ -216,8 +216,20 @@ class KerasToTorch:
             key = next(k for k, v in keras_grouped.items()
                        if v["weight"].shape == weights["weight"].shape)
             val = keras_grouped.pop(key)
+            if lbl == "encoder.dense1":
+                # TODO need way of getting dense layers from flattened rather than hard coding
+                # This will probably need to come from model_info once tracing properly implemented
+                # H * W * C -> H, W, C -> C, H, W -> C * H * W
+                val["weight"] = val["weight"].reshape(1024, 4, 4, 1024).transpose(0, 3, 1, 2).reshape(1024, 16384)
+
+            if lbl == "encoder.dense2":
+                # TODO need way of getting dense layers rather than hard coding
+                # H * W * C -> H, W, C -> C, H, W -> C * H * W
+                val["weight"] = val["weight"].reshape(4, 4, 1024, 1024).transpose(2, 0, 1, 3).reshape(16384, 1024)
+                val["bias"] = val["bias"].reshape(4, 4, 1024).transpose(2, 0, 1).reshape(16384)
+
             logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
-                        key, lbl, val["weight"].shape)
+                         key, lbl, val["weight"].shape)
             for w in ("weight", "bias"):
                 retval[f"{lbl}.{w}"] = torch.from_numpy(val[w])
 
@@ -233,9 +245,8 @@ class KerasToTorch:
                             "state": self._state,
                             "model": self._map_weights(self._torch.plugin.state_dict(),
                                                        self._keras.weights)}
-        if self._keras._optimizer:
+        if self._keras._optimizer:  # TODO
             pass
-            # TODO
 
     def state_dict(self) -> dict[T.Literal["model", "state", "optimizer", "version"],
                                  float | dict[str, T.Any]]:
