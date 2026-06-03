@@ -349,7 +349,7 @@ class Info:
             self._output_size = max_out_sizes.pop()
         return self._output_size
 
-    def summary(self, print_fn: None = None) -> None:
+    def summary(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
         """Output the model summary table
 
         Parameters
@@ -357,8 +357,10 @@ class Info:
         print_fn
             The function to print the summary to. Default: ``None`` (print to console)
         """
-        # TODO trainable + non-trainable params
-        rows = [["Module Name", "Input Size", "Output Size", "Connected To", "Parameters"]]
+        # TODO Breakdowns by is_parent
+        print_fn = print if print_fn is None else print_fn
+        print_fn(f"Model: {self._model_info[0]}")
+        rows = [["Layer (type)", "Input Shape", "Output Shape", "Connected To", "Params"]]
         rows.extend([f"{layer}\n({info.type})" if len(layer) > 20 else f"{layer} ({info.type})",
                      "\n".join(str(x[1:]) for x in _flatten_list([info.input_shape])),
                      "\n".join(str(x[1:]) for x in _flatten_list([info.output_shape])),
@@ -366,10 +368,14 @@ class Info:
                      f"{info.num_params:,}"]
                     for layer, info in self._structure.structure.items()
                     if not info.is_parent)
-        total_params = sum(v.num_params for v in self._structure.structure.values()
-                           if not v.is_parent)
-        Tabulate(rows, just=["ljust", "rjust", "rjust", "ljust", "rjust"])(print_fn)
-        logger.info("Total parameters: %s", f"{total_params:,}")
+        train_params = sum(v.num_params for v in self._structure.structure.values()
+                           if not v.is_parent and v.requires_grad)
+        non_train_params = sum(v.num_params for v in self._structure.structure.values()
+                               if not v.is_parent and not v.requires_grad)
+        Tabulate(rows, padding=0, just=["ljust", "rjust", "rjust", "ljust", "rjust"])(print_fn)
+        print_fn(f"Total parameters: {train_params + non_train_params:,}")
+        print_fn(f"Trainable parameters: {train_params:,}")
+        print_fn(f"Non-trainable parameters: {non_train_params:,}")
 
 
 __all__ = get_module_objects(__name__)

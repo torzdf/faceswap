@@ -990,6 +990,7 @@ class Tabulate:
                                f"provided by data. data: {len(data[0])}, just: {len(self._just)}"
                                f"{[len(x) for x in data]}")
 
+        self._j_pad = " " * (padding - padding // 2)
         self._data = [[c.split("\n") for c in row] for row in data]
         self._column_widths = [max(max(len(x)
                                        for x in r[col_idx])
@@ -997,23 +998,48 @@ class Tabulate:
                                for col_idx in range(len(self._data[0]))]
         self._row_heights = [max(len(c) for c in row) for row in self._data]
 
-    @classmethod
-    def _format_cell(cls, data: str, height: int, width: int) -> str:
-        """Format the given data to fit in a cell of given lines and width
+    def _get_separator(self, row_index: int) -> str:
+        """Obtain a separator between rows
 
         Parameters
         ----------
-        data
-            The data from the cell to display
-        height
-            The number of additional lines (above 1) that this cell occupies
-        width
-            Width of the cell
+        row_index
+            The index of the row that the line should be drawing after. Index -1 is the top table
+            line. Row 0 is a header row
+        Returns
+            A table line separator formatted for output
         """
-        has_rows = len(data) - len(data.replace("\n", ""))
-        if has_rows != height:
-            data = "\n" * (height - has_rows)
-        return data.ljust(width)
+        start = {-1: "┏", 0: "┡", len(self._data) - 1: "┕"}.get(row_index, "├")
+        end = {-1: "┓", 0: "┩", len(self._data) - 1: "┙"}.get(row_index, "┤")
+        div = {-1: "┳", 0: "╇", len(self._data) - 1: "┷"}.get(row_index, "┼")
+        line = "━" if row_index in (-1, 0, len(self._data) - 1) else "─"
+        return start + div.join(line * c for c in self._column_widths) + end
+
+    def _get_row(self, row_index: int, height: int) -> T.Generator[str, None, None]:
+        """Obtain the lines for the current data row
+
+        Parameters
+        ----------
+        row_index
+            The row index in the data table to be processed
+        height
+            The number of lines within the row
+
+        Yields
+        ------
+        Each line within this data's row
+        """
+        row = self._data[row_index]
+        just = ["ljust" for _ in range(len(self._column_widths))] if row_index == 0 else self._just
+        div = "┃" if row_index == 0 else "│"
+
+        for idx in range(height):
+            abs_idx = [idx - (height - len(c)) for c in row]
+            line = [c[i] if i >= 0 else "" for c, i in zip(row, abs_idx)]
+            line = [self._j_pad + x if j == "ljust" else x + self._j_pad
+                    for x, j in zip(line, just)]
+            yield div + div.join(getattr(x, j)(w)
+                                 for x, j, w in zip(line, just, self._column_widths)) + div
 
     def __call__(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
         """Output the table
@@ -1024,17 +1050,11 @@ class Tabulate:
             The function to print the summary to
         """
         print_fn = print if print_fn is None else print_fn
-        divider = " | "
-        print_fn("-" * (sum(self._column_widths) + (len(divider) * len(self._column_widths))))
-        for row_idx, (row, height) in enumerate(zip(self._data, self._row_heights)):
-            for idx in range(height):  # TODO bottom align rows
-                abs_idx = [idx - (height - len(c)) for c in row]
-                cells = [c[i] if i >= 0 else "" for c, i in zip(row, abs_idx)]
-                just = ["ljust"
-                        for _ in range(len(self._column_widths))] if row_idx == 0 else self._just
-                print_fn(divider.join(getattr(x, j)(w)
-                                      for x, j, w in zip(cells, just, self._column_widths)))
-            print_fn("-" * (sum(self._column_widths) + (len(divider) * len(self._column_widths))))
+        print_fn(self._get_separator(-1))
+        for row_idx, height in enumerate(self._row_heights):
+            for line in self._get_row(row_idx, height):
+                print_fn(line)
+            print_fn(self._get_separator(row_idx))
 
 
 __all__ = get_module_objects(__name__)
