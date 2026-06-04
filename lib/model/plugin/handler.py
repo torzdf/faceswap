@@ -6,19 +6,23 @@ import logging
 import typing as T
 
 import torch
+from torch import nn
 
 from lib.logger import parse_class_init
+from lib.model.initializers import icnr, ConvolutionAware
 from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
 from plugins.plugin_loader import PluginLoader
 
-from .train_state import State
+from .model_info import Info
 from .saving import ModelIO
+from .train_state import State
 
 if T.TYPE_CHECKING:
     from plugins.train.model.base import ModelPlugin
-    from plugins.train.train_config import Optimizer as opt_cfg
+    from plugins.train.train_config import Loss as loss_cfg, Optimizer as opt_cfg
+    from .model_info import Layer
 
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,95 @@ class FaceswapModel:
         self.plugin.to(device)
 
 
+class TrainConfigure:
+    """Configures a Faceswap model for training based on user provided values
+
+    Parameters
+    ----------
+    model_info
+        The information about the loaded model's structure
+    loss_config
+        The loss configuration options object
+    optimizer_config
+        The optimizer configuration options object
+    icnr_init
+        ``True`` to initialize convolutions prior to up-scales with ICNR
+    conv_aware_init
+        ``True`` to apply conv_aware_init to all convolutions
+    mixed_precision
+        ``True`` to train with mixed precision
+    reflect_padding
+        ``True`` to apply reflect padding to convolutions
+    """
+    def __init__(self,
+                 model_info: Info,
+                 loss_config: type[loss_cfg],
+                 optimizer_config: type[opt_cfg],
+                 icnr_init: bool,
+                 conv_aware_init: bool,
+                 mixed_precision: bool,
+                 reflect_padding: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+
+        self._info = model_info
+        self._loss_cfg: type[loss_cfg] = loss_config
+        self.optimizer_config: type[opt_cfg] = optimizer_config
+        """The configuration options for the optimizer"""
+
+        self._init = {"icnr": icnr_init, "conv_aware": conv_aware_init}
+        self.mixed_precision = mixed_precision
+        """``True`` if mixed precision is enabled."""
+        self._reflect_padding = reflect_padding
+
+    def _get_prev_conv(self, layer: Layer, collected: list[Layer] | None = None) -> list[Layer]:
+        collected = [] if collected is None else collected
+        if layer.type == "Conv2d":
+            return collected + [layer]
+        for lyr in layer.input_layers:
+            return self._get_prev_conv(self._info.structure[lyr], collected)
+        return collected
+
+    def _apply_initializers(self, model: ModelPlugin) -> None:
+        """Apply the requested initializers to the relevant convolutions
+
+        Parameters
+        ----------
+        model
+            The Faceswap model to update the initializers for
+        """
+        if not any(self._init.values()):
+            logger.debug("[TrainConfigure] No custom initializers to apply")
+            return
+
+        conv_aware = ConvolutionAware()
+        icnr_conv = [x.name for v in self._info.structure.values()
+                     if v.type == "PixelShuffle"  # TODO all upscales?
+                     for x in self._get_prev_conv(v)] if self._init["icnr"] else []
+        for k, v in model.named_modules():
+            if k in icnr_conv and isinstance(v, nn.Conv2d):
+                logger.debug("[TrainConfigure] Applying ICNR Initialization: '%s' (%s)",
+                             k, v.weight.shape)
+                icnr(v.weight)
+                if v.bias is not None:
+                    nn.init.zeros_(v.bias)
+            elif self._init["conv_aware"] and isinstance(v, nn.Conv2d):
+                logger.info("[TrainConfigure] Applying ConvAware Init '%s' %s...",
+                            k, tuple(v.weight.shape))
+                conv_aware(v.weight)
+                if v.bias is not None:
+                    nn.init.zeros_(v.bias)
+
+    def configure(self, model: ModelPlugin) -> None:
+        """Configure the given faceswap model with the user provided settings
+
+        Parameters
+        ----------
+        model
+            The Faceswap model to configure for training
+        """
+        self._apply_initializers(model)
+
+
 class TrainHandler:
     """Handles the management of a Faceswap model plugin when training the model
 
@@ -143,19 +236,23 @@ class TrainHandler:
         return self._model.state.session_id
 
     @property
+    def model_exists(self) -> bool:
+        """``True`` if a model weights file/checkpoint exists within the save folder"""
+        return self._io.file_exists
+
+    @property
     def optimizer(self) -> Optimizer:
         """The optimizer in use"""
         return self._optimizer
 
     def configure_model(self,
-                        device: torch.Device,
-                        optimizer_config: type[opt_cfg],
-                        mixed_precision: bool,
+                        train_config: TrainConfigure,
                         warmup_steps: int) -> None:
         """Load optimize state and move to the correct device"""
+        train_config.configure(self.model)
         self._optimizer = Optimizer(self._model.plugin,
-                                    optimizer_config,
-                                    mixed_precision,
+                                    train_config.optimizer_config,
+                                    train_config.mixed_precision,
                                     warmup_steps)
         self._optimizer.load_state_dict(T.cast(dict[T.Literal["version", "optimizer", "scaler"],
                                                     float | T.Any],

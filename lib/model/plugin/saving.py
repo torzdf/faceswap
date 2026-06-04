@@ -50,7 +50,7 @@ class ModelIO:
         return any(os.path.isfile(x) for x in self._legacy_paths)
 
     @property
-    def _file_exists(self) -> bool:
+    def file_exists(self) -> bool:
         """``True`` if a save file exists otherwise ``False``"""
         return any(os.path.isfile(x) for x in (self._checkpoint_path, self._weights_path))
 
@@ -61,7 +61,7 @@ class ModelIO:
         -------
         The full path to the latest checkpoint or weights file. ``None`` if no file found
         """
-        if not self._file_exists:
+        if not self.file_exists:
             return None
 
         file_list = (self._checkpoint_path, self._weights_path)

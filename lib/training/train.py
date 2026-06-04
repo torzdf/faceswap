@@ -6,7 +6,6 @@ import logging
 import os
 import typing as T
 import time
-import warnings
 
 import cv2
 import numpy as np
@@ -16,7 +15,7 @@ from torch.cuda import OutOfMemoryError
 
 from lib.logger import format_array, parse_class_init
 from lib.model.plugin.model_info import Info
-from lib.model.plugin import TrainHandler
+from lib.model.plugin import TrainHandler, TrainConfigure
 
 from lib.torch_utils import get_device
 from lib.training.preview import Samples
@@ -36,37 +35,9 @@ if T.TYPE_CHECKING:
     import numpy.typing as npt
     from collections.abc import Callable
     from plugins.train.trainer.base import TrainerBase
-    from plugins.train.model.base import ModelPlugin
     from .loss import BatchLoss
 
 logger = logging.getLogger(__name__)
-
-
-# Suppress non-Faceswap related Keras warning about backend padding mismatches
-warnings.filterwarnings("ignore",
-                        message="You might experience inconsistencies",
-                        category=UserWarning)
-
-
-class ModelConfigure:
-    """Configures the model for training based on globally selected options"""
-
-    @classmethod
-    def _configure_initializers(cls, model: ModelPlugin):
-        for m in model.modules():
-            print(m.__class__.__name__)
-            if m.__class__.__name__ == "PixelShuffle":
-                print(m)
-                print(dir(m))
-                exit()
-        exit()
-        print(list(model.modules())[0])
-        # if mod_cfg.icnr_init():
-
-    @classmethod
-    def __call__(cls, model: ModelPlugin, is_new: bool):
-        if is_new:
-            cls._configure_initializers(model)
 
 
 class Trainer:  # pylint:disable=too-many-instance-attributes
@@ -114,6 +85,17 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                  else logger.verbose)  # type:ignore[attr-defined]
         if summary:
             return
+
+        is_new = not self._model_handler.model_exists
+        self._trainer = self._model_handler.configure_model(
+            TrainConfigure(self._model_info,
+                           loss_config=mod_cfg.Loss,
+                           optimizer_config=mod_cfg.Optimizer,
+                           icnr_init=mod_cfg.icnr_init() and is_new,
+                           conv_aware_init=mod_cfg.conv_aware_init() and is_new,
+                           mixed_precision=mod_cfg.mixed_precision(),
+                           reflect_padding=mod_cfg.reflect_padding()),
+            warmup_steps=train_config.warmup_steps)
 
         self._device = get_device()
         self._trainer = self._configure_model(trainer_name)

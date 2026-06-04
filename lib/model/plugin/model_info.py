@@ -349,6 +349,11 @@ class Info:
             self._output_size = max_out_sizes.pop()
         return self._output_size
 
+    @property
+    def structure(self) -> dict[str, Layer]:
+        """The parsed model structure"""
+        return self._structure.structure
+
     def summary(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
         """Output the model summary table
 

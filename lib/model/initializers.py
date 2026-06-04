@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import logging
-import sys
-import inspect
 import typing as T
 
-import torch
-
-from keras import backend as K, initializers
-from keras import saving
-from keras.src.initializers.random_initializers import compute_fans
-
 import numpy as np
+import torch
+from torch import nn
 
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
@@ -21,24 +15,32 @@ from lib.utils import get_module_objects
 logger = logging.getLogger(__name__)
 
 
-class ICNR(initializers.Initializer):
-    """ICNR initializer for checkerboard artifact free sub pixel convolution
+def icnr(tensor: torch.Tensor,
+         initializer: T.Callable[[torch.Tensor], torch.Tensor] | None = None,
+         scale: int = 2,
+         *args,
+         **kwargs) -> torch.Tensor:
+    """ICNR initializer for checkerboard artifact free sub pixel convolution. Action is performed
+    in place replacing the given input tensor
 
     Parameters
     ----------
+    tensor
+        The original weight tensor
     initializer
-        The initializer used for sub kernels (orthogonal, glorot uniform, etc.)
+        The initializer used for sub kernels (orthogonal, glorot uniform, etc.). Default: ``None``
+        (uses kaiming_normal)
     scale
         scaling factor of sub pixel convolution (up sampling from 8x8 to 16x16 is scale 2).
         Default: `2`
+    args
+        Any args for the original initializer
+    kwargs
+        Any kwargs for the original initializer
 
     Returns
     -------
     The modified kernel weights
-
-    Example
-    -------
-    >>> x = conv2d(... weights_initializer=ICNR(initializer=he_uniform(), scale=2))
 
     References
     ----------
@@ -46,49 +48,55 @@ class ICNR(initializers.Initializer):
     https://arxiv.org/pdf/1707.02937.pdf,  https://distill.pub/2016/deconv-checkerboard/
     https://gist.github.com/A03ki/2305398458cb8e2155e8e81333f0a965
     """
+    initializer = nn.init.kaiming_normal_ if initializer is None else initializer
+    scale_squared = scale * scale
+    assert tensor.shape[0] % scale_squared == 0
+    with torch.no_grad():
+        sub_kernel = torch.empty(tensor.shape[0] // scale_squared, *tensor.shape[1:],
+                                 dtype=tensor.dtype, device=tensor.device)
+        initializer(sub_kernel, *args, **kwargs)
+        tensor.copy_(sub_kernel.repeat_interleave(scale_squared, dim=0))
 
-    def __init__(self,
-                 initializer: dict[str, T.Any] | initializers.Initializer,
-                 scale: int = 2) -> None:
-        logger.debug(parse_class_init(locals()))
-        self._scale = scale
-        self._initializer = initializer
-
-    def __call__(self,
-                 shape: list[int] | tuple[int, ...],
-                 dtype: str | None = "float32") -> torch.Tensor:
-        shape = list(shape)
-        if self._scale == 1:  # TODO validate when moved to full torch
-            if isinstance(self._initializer, dict):
-                return next(i for i in self._initializer.values())
-            return self._initializer(shape)
-
-        new_shape = shape[:3] + [shape[3] // (self._scale ** 2)]
-
-        if isinstance(self._initializer, dict):  # TODO remove when full torch
-            self._initializer = initializers.deserialize(self._initializer)
-
-        x: torch.Tensor = self._initializer(new_shape, dtype)
-
-        # TODO repeat needs to be replaced with repeat_interleave when pixel-shuffler is ported:
-        # x = x.repeat_interleave(self._scale ** 2, dim = -1)
-        x = x.repeat(*([1] * (x.dim() - 1)), self._scale ** 2)
-        logger.debug("ICNR Output shape: %s", x.shape)
-        return x
-
-    def get_config(self) -> dict[str, T.Any]:
-        """Return the ICNR Initializer configuration.
-
-        Returns
-        -------
-        The configuration for ICNR Initialization
-        """
-        config = {"scale": self._scale, "initializer": self._initializer}
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
+    logger.debug("ICNR Output shape: %s", tensor.shape)
+    return tensor
 
 
-class ConvolutionAware(initializers.Initializer):
+def compute_fans(tensor: torch.Tensor) -> tuple[int, int]:
+    """Calculate fan in/fan out for the given Tensor. Lifted from torch
+
+    Parameters
+    ----------
+    tensor
+        The tensor to calculate the fan for
+
+    Returns
+    -------
+    fan_in
+        The fan in shape
+    fan_out
+        The fan out shape
+    """
+    dimensions = tensor.dim()
+    if dimensions < 2:
+        raise ValueError(
+            "Fan in and fan out can not be computed for tensor with fewer than 2 dimensions"
+        )
+
+    num_input_f_maps = tensor.size(1)
+    num_output_f_maps = tensor.size(0)
+    receptive_field_size = 1
+    if tensor.dim() > 2:
+        # math.prod is not always available, accumulate the product manually
+        # we could use functools.reduce but that is not supported by TorchScript
+        for s in tensor.shape[2:]:
+            receptive_field_size *= s
+    fan_in = num_input_f_maps * receptive_field_size
+    fan_out = num_output_f_maps * receptive_field_size
+
+    return fan_in, fan_out
+
+
+class ConvolutionAware:
     """Initializer that generates orthogonal convolution filters in the Fourier space. If this
     initializer is passed a shape that is not 3D or 4D, orthogonal initialization will be used.
 
@@ -115,24 +123,13 @@ class ConvolutionAware(initializers.Initializer):
     ----------
     Armen Aghajanyan, https://arxiv.org/abs/1702.06295
     """
-    # TODO this needs to be done after porting models to torch as it depends on underlying model
-    # structure
-    def __init__(self,
-                 eps_std: float = 0.05,
-                 seed: int | None = None,
-                 initialized: bool = False) -> None:
+    def __init__(self, eps_std: float = 0.05, seed: int | None = None,) -> None:
         logger.debug(parse_class_init(locals()))
-
         self._eps_std = eps_std
         self._seed = seed
-        self._orthogonal = initializers.OrthogonalInitializer()
-        self._he_uniform = initializers.HeUniform()
-        self._initialized = initialized
-
-        logger.debug("Initialized %s", self.__class__.__name__)
 
     @classmethod
-    def _symmetrize(cls, inputs: np.ndarray) -> np.ndarray:
+    def _symmetrize(cls, inputs: torch.Tensor) -> torch.Tensor:
         """Make the given tensor symmetrical.
 
         Parameters
@@ -144,14 +141,19 @@ class ConvolutionAware(initializers.Initializer):
         -------
         The symmetrical output
         """
-        var_a = np.transpose(inputs, axes=(0, 1, 3, 2))
-        diag = var_a.diagonal(axis1=2, axis2=3)
-        var_b = np.array([[np.diag(arr) for arr in batch] for batch in diag])
-        retval = inputs + var_a - var_b
-        logger.debug("Input shape: %s. Output shape: %s", inputs.shape, retval.shape)
+        a = inputs.permute(0, 1, 3, 2)
+        diag = a.diagonal(dim1=-2, dim2=-1)
+        b = diag.diag_embed()
+        retval = inputs + a - b
+        logger.debug("[ConvolutionAware] Input shape: %s. Output shape: %s",
+                     inputs.shape, retval.shape)
         return retval
 
-    def _create_basis(self, filters_size: int, filters: int, size: int, dtype: str) -> np.ndarray:
+    def _create_basis(self,
+                      filters_size: int,
+                      filters: int,
+                      size: int,
+                      dtype: torch.dtype) -> torch.Tensor:
         """Create the basis for convolutional aware initialization
 
         Parameters
@@ -168,18 +170,18 @@ class ConvolutionAware(initializers.Initializer):
         The output array
         """
         if size == 1:
-            return np.random.normal(0.0, self._eps_std, (filters_size, filters, size))
+            return torch.normal(0.0, self._eps_std, (filters_size, filters, size))
         nbb = filters // size + 1
-        var_a = np.random.normal(0.0, 1.0, (filters_size, nbb, size, size))
-        var_a = self._symmetrize(var_a)
-        var_u = np.linalg.svd(var_a)[0].transpose(0, 1, 3, 2)
-        retval = np.reshape(var_u, (filters_size, nbb * size, size))[:, :filters, :].astype(dtype)
+        a = torch.normal(0.0, 1.0, (filters_size, nbb, size, size))
+        a = self._symmetrize(a)
+        u: torch.Tensor = torch.linalg.svd(a)[0].permute(0, 1, 3, 2)
+        retval = u.reshape(filters_size, nbb * size, size)[:, :filters, :]
         logger.debug("filters_size: %s, filters: %s, size: %s, dtype: %s, output: %s",
                      filters_size, filters, size, dtype, retval.shape)
         return retval
 
     @classmethod
-    def _scale_filters(cls, filters: np.ndarray, variance: float) -> np.ndarray:
+    def _scale_filters(cls, filters: torch.Tensor, variance: float) -> torch.Tensor:
         """Scale the given filters.
 
         Parameters
@@ -193,109 +195,68 @@ class ConvolutionAware(initializers.Initializer):
         -------
         The scaled filters
         """
-        c_var = np.var(filters)
-        var_p = np.sqrt(variance / c_var)
-        retval = filters * var_p
+        c_var = torch.var(filters)
+        p = torch.sqrt(variance / c_var)
+        retval = filters * p
         logger.debug("Scaled filters (filters: %s, variance: %s, output: %s)",
                      filters.shape, variance, retval.shape)
         return retval
 
-    def __call__(self,  # pylint: disable=too-many-locals
-                 shape: list[int] | tuple[int, ...],
-                 dtype: str | None = None) -> torch.Tensor:
-        """Call function for the ICNR initializer.
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Call function for the Convolutional Aware initializer.
 
         Parameters
         ----------
-        shape
-            The required shape for the output tensor
-        dtype
-            The data type for the tensor
+        tensor
+            The original weight tensor
 
         Returns
         -------
         The modified kernel weights
         """
-        if self._initialized:   # Avoid re-calculating initializer when loading a saved model
-            return T.cast(torch.Tensor, self._he_uniform(shape, dtype=dtype))
-        dtype = K.floatx() if dtype is None else dtype
-        logger.info("Calculating Convolution Aware Initializer for shape: %s", shape)
+        shape = tensor.shape
+        logger.debug("Calculating Convolution Aware Initializer for shape: %s", shape)
         rank = len(shape)
         if self._seed is not None:
+            torch.manual_seed(self._seed)
             np.random.seed(self._seed)
 
-        fan_in, _ = compute_fans(shape)
+        fan_in, _ = compute_fans(tensor)
         variance = 2 / fan_in
 
         kernel_shape: tuple[int, ...]
-        transpose_dimensions: tuple[int, ...]
         correct_ifft: T.Callable
         correct_fft: T.Callable
-
         if rank == 3:
-            row, stack_size, filters_size = shape
-
-            transpose_dimensions = (2, 1, 0)
+            filters_size, stack_size, row = shape
             kernel_shape = (row,)
-            correct_ifft = lambda shape, s=[None]: np.fft.irfft(shape, s[0])  # noqa:E731,E501 pylint:disable=unnecessary-lambda-assignment
-
-            correct_fft = np.fft.rfft
-
+            correct_ifft = lambda shape, s=[None]: torch.fft.irfft(shape, s[0])  # noqa:E731,E501 pylint:disable=unnecessary-lambda-assignment
+            correct_fft = torch.fft.rfft
         elif rank == 4:
-            row, column, stack_size, filters_size = shape
-
-            transpose_dimensions = (2, 3, 1, 0)
+            filters_size, stack_size, row, column = shape
             kernel_shape = (row, column)
-            correct_ifft = np.fft.irfft2
-            correct_fft = np.fft.rfft2
-
+            correct_ifft = torch.fft.irfft2
+            correct_fft = torch.fft.rfft2
         elif rank == 5:
-            var_x, var_y, var_z, stack_size, filters_size = shape
-
-            transpose_dimensions = (3, 4, 0, 1, 2)
+            stack_size, filters_size, var_x, var_y, var_z = shape
             kernel_shape = (var_x, var_y, var_z)
-            correct_fft = np.fft.rfftn
-            correct_ifft = np.fft.irfftn
-
+            correct_fft = torch.fft.rfftn
+            correct_ifft = torch.fft.irfftn
         else:
-            self._initialized = True
-            return T.cast(torch.Tensor, self._orthogonal(shape))
+            return nn.init.orthogonal_(tensor)
 
-        kernel_fourier_shape = correct_fft(np.zeros(kernel_shape)).shape
-
-        basis = self._create_basis(filters_size,
-                                   stack_size,
-                                   T.cast(int, np.prod(kernel_fourier_shape)),
-                                   dtype)
-        basis = basis.reshape((filters_size, stack_size,) + kernel_fourier_shape)
-        randoms = np.random.normal(0, self._eps_std, basis.shape[:-2] + kernel_shape)
-        init = correct_ifft(basis, kernel_shape) + randoms
-        init = self._scale_filters(init, variance).astype(dtype)
-        self._initialized = True
-        retval = torch.from_numpy(init.transpose(transpose_dimensions))
-        logger.debug("ConvAware output: %s", retval)
-        return retval
-
-    def get_config(self) -> dict[str, T.Any]:
-        """Return the Convolutional Aware Initializer configuration.
-
-        Returns
-        -------
-        The configuration for Convolutional Aware Initialization
-        """
-        config = {"eps_std": self._eps_std,
-                  "seed": self._seed,
-                  "initialized": self._initialized}
-        # pylint:disable=duplicate-code
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-# pylint:disable=duplicate-code
-# Update initializers into Keras custom objects
-for name, obj in inspect.getmembers(sys.modules[__name__]):
-    if inspect.isclass(obj) and obj.__module__ == __name__:
-        saving.get_custom_objects().update({name: obj})
+        with torch.no_grad():
+            kernel_fourier_shape = correct_fft(torch.zeros(kernel_shape)).shape
+            basis = self._create_basis(filters_size,
+                                       stack_size,
+                                       T.cast(int, np.prod(kernel_fourier_shape)),
+                                       tensor.dtype)
+            basis = basis.reshape((filters_size, stack_size,) + kernel_fourier_shape)
+            randoms = torch.normal(0, self._eps_std, basis.shape[:-2] + kernel_shape)
+            init = correct_ifft(basis, kernel_shape) + randoms
+            tensor.copy_(self._scale_filters(init, variance).to(tensor.dtype))
+        logger.debug("ConvAware output: %s", (tensor.shape, tensor.dtype))
+        return tensor
 
 
 __all__ = get_module_objects(__name__)
