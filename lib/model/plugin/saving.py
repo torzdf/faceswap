@@ -13,7 +13,7 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
-    from lib.model.faceswap import FaceswapModel
+    from .handler import FaceswapModel
 
 logger = logging.getLogger(__name__)
 
@@ -28,22 +28,21 @@ class ModelIO:
     model_dir
         The full path to the model save folder
     """
-    def __init__(self, model: FaceswapModel, model_dir: str) -> None:
+    def __init__(self, model_name: str, model_dir: str) -> None:
         logger.debug(parse_class_init(locals()))
-        self._name = f"[{self.__class__.__name__}.{model.name}]"
-
-        self._model = model
+        self._name = f"[{self.__class__.__name__}.{model_name}]"
         self._model_dir = model_dir
 
-        self._checkpoint_path = os.path.join(model_dir, f"{model.name}.ckpt")
-        self._weights_path = os.path.join(model_dir, f"{model.name}.pth")
-        self._legacy_paths = (os.path.join(model_dir, f"{model.name}.keras"),
-                              os.path.join(model_dir, f"{model.name}.h5"))
-        self._load_state_dict()
+        self._checkpoint_path = os.path.join(model_dir, f"{model_name}.ckpt")
+        self._weights_path = os.path.join(model_dir, f"{model_name}.pth")
+        self._legacy_paths = (os.path.join(model_dir, f"{model_name}.keras"),
+                              os.path.join(model_dir, f"{model_name}.h5"))
 
     def __repr__(self) -> str:
-        """Cleaner Logging"""
-        return f"{self.__class__.__name__}(model={self._model}, model_dir={repr(self._model_dir)})"
+        """Pretty print for logging"""
+        return (f"{self.__class__.__name__}("
+                f"model_name={repr(self._name.rsplit('.', maxsplit=1)[-1])}, "
+                f"model_dir={repr(self._model_dir)})")
 
     @property
     def _legacy_exists(self) -> bool:
@@ -71,16 +70,33 @@ class ModelIO:
         logger.debug("%s Latest save from %s: %s", self._name, file_list, retval)
         return retval
 
-    def _load_state_dict(self) -> None:
-        """Load the model checkpoint data from disk to CPU into the FaceswapModel"""
+    def load(self, model: FaceswapModel | None = None
+             ) -> dict[T.Literal["model", "state", "optimizer", "version"],
+                       float | dict[str, T.Any]]:
+        """Load the latest state_dict from disk for the faceswap model
+
+        Parameters
+        ----------
+        model
+            The FaceswapModel object configured from disk. This is only used for migrating legacy
+            keras weights to torch weights if a torch model does not exist. Default: ``None``.
+            Don't port weights
+
+        Returns
+        -------
+        The state_dicts for the model, state file and optimizer (if it exists)
+        """
         filename = self._get_latest_save()
         if filename is None and not self._legacy_exists:
             logger.debug("%s No save files exist. Not loading", self._name)
-            self._model.load_state_dict({})  # Always call it to initialize the plugin
-            return
+            return {}
+
+        if filename is None and model is None:
+            raise RuntimeError("Legacy keras model found, but torch structure not provided.")
         if filename is None:
             logger.info("%s Migrating weights from Keras model", self._name)
-            state_dict = KerasToTorch(self._model,
+            assert model is not None
+            state_dict = KerasToTorch(model,
                                       next(f for f in self._legacy_paths
                                            if os.path.exists(f))).state_dict()
         else:
@@ -91,34 +107,36 @@ class ModelIO:
             logger.debug("Loaded model from disk: '%s'", filename)
         logger.debug("%s Loaded state_dict version %s. Keys: %s",
                      self._name, state_dict.get("version", 0.0), list(state_dict))
-        self._model.load_state_dict(state_dict)
+        return state_dict
 
-    def save(self, save_optimizer: bool) -> None:
+    def save(self, model_state: dict[T.Literal["model", "state", "version", "optimizer"],
+                                     float | dict[str, T.Any]]) -> None:
         """Save the state_dicts to disk
 
         Parameters
         ----------
-        ``True`` if the optimizer is to be saved otherwise ``False``
+        model_state
+            The FaceswapModel state_dict
+            Default: ``None``
         """
-        fname = self._checkpoint_path if save_optimizer else self._weights_path
+        is_checkpoint = bool(model_state.get("optimizer"))
+        fname = self._checkpoint_path if is_checkpoint else self._weights_path
         logger.debug("%s Saving %s: '%s'",
                      self._name,
-                     "checkpoint" if save_optimizer else "weights",
+                     "checkpoint" if is_checkpoint else "weights",
                      fname)
         print("\x1b[2K", end="\r")  # Clear last line
-        logger.verbose("Saving Model...")  # type:ignore[attr-defined]
-
-        state_dict = self._model.state_dict()
-        if not save_optimizer:
-            state_dict = {k: v for k, v in state_dict.items() if k != "optimizer"}
+        logger.verbose("Saving %s...",  # type:ignore[attr-defined]
+                       'checkpoint' if is_checkpoint else 'model')
 
         # TODO Remove/update
         import json
         with open(f"{os.path.splitext(fname)[0]}.json", "w") as o_file:
-            json.dump(state_dict["state"], o_file, indent=2)
-        torch.save(state_dict, fname)
+            json.dump(model_state["state"], o_file, indent=2)
 
-        msg = "[Saved model]"  # TODO
+        torch.save(model_state, fname)
+
+        msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"  # TODO
 #        if save_average:
 #            msg += f" - Average total loss since last save: {save_average:.5f}"
 #        if backed_up:

@@ -15,16 +15,19 @@ import torch
 from torch.cuda import OutOfMemoryError
 
 from lib.logger import format_array, parse_class_init
-from lib.model.faceswap.model_info import Info
-from lib.model.faceswap.saving import ModelIO
-from lib.model.faceswap.state import FaceswapModel
+from lib.model.plugin.model_info import Info
+from lib.model.plugin import TrainHandler
+
 from lib.torch_utils import get_device
 from lib.training.preview import Samples
 from lib.training.data import get_label, PreviewLoader, TrainLoader
 from lib.training.tensorboard import TorchTensorBoard
 from lib.utils import get_module_objects, FaceswapError
 from plugins.train import train_config as mod_cfg
+
+from plugins.plugin_loader import PluginLoader
 from plugins.train.trainer import trainer_config as trn_cfg
+from plugins.train.trainer.base import TrainConfig
 
 from .loss import LossCollator
 from .optimizer import Optimizer
@@ -72,48 +75,48 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
     Parameters
     ----------
-    plugin
-        The plugin that will be processing each batch
+    trainer_name
+        The name of the trainer plugin to load
+    model_name
+        The name of the faceswap model plugin that is to be trained
+    train_config:
+        The Training Configuration options
     preview
         ``True`` to generate previews
     timelapse_folders
         The input folders to create timelapse images from. Default: ``None`` (no timelapse)
     timelapse_output
         The folder to output timelapse images. Default: "" (no timelapse)
+    summary
+        ``True`` to just output a summary of the model and exit. ``False`` to train.
+        Default: ``False``
     config_file
         The custom location to load configuration options from or ``None`` if default location
     """
     def __init__(self,
-                 plugin: TrainerBase,
+                 trainer_name: str,
+                 model_name: str,
+                 train_config: TrainConfig,
                  preview: bool,
                  timelapse_folders: list[str] | None = None,
                  timelapse_output: str = "",
+                 summary: bool = False,
                  config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
         mod_cfg.load_config(config_file=config_file)
 
-        self._plugin = plugin
-
-        # TODO IO to FaceswapModel
-        # TODO add state_dict functions to model plugin to load cfg options + re-init plugin.
-        # Rather than the class object -> load config -> init spaghetti we have now
-        self._model = FaceswapModel(plugin.model_name, len(plugin.config.folders))
-        self._io = ModelIO(self._model, plugin.config.model_folder)
-#        self._io.save(False)
-#        exit()
-        self._model.optimizer = Optimizer(self._model.plugin,
-                                          mod_cfg.Optimizer,
-                                          mixed_precision=mod_cfg.mixed_precision(),
-                                          warmup_steps=self._plugin.config.warmup_steps)
-        self._model.optimizer.load_state_dict(T.cast(dict[str, T.Any],
-                                              self._model.state_dict().get("optimizer", {})))
-        self._model_info = Info(self._model.plugin)
-        self._model_info.summary(logger.verbose)  # type:ignore[attr-defined]
+        self._train_config = train_config
+        self._model_handler = TrainHandler(model_name,
+                                           len(train_config.folders),
+                                           train_config.model_folder)
+        self._model_info = Info(self._model_handler.model)
+        self._model_info.summary(logger.info if summary
+                                 else logger.verbose)  # type:ignore[attr-defined]
+        if summary:
+            return
 
         self._device = get_device()
-        # ModelConfigure()(self._model.plugin, is_new=True)
-        self._configure_model()
-
+        self._trainer = self._configure_model(trainer_name)
         self._train_loader = self._get_train_loader()
 
         self._exit_early = self._handle_lr_finder()
@@ -121,33 +124,32 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
             logger.debug("[Trainer] Exiting from LR Finder")
             return
 
-        self._tester = Tester(self._plugin,
+        self._tester = Tester(self._trainer,
                               self._model_info,
                               self._device,
-                              preview,
+                              self._train_config.folders if preview else None,
                               timelapse_folders,
                               timelapse_output)
         self._tensorboard = self._set_tensorboard()
-
-    def __repr__(self) -> str:
-        """Pretty print for logging"""
-        warmup = T.cast(Optimizer, self._model.optimizer)._warmup
-        params = {"plugin": self._plugin,
-                  "preview": self._tester._preview,
-                  "warmup_steps": 0 if warmup is None else warmup.steps,
-                  "timelapse_folders": self._tester._timelapse_folders,
-                  "timelapse_output": self._tester._timelapse_output}
-        s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
-        return f"{self.__class__.__name__}({s_params})"
 
     @property
     def exit_early(self) -> bool:
         """``True`` if the trainer should exit early, without performing any training steps"""
         return self._exit_early
 
-    def _configure_model(self) -> None:
+    def _configure_model(self, trainer_name: str) -> TrainerBase:
         """Add the model and the loss functions to the training plug in and move to the correct
-        device"""
+        device
+
+        Parameters
+        ----------
+        trainer_name
+            The name of the trainer plugin to load
+
+        Returns
+        -------
+        The Faceswap trainer plugin with the Faceswap model loaded
+        """
         loss = LossCollator(
             functions=[mod_cfg.Loss.loss_function(),
                        mod_cfg.Loss.loss_function_2(),
@@ -157,7 +159,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                      mod_cfg.Loss.loss_weight_2() / 100.,
                      mod_cfg.Loss.loss_weight_3() / 100.,
                      mod_cfg.Loss.loss_weight_4() / 100.],
-            color_order="rgb" if self._model.plugin.is_rgb else "bgr",
+            color_order="rgb" if self._model_handler.model.is_rgb else "bgr",
             use_mask=mod_cfg.Loss.penalized_mask_loss(),
             eye_multiplier=mod_cfg.Loss.eye_multiplier(),
             mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
@@ -166,11 +168,16 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
             mask_loss=(None if not mod_cfg.Loss.learn_mask()
                        else mod_cfg.Loss.mask_loss_function()))
 
-        self._model.plugin.train()
-        self._model.to(self._device)
+        self._model_handler.configure_model(self._device,
+                                            mod_cfg.Optimizer,
+                                            mod_cfg.mixed_precision(),
+                                            self._train_config.warmup_steps)
         loss.to(self._device)
-        self._plugin.load_model(self._model.plugin, loss)
-        logger.debug("[Trainer] Configured model and trainer")
+        retval = PluginLoader.get_trainer(trainer_name)(self._model_handler.model,
+                                                        self._train_config.batch_size,
+                                                        loss)
+        logger.debug("[Trainer] Configured model and trainer: %s", retval)
+        return retval
 
     def _get_train_loader(self) -> TrainLoader:
         """Get the loaders for training the model
@@ -180,7 +187,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         The loaders for feeding the model's training loop
         """
         out_sizes = [[x[1] for x in side if x[0] != 1] for side in self._model_info.output_shapes]
-        num_sides = len(self._plugin.config.folders)
+        num_sides = len(self._train_config.folders)
         assert len(out_sizes) % num_sides == 0, (
             f"Output count ({len(out_sizes)}) doesn't match number of inputs ({num_sides})")
 
@@ -188,9 +195,9 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                        for x in side)) == len(out_sizes[0]), "Sizes for each output must match"
         retval = TrainLoader(self._model_info.input_size,
                              tuple(out_sizes[0]),
-                             "rgb" if self._model.plugin.is_rgb else "bgr",
-                             self._plugin.config,
-                             self._plugin.sampler)
+                             "rgb" if self._model_handler.model.is_rgb else "bgr",
+                             self._train_config,
+                             self._trainer.sampler)
         logger.debug("[Trainer] data loader: %s", retval)
         return retval
 
@@ -208,20 +215,20 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         ``True`` if the learning rate finder options dictate that training should not continue
         after finding the optimal leaning rate
         """
-        if not self._plugin.config.lr_finder:
+        if not self._train_config.lr_finder:
             return False
 
-        assert self._model.optimizer is not None
-        if self._model.state.lr_finder > -1:
-            learning_rate = self._model.state.lr_finder
+        assert self._model_handler.optimizer is not None
+        if self._model_handler.state.lr_finder > -1:
+            learning_rate = self._model_handler.state.lr_finder
             logger.info("Setting learning rate from Learning Rate Finder to %s",
                         f"{learning_rate:.1e}")
-            self._model.optimizer.set_lr(learning_rate)
-            self._model.state.update_session_config("learning_rate", learning_rate)
+            self._model_handler.optimizer.set_lr(learning_rate)
+            self._model_handler.state.update_session_config("learning_rate", learning_rate)
             return False
 
-        if self._model.state.iterations == 0 and self._model.state.session_id == 1:
-            success = self._model.optimizer.find_learning_rate(
+        if self._model_handler.total_iterations == 0 and self._model_handler.session_id == 1:
+            success = self._model_handler.optimizer.find_learning_rate(
                 self,
                 mod_cfg.lr_finder_iterations(),
                 1e-10,
@@ -246,19 +253,19 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         Tensorboard object for the the current training session. ``None`` if Tensorboard logging is
         not selected
         """
-        if self._plugin.config.no_logs:
+        if self._train_config.no_logs:
             logger.verbose("TensorBoard logging disabled")  # type: ignore
             return None
         logger.debug("[Trainer] Enabling TensorBoard Logging")
 
         logger.debug("[Trainer] Setting up TensorBoard Logging")
-        log_dir = os.path.join(str(self._plugin.config.model_folder),
-                               f"{self._plugin.model_name}_logs",
-                               f"session_{self._model.state.session_id + 1}")
+        log_dir = os.path.join(str(self._train_config.model_folder),
+                               f"{self._model_handler.name}_logs",
+                               f"session_{self._model_handler.session_id + 1}")
         tensorboard = TorchTensorBoard(log_dir=log_dir,
                                        write_graph=True,
                                        update_freq="batch")
-        tensorboard.set_model(self._model.plugin)
+        tensorboard.set_model(self._model_handler.model)
         logger.verbose("Enabled TensorBoard Logging")  # type: ignore
         return tensorboard
 
@@ -275,10 +282,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         """
         try:
             inputs, targets, meta = next(self._train_loader)
-            loss = self._plugin.train_batch([i.to(self._device) for i in inputs],
-                                            [t.to(self._device) for t in targets],
-                                            T.cast(Optimizer, self._model.optimizer),
-                                            meta.to(self._device))
+            loss = self._trainer.train_batch([i.to(self._device) for i in inputs],
+                                             [t.to(self._device) for t in targets],
+                                             T.cast(Optimizer, self._model_handler.optimizer),
+                                             meta.to(self._device))
             retval = [x.to_cpu() for x in loss]
         except OutOfMemoryError as err:
             msg = ("You do not have enough GPU memory available to train the selected model at "
@@ -317,7 +324,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                 logs[f"unweighted_{key}"] = {k: v.item() for k, v in unweighted.items()}
             if out.mask is not None:
                 logs[f"mask_{lbl}"] = out.mask.mean().item()
-        self._tensorboard.on_train_batch_end(self._model.state.iterations, logs=logs)
+        self._tensorboard.on_train_batch_end(self._model_handler.total_iterations, logs=logs)
 
     def _collate_and_store_loss(self, loss: list[BatchLoss]) -> np.ndarray:
         """Collate the loss into totals for each side.
@@ -374,7 +381,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         output = ", ".join([f"Loss {side}: {side_loss:.5f}"
                             for side, side_loss in zip(("A", "B"), loss)])
         timestamp = time.strftime("%H:%M:%S")
-        output = f"[{timestamp}] [#{self._model.state.iterations:05d}] {output}"
+        output = f"[{timestamp}] [#{self._model_handler.total_iterations:05d}] {output}"
         print(f"{output}", end="\r")
 
     def train_one_step(self,
@@ -408,14 +415,14 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         do_timelapse
             ``True`` to generate a timelapse preview image
         """
-        iteration = self._model.state.iterations + 1
+        iteration = self._model_handler.total_iterations + 1
         logger.trace("[Trainer] Training one step: (iteration: %s)",  # type:ignore[attr-defined]
                      iteration)
-        do_snapshot = (self._plugin.config.snapshot_interval != 0 and
-                       iteration - 1 >= self._plugin.config.snapshot_interval and
-                       (iteration - 1) % self._plugin.config.snapshot_interval == 0)
+        do_snapshot = (self._train_config.snapshot_interval != 0 and
+                       iteration - 1 >= self._train_config.snapshot_interval and
+                       (iteration - 1) % self._train_config.snapshot_interval == 0)
         loss = self.train_one_batch()
-        self._model.state.step(self._plugin.batch_size)
+        self._model_handler.step(self._trainer.batch_size)
         total_loss = self._collate_and_store_loss(loss)
         self._log_tensorboard(loss)
         self._print_loss(total_loss)
@@ -446,7 +453,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         """
         save_optimizer = mod_cfg.Optimizer.save_optimizer()
         save_optimizer = save_optimizer == "always" or (is_exit and save_optimizer == "exit")
-        self._io.save(save_optimizer)
+        self._model_handler.save(save_optimizer)
         assert self._tensorboard is not None
         self._tensorboard.on_save()
         if is_exit:
@@ -458,31 +465,31 @@ class Tester:
 
     Parameters
     ----------
-    plugin
-        The faceswap model plugin to obtain previews from
+    trainer
+        The faceswap trainer plugin to obtain previews from
     model_info
         The object containing information about the loaded model
     device
         The device that the model resides on
-    preview
-        ``True`` to generate previews
+    preview_folders
+        List of folders, for each side, to load training images for preview from. ``None`` if
+        preview disabled
     timelapse_folders
         The input folders to create timelapse images from. Default: ``None`` (no timelapse)
     timelapse_output
         The folder to output timelapse images. Default: "" (no timelapse)
     """
     def __init__(self,
-                 plugin: TrainerBase,
+                 trainer: TrainerBase,
                  model_info: Info,
                  device: torch.Device,
-                 preview: bool,
+                 preview_folders: list[str] | None,
                  timelapse_folders: list[str] | None = None,
                  timelapse_output: str = "") -> None:
         logger.debug(parse_class_init(locals()))
-        self._plugin = plugin
+        self._trainer = trainer
         self._model_info = model_info
         self._device = device
-        self._preview = preview
         self._timelapse_folders = [] if timelapse_folders is None else timelapse_folders
         self._timelapse_output = timelapse_output
         self._batch_size = trn_cfg.Augmentation.preview_images()
@@ -491,30 +498,28 @@ class Tester:
                                 trn_cfg.Augmentation.mask_opacity(),
                                 trn_cfg.Augmentation.mask_color())
 
-        self._preview_loader = self._get_preview_loader()
+        self._preview_loader = self._get_preview_loader(preview_folders)
         self._timelapse_loader = self._get_timelapse_loader()
 
-    def __repr__(self) -> str:
-        """Pretty print for logging"""
-        params = ", ".join(f"{k[1:]}={repr(v)}" for k, v in self.__dict__.items()
-                           if k in ("_plugin", "_model_info", "_device", "_preview",
-                                    "_timelapse_folders", "_timelapse_output"))
-        return f"{self.__class__.__name__}({params})"
-
-    def _get_preview_loader(self) -> PreviewLoader | None:
+    def _get_preview_loader(self, preview_folders: list[str] | None) -> PreviewLoader | None:
         """Get the loader for generating previews whilst training the model
+
+        Parameters
+        ----------
+        preview_folders
+            list of folders to read images from for each side being trained
 
         Returns
         -------
         The loader for generating preview images during training or ``None`` if previews are
         disabled
         """
-        if not self._preview:
+        if not preview_folders:
             return None
         retval = PreviewLoader(self._model_info.input_size,
                                self._model_info.output_size,
-                               "rgb" if self._plugin.model.is_rgb else "bgr",
-                               self._plugin.config.folders,
+                               "rgb" if self._trainer.model.is_rgb else "bgr",
+                               preview_folders,
                                self._batch_size,
                                torch.utils.data.RandomSampler)
         logger.debug("[Trainer] Preview data loader: %s", retval)
@@ -539,7 +544,7 @@ class Tester:
                      num_images, avail_images, num_samples)
         retval = PreviewLoader(self._model_info.input_size,
                                self._model_info.output_size,
-                               "rgb" if self._plugin.model.is_rgb else "bgr",
+                               "rgb" if self._trainer.model.is_rgb else "bgr",
                                self._timelapse_folders,
                                self._batch_size,
                                torch.utils.data.SequentialSampler,
@@ -583,7 +588,7 @@ class Tester:
 
             with torch.inference_mode():
                 out = [y.cpu().numpy().transpose(0, 2, 3, 1)
-                       for x in self._plugin.model(list(feed_batch.to(self._device)))
+                       for x in self._trainer.model(list(feed_batch.to(self._device)))
                        for y in x
                        if y.shape[2] == self._model_info.output_size]  # Filter multi-scale output
             if mod_cfg.Loss.learn_mask():  # Apply mask to alpha channel
@@ -636,7 +641,7 @@ class Tester:
                 predictions[original_idx, side_idx] = pred[input_idx]
 
         targets = target.cpu().numpy()
-        if self._plugin.model.is_rgb:
+        if self._trainer.model.is_rgb:
             predictions[..., :3] = predictions[..., 2::-1]
             targets[..., :3] = targets[..., 2::-1]
         logger.debug("[Trainer] Got preview images: predictions: %s, targets: %s",

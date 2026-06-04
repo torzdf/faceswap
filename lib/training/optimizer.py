@@ -310,7 +310,8 @@ class Optimizer:
 
         return state
 
-    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
+    def load_state_dict(self, state_dict: dict[T.Literal["version", "optimizer", "scaler"],
+                                               float | dict[str, T.Any]]) -> None:
         """Load the serialized data from a state dict into this object
 
         Parameters
@@ -328,10 +329,10 @@ class Optimizer:
                 return
             state_dict = keras_state
 
-        self._optimizer.load_state_dict(state_dict["optimizer"])
+        self._optimizer.load_state_dict(T.cast(dict[str, T.Any], state_dict["optimizer"]))
         if self._scaler is not None and state_dict.get("scaler") is not None:
             logger.debug("[Optimizer] Loading scaler state_dict: %s", state_dict["scaler"])
-            self._scaler.load_state_dict(state_dict["scaler"])
+            self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
 
     def backward(self, loss: torch.Tensor) -> None:
         """Perform the optimizer's backward pass

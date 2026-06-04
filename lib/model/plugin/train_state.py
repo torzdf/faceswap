@@ -13,89 +13,9 @@ from inspect import isclass
 from lib.config.objects import ConfigItem, GlobalSection
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
-from plugins.plugin_loader import PluginLoader
 from plugins.train import train_config as cfg
 
-if T.TYPE_CHECKING:
-    import torch
-    from lib.training.optimizer import Optimizer
-    from plugins.train.model.base import ModelPlugin
-
 logger = logging.getLogger(__name__)
-
-
-class FaceswapModel:
-    """Holds the model and state information on a Faceswap model for serialization
-
-    Parameters
-    ----------
-    name
-        The name of the Faceswap model plugin to load
-    num_identities
-        The number of identities that the model is to be created for
-    """
-    def __init__(self, name: str, num_identities) -> None:
-        logger.debug(parse_class_init(locals()))
-        self._name = f"[{self.__class__.__name__}.{name}]"
-
-        self.name = name
-        """The plugin name of the model to load"""
-        self._num_identities = num_identities
-
-        self._model_cls = PluginLoader.get_model(name)
-        self.state = State(self._model_cls.__module__)
-        self.optimizer: Optimizer | None = None
-
-        self.plugin: ModelPlugin  # Populates on first call to load_state_dict
-
-    def state_dict(self) -> dict[T.Literal["model", "state", "optimizer", "version"],
-                                 float | dict[str, T.Any]]:
-        """Get the Faceswap model's state_dict"""
-        retval: dict[T.Literal["model", "state", "optimizer", "version"],
-                     float | dict[str, T.Any]] = {"version": 1.0,
-                                                  "model": self.plugin.state_dict(),
-                                                  "state": self.state.state_dict()}
-        if self.optimizer is not None:
-            retval["optimizer"] = self.optimizer.state_dict()
-        return retval
-
-    def load_state_dict(self, state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
-                                               float | dict[str, T.Any]]) -> None:
-        """Load the contents of the given state dict into this object. If this is the first call to
-        load_state_dict, then initialize :attr:`plugin` instance
-
-        Parameters
-        ----------
-        state_dict
-            The Faceswap model's state_dict to load
-        """
-        logger.debug("%s version: %s, state_dict keys: %s",
-                     self._name, state_dict.get("version", 0.0), list(state_dict))
-        if "state" in state_dict:
-            self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
-
-        if not hasattr(self, "plugin"):
-            logger.debug("%s, Initializing plugin", self._name)
-            self.plugin = self._model_cls(self._num_identities)
-
-        if "model" in state_dict:
-            self.plugin.load_state_dict(T.cast(dict[str, T.Any], state_dict["model"]))
-        if "optimizer" in state_dict and self.optimizer is not None:
-            self.optimizer.load_state_dict(T.cast(dict[str, T.Any], state_dict["optimizer"]))
-
-    def to(self, device: torch.Device) -> None:
-        """Load the model and optimizer to the given device
-
-        Parameters
-        ----------
-        device
-            The device to load the model and optimizer to
-        """
-        logger.debug("%s Model to: %s", self._name, device)
-        self.plugin.to(device)
-        if self.optimizer is not None:
-            logger.debug("%s Optimizer to: %s", self._name, device)
-            self.optimizer.to(device)
 
 
 class _Config:
@@ -277,7 +197,7 @@ class State:
         """The total number of iterations the model has been trained for"""
         return self._total_steps
 
-    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, T.Any]):
         """Load the contents of the state_dict into this state object
 
         Parameters

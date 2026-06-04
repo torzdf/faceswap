@@ -53,12 +53,12 @@ class Train():
     def __init__(self, arguments: argparse.Namespace) -> None:
         logger.debug(parse_class_init(locals()))
         self._args = handle_deprecated_cli_opts(arguments)
+        self._images = self._get_images()
 
         if self._args.summary:
             # If just outputting summary we don't need to initialize everything
             return
 
-        self._images = self._get_images()
         self._timelapse = self._set_timelapse()
         gui_cache = os.path.join(
             os.path.realpath(os.path.dirname(sys.argv[0])), "lib", "gui", ".cache")
@@ -127,6 +127,8 @@ class Train():
         logger.debug("[Train] Getting image paths")
         retval: list[str] = []
         input_folders = [self._args.input_a, self._args.input_b]
+        if self._args.summary:  # No need for checks when outputting summary
+            return input_folders
         for idx, image_dir in enumerate(input_folders):
             key = get_label(idx, len(input_folders))
             if not os.path.isdir(image_dir):
@@ -191,7 +193,7 @@ class Train():
         Should only be called from  :class:`lib.cli.launcher.ScriptExecutor`
         """
         if self._args.summary:
-            self._load_model()
+            self._load_trainer()
             return
         logger.debug("[Train] Starting Training Process")
         logger.info("Model directory: %s", self._args.model_dir)
@@ -249,7 +251,7 @@ class Train():
             logger.debug("[Train] Commencing Training")
             logger.info("Loading data, this may take a while...")
             trainer = self._load_trainer()
-            if trainer.exit_early:
+            if trainer.exit_early:  # LRF on exit
                 logger.debug("[Train] Trainer exits early")
                 self._stop = True
                 return
@@ -283,7 +285,8 @@ class Train():
         The model training loop with the requested trainer plugin loaded for the requested model
         """
         logger.debug("[Train] Loading Trainer")
-        trainer = "distributed" if self._args.distributed else "original"
+        trainer = ("distributed" if self._args.distributed and not self._args.summary
+                   else "original")
         if trainer == "distributed":
             import torch  # pylint:disable=import-outside-toplevel
             gpu_count = torch.cuda.device_count()
@@ -303,11 +306,15 @@ class Train():
                              cache_landmarks=self._args.warp_to_landmarks,
                              lr_finder=self._args.use_lr_finder,
                              snapshot_interval=self._args.snapshot_interval)
-        retval = Trainer(PluginLoader.get_trainer(trainer)(self._args.trainer, config),  # TODO Should config go to the trainer rather than plugin
+
+        retval = Trainer(trainer,
+                         self._args.trainer,
+                         config,
                          self._args.preview or self._args.write_image or self._args.redirect_gui,
                          timelapse_folders=[self._args.timelapse_input_a,
                                             self._args.timelapse_input_b],
                          timelapse_output=self._args.timelapse_output,
+                         summary=self._args.summary,
                          config_file=self._args.config_file)
         logger.debug("[Train] Loaded Trainer")
         return retval

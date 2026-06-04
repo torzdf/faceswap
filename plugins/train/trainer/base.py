@@ -82,50 +82,20 @@ class TrainerBase(abc.ABC):
 
     Parameters
     ----------
-    model_name
-        The name of the Faceswap model to load
-    config
-        The Training Configuration options
+    model
+        The configured Faceswap model plugin to be trained
+    batch_size
+        The batch size to train the model at
     """
-    def __init__(self, model_name: str, config: TrainConfig) -> None:
-        self.model_name = model_name
-        """The plugin name of the model to be trained"""
-        self.batch_size = config.batch_size
+    def __init__(self, model: ModelPlugin, batch_size: int, loss_func: LossCollator) -> None:
+        self.model: ModelPlugin = model
+        """The model plugin to be trained"""
+        self.batch_size = batch_size
         """The batch size for each iteration to be trained through the model."""
-        self.config = config
-        """Training configuration options"""
         self.sampler = self.get_sampler()
         """The data sampler that the data loader should use"""
-        self.loss_func: LossCollator
+        self.loss_func = loss_func
         """The selected loss functions for the model"""
-        self.model: ModelPlugin
-        """The model plugin to be trained"""
-
-    def __repr__(self) -> str:
-        """Pretty print for logging"""
-        params = f"model_name={repr(self.model_name)}, config={repr(self.config)}"
-        return f"{self.__class__.__name__}({params})"
-
-    def load_model(self, plugin: ModelPlugin, loss: LossCollator) -> None:
-        """Load the model plugin.
-
-        Set the given configured Faceswap model plugin to :attr:`model`
-
-        Parameters
-        ----------
-        plugin
-            The Faceswap model plugin to train
-        loss
-            The configured loss functions
-
-        Note: this must be done after lib.training.state.State has been loaded, so that config
-        values are correctly set prior to creating the model structure
-        """
-        logger.debug("[%s] Loading model: %s, loss: %s", self.__class__.__name__, plugin, loss)
-        if hasattr(self, "model"):
-            raise RuntimeError("Model has already been initialized!")
-        self.model = plugin
-        self.loss_func = loss
 
     @abc.abstractmethod
     def get_sampler(self) -> type[torch.utils.data.RandomSampler |
