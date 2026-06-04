@@ -104,26 +104,7 @@ class UpscaleSubpixel(nn.Module):
         -------
         The output tensor from the Upscale Subpixel Layer
         """
-        x = self.leaky(self.conv(inputs))
-        # TODO replace this with legacy weights import as for keras version only
-        # return x
-        # print(x.shape)
-        # B, Cr2, H, W = x.shape
-        # r = 2
-        # C = Cr2 // (r * r)
-        # perm = [0, 2, 1, 3]
-
-        # x = x.reshape(B, C, r * r, H, W)
-        # print(x.shape)
-        # x = x[:, :, perm, :, :]
-        # x = x.reshape(B, Cr2, H, W)
-
-        # x = x.permute(0, 2, 1, 3).reshape(x.shape)
-        # print(x.shape)
-        # print(x.permute(0, 2, 3, 1).shape)
-
-        return self.pixel_shuffle(x)
-        # return self.pixel_shuffle(self.leaky(self.conv(inputs)))
+        return self.pixel_shuffle(self.leaky(self.conv(inputs)))
 
 
 __all__ = get_module_objects(__name__)

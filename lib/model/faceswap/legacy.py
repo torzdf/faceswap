@@ -127,7 +127,7 @@ class KerasToTorch:
         The fullpath to the keras model file
     """
     def __init__(self, torch_model: FaceswapModel, keras_file: str) -> None:
-        logger.info(parse_class_init(locals()))
+        logger.debug(parse_class_init(locals()))
         self._keras = KerasModel(keras_file)
         self._torch = torch_model
 
@@ -186,6 +186,73 @@ class KerasToTorch:
             retval[name] = retval.get(name, {}) | {w_type: weight}
         return retval
 
+    @classmethod
+    def _dense_reorder(cls,
+                       weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
+        """Shuffle the order that weights are stored for either the in-channels or out-channels for
+        Dense operations from channels last to channels first in place.
+        
+        This handles the bottleneck for most existing Faceswap models fairly effectively
+
+        Parameters
+        ----------
+        weights
+            The weights and bias for a Dense layer being imported from Keras
+        """
+        in_, out = weights["weight"].shape
+        if in_ < out:  # Space to depth on input channel
+            d2s = False
+            dim = int((out // in_) ** 0.5)
+            shape = (in_, dim, dim, in_)  # ch_last
+            trans = (0, 3, 1, 2)  # ch_first
+        else:  # Depth to space on output channel
+            d2s = True
+            dim = int((in_ // out) ** 0.5)
+            shape = (dim, dim, out, out)  # ch_last
+            trans = (2, 0, 1, 3)  # ch_first
+
+        logger.info("[KerasToTorch] Converting Dense weights for '%s'. Dense shape: %s, "
+                    "Reshape: %s, Transpose: %s",
+                    "Depth to Space" if d2s else "Space to Depth",
+                    weights["weight"].shape,
+                    shape,
+                    trans)
+
+        weights["weight"] = weights["weight"].reshape(shape).transpose(trans).reshape(in_, out)
+        if d2s and weights.get("bias") is not None:
+            logger.info("[KerasToTorch] Converting Dense bias for output. Bias shape: %s, "
+                        "Reshape: %s, Transpose: %s", weights["bias"].shape, shape[:-1], trans[:-1])
+            weights["bias"] = weights["bias"].reshape(
+                shape[:-1]).transpose(trans[:-1]).reshape(in_)
+
+    @classmethod
+    def _pixel_shuffle_reorder(cls,
+                       weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
+        """Shuffle the order that weights are stored to channels first prior to feeding the pixel
+        shuffler
+
+        Parameters
+        ----------
+        weights
+            The weights and bias for a conv layer being imported from Keras
+        """
+        scale = 2
+        out_channels = weights["weight"].shape[1] // scale
+        trans = []
+        for k_prime in range(scale * scale * out_channels):
+            c = k_prime // (scale * scale)
+            dh = (k_prime % (scale * scale)) // scale
+            dw = k_prime % scale
+            k  = dh * scale * out_channels + dw * out_channels + c
+            trans.append(k)
+        logger.info("[KerasToTorch] Permuting pixel-shuffler input weights of shape %s with index "
+                    "of length %s", weights["weight"].shape, len(trans))
+        weights["weight"] = weights["weight"][trans]
+        if weights.get("bias") is not None:
+            logger.info("[KerasToTorch] Permuting pixel-shuffler input bias of shape %s with index "
+                        "of length %s", weights["bias"].shape, len(trans))
+            weights["bias"] = weights["bias"][trans]
+
     def _map_weights(self,
                      torch_weights: dict[str, torch.Tensor],
                      keras_weights: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
@@ -216,19 +283,13 @@ class KerasToTorch:
             key = next(k for k, v in keras_grouped.items()
                        if v["weight"].shape == weights["weight"].shape)
             val = keras_grouped.pop(key)
-            if lbl == "encoder.dense1":
-                # TODO need way of getting dense layers from flattened rather than hard coding
-                # This will probably need to come from model_info once tracing properly implemented
-                # H * W * C -> H, W, C -> C, H, W -> C * H * W
-                val["weight"] = val["weight"].reshape(1024, 4, 4, 1024).transpose(0, 3, 1, 2).reshape(1024, 16384)
+            if "dense" in lbl and val["weight"].ndim == 2:
+                self._dense_reorder(val) 
+            if "upscale" in lbl and lbl.endswith(".conv") and val["weight"].ndim == 4:  # TODO more robust capture?
+                self._pixel_shuffle_reorder(val)
 
-            if lbl == "encoder.dense2":
-                # TODO need way of getting dense layers rather than hard coding
-                # H * W * C -> H, W, C -> C, H, W -> C * H * W
-                val["weight"] = val["weight"].reshape(4, 4, 1024, 1024).transpose(2, 0, 1, 3).reshape(16384, 1024)
-                val["bias"] = val["bias"].reshape(4, 4, 1024).transpose(2, 0, 1).reshape(16384)
 
-            logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
+            logger.info("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
                          key, lbl, val["weight"].shape)
             for w in ("weight", "bias"):
                 retval[f"{lbl}.{w}"] = torch.from_numpy(val[w])
