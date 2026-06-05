@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import typing as T
-from shutil import copyfile
+from shutil import copyfile, copytree, rmtree
 
 import torch
 
@@ -32,6 +32,7 @@ class ModelIO:
     def __init__(self, model_name: str, model_dir: str) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"[{self.__class__.__name__}.{model_name}]"
+        self._model_name = model_name
         self._model_dir = model_dir
 
         self._checkpoint_path = os.path.join(model_dir, f"{model_name}.ckpt")
@@ -42,7 +43,7 @@ class ModelIO:
     def __repr__(self) -> str:
         """Pretty print for logging"""
         return (f"{self.__class__.__name__}("
-                f"model_name={repr(self._name.rsplit('.', maxsplit=1)[-1])}, "
+                f"model_name={self._model_name}, "
                 f"model_dir={repr(self._model_dir)})")
 
     @property
@@ -156,6 +157,41 @@ class ModelIO:
         logger.verbose("Backing up: '%s' to '%s'",  # type:ignore[attr-defined]
                        model_file, backup_file)
         copyfile(model_file, backup_file)
+
+    def snapshot(self,
+                 iterations: int,
+                 state_dict: dict[T.Literal["model", "state", "version", "optimizer"],
+                                  float | dict[str, T.Any]]) -> None:
+        """Create a full .ckpt snapshot for the given iterations.
+
+        Copies the current tensorboard logs folder to a new snapshot location and saves a full
+        ckpt into that folder
+
+        Parameters
+        ----------
+        iterations
+            The number of iterations that this snapshot is being taken at
+        state_dict
+            The full FaceswapModel checkpoint state_dict
+        """
+        logger.info("[Snapshot] Creating model snapshot...")
+        src = self._model_dir
+        dst = f"{src}_snapshot_{iterations}_iters"
+        if os.path.isdir(dst):
+            logger.debug("[ModelIO] Removing previously existing snapshot folder: '%s'", dst)
+            rmtree(dst)
+        os.makedirs(dst)
+
+        logs = f"{self._model_name}_logs"
+        if os.path.exists(os.path.join(src, logs)):
+            logger.debug("[ModelIO] Copying logs for snapshot: '%s'", os.path.join(dst, logs))
+            copytree(os.path.join(src, logs), os.path.join(dst, logs))
+
+        fname = os.path.join(dst, os.path.basename(self._checkpoint_path))
+        logger.debug("[ModelIO] Saving snapshot: '%s'", fname)
+        torch.save(state_dict, fname)
+
+        logger.info("[Snapshot] %s iterations. Saved", iterations)
 
 
 __all__ = get_module_objects(__name__)

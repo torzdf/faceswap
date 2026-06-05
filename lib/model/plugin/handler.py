@@ -40,8 +40,11 @@ class FaceswapModel:
         The name of the Faceswap model plugin to load
     num_identities
         The number of identities that the model is to be created for
+    batch_size
+        The batch size that the model is to be trained at, if opening for a training session,
+        otherwise ``None``. Default: ``None``
     """
-    def __init__(self, name: str, num_identities) -> None:
+    def __init__(self, name: str, num_identities, batch_size: int | None = None) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"[{self.__class__.__name__}.{name}]"
 
@@ -50,7 +53,7 @@ class FaceswapModel:
         self._num_identities = num_identities
 
         self._plugin = PluginLoader.get_model(name)(num_identities)
-        self.state = State(self._plugin.__class__.__module__)
+        self.state = State(self._plugin.__class__.__module__, batch_size=batch_size)
 
     def state_dict(self) -> dict[T.Literal["model", "state", "version"], float | dict[str, T.Any]]:
         """Get the Faceswap model's state_dict"""
@@ -247,22 +250,33 @@ class TrainHandler:
         The name of the Faceswap model plugin to load
     num_identities
         The number of identities that the model is to be created for
+    batch_size
+        The batch size that the model is to be trained at
     model_folder
         Full path to load/save model weights
+    snapshot_interval
+        The number of steps between full model checkpoint snapshots
     """
     def __init__(self,
                  name: str,
                  num_identities: int,
-                 model_folder: str) -> None:
+                 batch_size: int,
+                 model_folder: str,
+                 snapshot_interval) -> None:
         logger.debug(parse_class_init(locals()))
 
         self.name = name
         """The name of the model plugin"""
-        self._model = FaceswapModel(name, num_identities)
+        self._batch_size = batch_size
+        self._snapshot_interval = snapshot_interval
+
+        self._model = FaceswapModel(name, num_identities, batch_size=batch_size)
         self._io = ModelIO(self._model.name, model_folder)
+
         state_dict = self._io.load(model=self._model)
         self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
         self._optimizer_state = state_dict.get("optimizer")
+
         self._optimizer: Optimizer
         self._loss: LossCollator
 
@@ -301,8 +315,7 @@ class TrainHandler:
     def configure_model(self,
                         trainer_name: str,
                         train_config: TrainConfigure,
-                        warmup_steps: int,
-                        batch_size: int) -> TrainerBase:
+                        warmup_steps: int) -> TrainerBase:
         """Configure the model for training, applying any initialization and other post-build
         routines. Obtain the loss function and optimizer and return the training plugin
 
@@ -314,8 +327,6 @@ class TrainHandler:
             The user training configuration options
         warmup_steps
             The number of steps to warmup the learning rate
-        batch_size
-            The batch size to train the model
 
         Returns
         -------
@@ -333,25 +344,28 @@ class TrainHandler:
         self._model.to(train_config.device)
         self._model.plugin.train()
         retval = PluginLoader.get_trainer(trainer_name)(self._model.plugin,
-                                                        batch_size,
+                                                        self._batch_size,
                                                         train_config.mixed_precision,
                                                         str(train_config.device))
         logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
         return retval
 
-    def step(self, batch_size: int) -> None:
-        """Update the iteration count in the state file
+    def step(self) -> None:
+        """Update the iteration count in the state file"""
+        self._model.state.step()
+        step = self._model.state.iterations
 
-        Parameters
-        ----------
-        batch_size
-            Batch size that the plugin is training at. Used for creating a new session
-        """
-        self._model.state.step(batch_size)
-        # TODO snapshot
+        if self._snapshot_interval != 0 and step % self._snapshot_interval == 0:
+            state_dict = T.cast(
+                dict[T.Literal["model", "state", "version", "optimizer"],
+                     float | dict[str, T.Any]],
+                self._model.state_dict() | {"optimizer": self._optimizer.state_dict()}
+                )
+            self._io.snapshot(step, state_dict)
 
     def save(self, average_loss: float, with_optimizer: bool) -> None:
-        """Save the model, state and optionally the optimizer
+        """Save the model, state and optionally the optimizer. Backup the last save if total
+        average loss has dropped
 
         Parameters
         ----------

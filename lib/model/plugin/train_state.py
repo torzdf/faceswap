@@ -165,11 +165,16 @@ class State:
     ----------
     plugin_path
         The relative import path to the model plugin's module from the faceswap root
+    batch_size
+        The batch size that the model is to be trained at, if opening for a training session,
+        otherwise ``None``. Default: ``None``
     """
-    def __init__(self, plugin_path: str) -> None:
+    def __init__(self, plugin_path: str, batch_size: int | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        self._repr = (f"{self.__class__.__name__}(plugin_path={repr(plugin_path)})")
+        self._repr = (f"{self.__class__.__name__}(plugin_path={repr(plugin_path)}, "
+                      f"batch_size={batch_size}")
 
+        self._batch_size = batch_size
         self._lr_finder = -1.0
         self._sessions: dict[int, Session] = {}
         self.lowest_avg_loss: float = 0.0
@@ -226,18 +231,12 @@ class State:
                              if v.iterations > 0},
                 "config": self._config.state_dict()}
 
-    def step(self, batch_size: int) -> None:
-        """Increment the session and total steps
-
-
-        Parameters
-        ----------
-        batch_size
-            The batch size that the model is training at
-
-        """
+    def step(self) -> None:
+        """Increment the session and total steps"""
         if not self._step_called:
-            self._sessions[self.session_id + 1] = Session(batch_size, self._config.session_config)
+            assert self._batch_size is not None, "batch_size must be provided when training"
+            self._sessions[self.session_id + 1] = Session(self._batch_size,
+                                                          self._config.session_config)
             self._step_called = True
 
         self._total_steps += 1

@@ -289,7 +289,9 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         self._train_config = train_config
         self._model_handler = TrainHandler(model_name,
                                            len(train_config.folders),
-                                           train_config.model_folder)
+                                           train_config.batch_size,
+                                           train_config.model_folder,
+                                           train_config.snapshot_interval)
         self._model_info = Info(self._model_handler.model)
         self._model_info.summary(logger.info if summary
                                  else logger.verbose)  # type:ignore[attr-defined]
@@ -297,9 +299,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
             return
 
         self._device = get_device()
-        self._trainer = self._configure_model(trainer_name,
-                                              train_config.warmup_steps,
-                                              train_config.batch_size)
+        self._trainer = self._configure_model(trainer_name, train_config.warmup_steps)
         self._train_loader = self._get_train_loader()
 
         self._exit_early = self._handle_lr_finder()
@@ -325,10 +325,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         """``True`` if the trainer should exit early, without performing any training steps"""
         return self._exit_early
 
-    def _configure_model(self,
-                         trainer_name: str,
-                         warmup_steps: int,
-                         batch_size: int) -> TrainerBase:
+    def _configure_model(self, trainer_name: str, warmup_steps: int) -> TrainerBase:
         """Add the model and the loss functions to the training plug in and move to the correct
         device
 
@@ -336,6 +333,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         ----------
         trainer_name
             The name of the trainer plugin to load
+        warmup_steps
+            The number of steps to warmup learning rate for
 
         Returns
         -------
@@ -353,8 +352,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
             logger.info("Enabled Auto Mixed Precision")
         retval = self._model_handler.configure_model(trainer_name=trainer_name,
                                                      train_config=train_config,
-                                                     warmup_steps=warmup_steps,
-                                                     batch_size=batch_size)
+                                                     warmup_steps=warmup_steps)
         logger.debug("[Trainer] Configured model and trainer: %s", retval)
         return retval
 
@@ -460,9 +458,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         iteration = self._model_handler.total_iterations + 1
         logger.trace("[Trainer] Training one step: (iteration: %s)",  # type:ignore[attr-defined]
                      iteration)
-        do_snapshot = (self._train_config.snapshot_interval != 0 and
-                       iteration - 1 >= self._train_config.snapshot_interval and
-                       (iteration - 1) % self._train_config.snapshot_interval == 0)
 
         inputs, targets, meta = next(self._train_loader)
         loss = self._trainer.step([i.to(self._device) for i in inputs],
@@ -471,11 +466,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                   self._model_handler.loss,
                                   self._model_handler.optimizer)
         self._loss_handler.step(loss, iteration)
-        self._model_handler.step(self._trainer.batch_size)
-
-        if do_snapshot:
-            pass  # TODO
-            # self._model.io.snapshot()
+        self._model_handler.step()
         if viewer is not None:
             self._tester(viewer, do_timelapse)
 
