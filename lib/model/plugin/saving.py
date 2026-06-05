@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import typing as T
+from shutil import copyfile
 
 import torch
 
@@ -110,14 +111,18 @@ class ModelIO:
         return state_dict
 
     def save(self, model_state: dict[T.Literal["model", "state", "version", "optimizer"],
-                                     float | dict[str, T.Any]]) -> None:
+                                     float | dict[str, T.Any]]) -> bool:
         """Save the state_dicts to disk
 
         Parameters
         ----------
         model_state
             The FaceswapModel state_dict
-            Default: ``None``
+
+        Returns
+        -------
+        ``True`` if a .ckpt was saved with optimizer, ``False`` if a .pth was saved with just
+        weights
         """
         is_checkpoint = bool(model_state.get("optimizer"))
         fname = self._checkpoint_path if is_checkpoint else self._weights_path
@@ -135,13 +140,22 @@ class ModelIO:
             json.dump(model_state["state"], o_file, indent=2)
 
         torch.save(model_state, fname)
+        return is_checkpoint
 
-        msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"  # TODO
-#        if save_average:
-#            msg += f" - Average total loss since last save: {save_average:.5f}"
-#        if backed_up:
-#            msg += " [Model backed up]"
-        logger.info(msg)
+    def backup(self) -> None:
+        """Backup the latest model save file
+
+        The backed up file is saved with the original filename in the original location with `.bk`
+        appended to the end of the name."""
+        model_file = self._get_latest_save()
+        assert model_file is not None
+        backup_file = model_file + ".bk"
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+
+        logger.verbose("Backing up: '%s' to '%s'",  # type:ignore[attr-defined]
+                       model_file, backup_file)
+        copyfile(model_file, backup_file)
 
 
 __all__ = get_module_objects(__name__)

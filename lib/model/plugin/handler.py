@@ -231,7 +231,6 @@ class TrainConfigure:
         The configured, collated loss functions for training the model, on the training device
         """
         self._apply_initializers(model)
-        # TODO loss y_true/pred switch
         # TODO reflect padding
         # TODO MSG
         loss = self._configure_loss(model.is_rgb)
@@ -345,24 +344,44 @@ class TrainHandler:
 
         Parameters
         ----------
-        batch size that the plugin is training at. Used for creating a new session
+        batch_size
+            Batch size that the plugin is training at. Used for creating a new session
         """
         self._model.state.step(batch_size)
-        # TODO snapshot + backup here
+        # TODO snapshot
 
-    def save(self, with_optimizer: bool) -> None:
+    def save(self, average_loss: float, with_optimizer: bool) -> None:
         """Save the model, state and optionally the optimizer
 
         Parameters
         ----------
+        average_loss
+            The average loss since the last save iteration
         with_optimizer
             ``True`` to include the optimizer weights in the save file
         """
+        logger.debug("[TrainHandler] Saving. average_loss: %s, with_optimizer: %s",
+                     average_loss, with_optimizer)
         state_dict = T.cast(dict[T.Literal["model", "state", "version", "optimizer"],
                                  float | dict[str, T.Any]], self._model.state_dict())
         if with_optimizer:
             state_dict |= {"optimizer": self._optimizer.state_dict()}
-        self._io.save(state_dict)
+
+        if self._model.state.lowest_avg_loss <= 0.0:
+            self._model.state.lowest_avg_loss = average_loss
+
+        do_backup = average_loss < self._model.state.lowest_avg_loss
+        if do_backup:
+            self._io.backup()
+            self._model.state.lowest_avg_loss = average_loss
+
+        is_checkpoint = self._io.save(state_dict)
+
+        msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"
+        msg += f" - Average loss since save: {average_loss:.5f}"
+        if do_backup:
+            msg += " [Model backed up]"
+        logger.info(msg)
 
 
 __all__ = get_module_objects(__name__)

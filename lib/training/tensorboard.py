@@ -9,6 +9,7 @@ import struct
 import typing as T
 
 import keras
+from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
 from lib.logger import parse_class_init
@@ -198,9 +199,10 @@ class TorchTensorBoard(keras.callbacks.Callback):
         self._global_train_batch = 0
         self._previous_epoch_iterations = 0
 
-    def on_train_batch_end(self,
-                           batch: int,
-                           logs: dict[str, float | dict[str, float]] | None = None) -> None:
+    def on_train_batch_end(
+            self,
+            batch: int,
+            logs: dict[str, Tensor | dict[str, Tensor]] | None = None) -> None:
         """Update Tensorboard logs on batch end
 
         Parameters
@@ -217,7 +219,7 @@ class TorchTensorBoard(keras.callbacks.Callback):
 
         for key, value in logs.items():
             tag = f"batch_{key}"
-            if isinstance(value, float):
+            if isinstance(value, Tensor):
                 self._train_writer.add_scalar(tag, value, global_step=batch)
             elif isinstance(value, dict):
                 for k, v in value.items():

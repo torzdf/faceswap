@@ -71,7 +71,6 @@ class Trainer(TrainerBase):
             The configured Optimizer to use
         """
         optimizer.backward(loss)
-        optimizer.step()
 
 
 __all__ = get_module_objects(__name__)

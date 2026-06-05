@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from contextlib import nullcontext
 
 import torch
+from torch.cuda import OutOfMemoryError
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects
+from lib.utils import FaceswapError, get_module_objects
 
 
 if T.TYPE_CHECKING:
@@ -110,6 +111,7 @@ class TrainerBase(abc.ABC):
         """The data sampler that the data loader should use"""
         self._forward_context = (torch.autocast(device_type=device_type, dtype=torch.float16)
                                  if mixed_precision else nullcontext())
+        self._name = f"[{self.__class__.__name__}]"
 
     @abc.abstractmethod
     def get_sampler(self) -> type[torch.utils.data.RandomSampler |
@@ -154,12 +156,12 @@ class TrainerBase(abc.ABC):
             The configured loss functions to use
         """
 
-    def __call__(self,
-                 inputs: list[torch.Tensor],
-                 targets: list[torch.Tensor],
-                 meta: BatchMeta,
-                 loss_func: LossCollator,
-                 optimizer: Optimizer) -> list[BatchLoss]:
+    def step(self,
+             inputs: list[torch.Tensor],
+             targets: list[torch.Tensor],
+             meta: BatchMeta,
+             loss_func: LossCollator,
+             optimizer: Optimizer) -> list[BatchLoss]:
         """Runs the plugin's forward and backwards passed through the model for a single batch
 
         Parameters
@@ -178,13 +180,38 @@ class TrainerBase(abc.ABC):
 
         Returns
         -------
-        The loss for each input to the model in order (A, B, ...)
+        The loss for each input to the model in order (A, B, ...) on the training device
         """
-        with self._forward_context:
-            loss = self.forward(inputs, targets, meta, loss_func)
-        logger.trace("[%s] Losses: %s", self.__class__.__name__, loss)  # type:ignore[attr-defined]
-        total_loss = T.cast(torch.Tensor, sum(x.total for x in loss))
-        self.backward(total_loss, optimizer)
+        try:
+            logger.trace(  # type:ignore[attr-defined]
+                "%s Forward step. inputs: %s, targets: %s, meta: %s, loss_func: %s",
+                self._name, [x.shape for x in inputs],
+                [t.shape for t in targets],
+                meta,
+                loss_func
+                )
+            with self._forward_context:
+                loss = self.forward(inputs, targets, meta, loss_func)
+
+            total_loss = T.cast(torch.Tensor, sum(x.total for x in loss))
+            logger.trace("%s Backward step. loss: %s, optimizer: %s",  # type:ignore[attr-defined]
+                         self._name, total_loss, optimizer)
+
+            self.backward(total_loss, optimizer)
+            logger.trace("%s Step complete. loss: %s",  # type:ignore[attr-defined]
+                         self._name, loss)
+        except OutOfMemoryError as err:
+            msg = ("You do not have enough GPU memory available to train the selected model at "
+                   "the selected settings. You can try a number of things:"
+                   "\n1) Close any other application that is using your GPU (web browsers are "
+                   "particularly bad for this)."
+                   "\n2) Lower the batchsize (the amount of images fed into the model each "
+                   "iteration)."
+                   "\n3) Try enabling 'Mixed Precision' training."
+                   "\n4) Use a more lightweight model, or select the model's 'LowMem' option "
+                   "(in config) if it has one.")
+            raise FaceswapError(msg) from err
+        optimizer.step()
         return loss
 
 

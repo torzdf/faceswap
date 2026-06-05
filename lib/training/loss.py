@@ -45,6 +45,32 @@ class BatchLoss:
             self._total = total
         return self._total
 
+    def get_contributions(self) -> dict[T.Literal["unweighted", "weighted"],
+                                        dict[str, torch.Tensor]]:
+        """Obtain the contributions of each loss function to the total loss score for both weighted
+        both weighted and unweighted scores
+
+        Returns
+        -------
+        weighted and unweighted total contributions to the final loss cost
+        """
+        unweighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.unweighted)).detach()
+                      for k in self.unweighted[0]}
+        weighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.weighted)).detach()
+                    for k in self.weighted[0]}
+        if "identity" in list(self.unweighted)[-1]:
+            unweighted["identity"] = self.unweighted[-1]["identity"].mean().detach()
+            weighted["identity"] = self.weighted[-1]["identity"].mean().detach()
+        return {"unweighted": unweighted, "weighted": weighted}
+
+    def detach(self) -> T.Self:
+        """Detaches all contained loss values"""
+        self._total = None if self._total is None else self._total.detach()
+        self.unweighted = [{k: v.detach() for k, v in x.items()} for x in self.unweighted]
+        self.weighted = [{k: v.detach() for k, v in x.items()} for x in self.weighted]
+        self.mask = None if self.mask is None else self.mask.detach()
+        return self
+
     def to_cpu(self) -> T.Self:
         """Detaches all contained loss values and moves them to CPU
 
