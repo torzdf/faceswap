@@ -17,7 +17,6 @@ from plugins.train import train_config as cfg
 
 from .inference import Inference
 from .io import IO, get_all_sub_models, Weights
-from .settings import Settings
 from .state import State
 
 if T.TYPE_CHECKING:
@@ -81,9 +80,6 @@ class ModelBase():  # pylint:disable=too-many-instance-attributes
         self._state = State(model_dir,
                             self.name,
                             False if self._is_predict else self._args.no_logs)
-        self._settings = Settings(self._args,
-                                  self._mixed_precision,
-                                  self._is_predict)
         logger.debug("Initialized ModelBase (%s)", self.__class__.__name__)
 
     @property
@@ -210,14 +206,7 @@ class ModelBase():  # pylint:disable=too-many-instance-attributes
         else:
             self._validate_input_shape()
             inputs = self._get_inputs()
-            if not self._settings.use_mixed_precision and not is_summary:
-                # Store layer names which can be switched to mixed precision
-                model, mp_layers = self._settings.get_mixed_precision_layers(self.build_model,
-                                                                             inputs)
-                self._state.add_mixed_precision_layers(mp_layers)
-                self._model = model
-            else:
-                self._model = self.build_model(inputs)
+            self._model = self.build_model(inputs)
         if not is_summary and not self._is_predict:
             self._compile_model()
         self._output_summary()
@@ -291,9 +280,6 @@ class ModelBase():  # pylint:disable=too-many-instance-attributes
     def _compile_model(self) -> None:
         """Legacy from Keras code. Now just load and freeze weights"""
         logger.debug("Compiling Model")
-
-        if self.state.model_needs_rebuild:
-            self._model = self._settings.check_model_precision(self._model, self._state)
 
         weights = Weights(self)
         weights.load(self._io.model_exists)

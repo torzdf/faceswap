@@ -27,8 +27,6 @@ from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
 from plugins.train.trainer.base import TrainConfig
 
-from .optimizer import Optimizer
-
 if T.TYPE_CHECKING:
     import numpy.typing as npt
     from collections.abc import Callable
@@ -132,6 +130,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                       conv_aware_init=mod_cfg.conv_aware_init() and is_new,
                                       mixed_precision=mod_cfg.mixed_precision(),
                                       reflect_padding=mod_cfg.reflect_padding())
+        if train_config.mixed_precision:
+            logger.info("Enabled Auto Mixed Precision")
         retval = self._model_handler.configure_model(trainer_name=trainer_name,
                                                      train_config=train_config,
                                                      warmup_steps=warmup_steps,
@@ -242,10 +242,11 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         """
         try:
             inputs, targets, meta = next(self._train_loader)
-            loss = self._trainer.train_batch([i.to(self._device) for i in inputs],
-                                             [t.to(self._device) for t in targets],
-                                             T.cast(Optimizer, self._model_handler.optimizer),
-                                             meta.to(self._device))
+            loss = self._trainer([i.to(self._device) for i in inputs],
+                                 [t.to(self._device) for t in targets],
+                                 meta.to(self._device),
+                                 self._model_handler.loss,
+                                 self._model_handler.optimizer)
             retval = [x.to_cpu() for x in loss]
         except OutOfMemoryError as err:
             msg = ("You do not have enough GPU memory available to train the selected model at "

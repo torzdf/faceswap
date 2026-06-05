@@ -11,8 +11,13 @@ import abc
 import logging
 import typing as T
 from dataclasses import dataclass
+from contextlib import nullcontext
 
 import torch
+
+from lib.logger import parse_class_init
+from lib.utils import get_module_objects
+
 
 if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
@@ -86,16 +91,25 @@ class TrainerBase(abc.ABC):
         The configured Faceswap model plugin to be trained
     batch_size
         The batch size to train the model at
+    mixed_precision
+        ``True`` to enable mixed precision training. ``False`` for float32
+    device_type
+        The torch device type that is training the model
     """
-    def __init__(self, model: ModelPlugin, batch_size: int, loss_func: LossCollator) -> None:
+    def __init__(self,
+                 model: ModelPlugin,
+                 batch_size: int,
+                 mixed_precision: bool,
+                 device_type: str) -> None:
+        logger.debug(parse_class_init(locals()))
         self.model: ModelPlugin = model
         """The model plugin to be trained"""
         self.batch_size = batch_size
         """The batch size for each iteration to be trained through the model."""
         self.sampler = self.get_sampler()
         """The data sampler that the data loader should use"""
-        self.loss_func = loss_func
-        """The selected loss functions for the model"""
+        self._forward_context = (torch.autocast(device_type=device_type, dtype=torch.float16)
+                                 if mixed_precision else nullcontext())
 
     @abc.abstractmethod
     def get_sampler(self) -> type[torch.utils.data.RandomSampler |
@@ -108,12 +122,24 @@ class TrainerBase(abc.ABC):
         """
 
     @abc.abstractmethod
-    def train_batch(self,
-                    inputs: list[torch.Tensor],
-                    targets: list[torch.Tensor],
-                    optimizer: Optimizer,
-                    meta: BatchMeta) -> list[BatchLoss]:
-        """Override to run a single forward and backwards pass through the model for a single batch
+    def backward(self, loss: torch.Tensor, optimizer: Optimizer) -> None:
+        """Override to run a single backward pass through the model for a single batch
+
+        Parameters
+        ----------
+        loss
+            The loss scalar to use for backprop
+        optimizer
+            The configured optimizer to use for backprop
+        """
+
+    @abc.abstractmethod
+    def forward(self,
+                inputs: list[torch.Tensor],
+                targets: list[torch.Tensor],
+                meta: BatchMeta,
+                loss_func: LossCollator) -> list[BatchLoss]:
+        """Override to run a single forward pass through the model for a single batch
 
         Parameters
         ----------
@@ -122,12 +148,44 @@ class TrainerBase(abc.ABC):
         targets
             List of len (num_outputs) of target images in shape (batch_size, num_inputs, height,
             width, 3) at all model output sizes as float32 0.0 - 1.0 range
-        optimizer
-            The configured Optimizer to use
         meta
             The meta information for the batch
+        loss_func
+            The configured loss functions to use
+        """
+
+    def __call__(self,
+                 inputs: list[torch.Tensor],
+                 targets: list[torch.Tensor],
+                 meta: BatchMeta,
+                 loss_func: LossCollator,
+                 optimizer: Optimizer) -> list[BatchLoss]:
+        """Runs the plugin's forward and backwards passed through the model for a single batch
+
+        Parameters
+        ----------
+        inputs
+            The batch of input image tensors to the model of length(num inputs)
+        targets
+            List of len (num_outputs) of target images in shape (batch_size, num_inputs, height,
+            width, 3) at all model output sizes as float32 0.0 - 1.0 range
+        meta
+            The meta information for the batch
+        loss_func
+            The selected loss functions for the model
+        optimizer
+            The configured Optimizer to use
 
         Returns
         -------
         The loss for each input to the model in order (A, B, ...)
         """
+        with self._forward_context:
+            loss = self.forward(inputs, targets, meta, loss_func)
+        logger.trace("[%s] Losses: %s", self.__class__.__name__, loss)  # type:ignore[attr-defined]
+        total_loss = T.cast(torch.Tensor, sum(x.total for x in loss))
+        self.backward(total_loss, optimizer)
+        return loss
+
+
+__all__ = get_module_objects(__name__)

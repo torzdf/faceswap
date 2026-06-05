@@ -215,7 +215,7 @@ class TrainConfigure:
             mask_loss=(None if not self._loss_cfg.learn_mask()
                        else self._loss_cfg.mask_loss_function()))
         retval.to(self.device)
-        logger.info("[TrainConfigure] loss: %s", retval)
+        logger.debug("[TrainConfigure] loss: %s", retval)
         return retval
 
     def configure(self, model: ModelPlugin) -> LossCollator:
@@ -233,7 +233,6 @@ class TrainConfigure:
         self._apply_initializers(model)
         # TODO loss y_true/pred switch
         # TODO reflect padding
-        # TODO Mixed Precision
         # TODO MSG
         loss = self._configure_loss(model.is_rgb)
         logger.debug("[Trainer] Configured model and loss: %s", loss)
@@ -266,6 +265,7 @@ class TrainHandler:
         self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
         self._optimizer_state = state_dict.get("optimizer")
         self._optimizer: Optimizer
+        self._loss: LossCollator
 
     @property
     def model(self) -> ModelPlugin:
@@ -291,8 +291,13 @@ class TrainHandler:
 
     @property
     def optimizer(self) -> Optimizer:
-        """The optimizer in use"""
+        """The configured optimizer in use"""
         return self._optimizer
+
+    @property
+    def loss(self) -> LossCollator:
+        """The configured loss functions in use"""
+        return self._loss
 
     def configure_model(self,
                         trainer_name: str,
@@ -317,7 +322,7 @@ class TrainHandler:
         -------
         The trainer plugin containing the configured model on the training device
         """
-        loss = train_config.configure(self.model)
+        self._loss = train_config.configure(self.model)
         self._optimizer = Optimizer(self._model.plugin,
                                     train_config.optimizer_config,
                                     train_config.mixed_precision,
@@ -328,7 +333,10 @@ class TrainHandler:
         self._optimizer.to(train_config.device)
         self._model.to(train_config.device)
         self._model.plugin.train()
-        retval = PluginLoader.get_trainer(trainer_name)(self._model.plugin, batch_size, loss)
+        retval = PluginLoader.get_trainer(trainer_name)(self._model.plugin,
+                                                        batch_size,
+                                                        train_config.mixed_precision,
+                                                        str(train_config.device))
         logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
         return retval
 

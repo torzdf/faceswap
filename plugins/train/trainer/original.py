@@ -12,7 +12,7 @@ from .base import TrainerBase
 
 if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
-    from lib.training.loss import BatchLoss
+    from lib.training.loss import BatchLoss, LossCollator
     from lib.training.optimizer import Optimizer
 
 
@@ -31,10 +31,11 @@ class Trainer(TrainerBase):
         """
         return torch.utils.data.RandomSampler
 
-    def _forward(self,
-                 inputs: list[torch.Tensor],
-                 targets: list[torch.Tensor],
-                 meta: BatchMeta) -> list[BatchLoss]:
+    def forward(self,
+                inputs: list[torch.Tensor],
+                targets: list[torch.Tensor],
+                meta: BatchMeta,
+                loss_func: LossCollator) -> list[BatchLoss]:
         """Perform the forward pass on the model
 
         Parameters
@@ -46,6 +47,8 @@ class Trainer(TrainerBase):
             width, 3) at all model output sizes as float32 0.0 - 1.0 range
         meta
             The meta information for the batch
+        loss_func
+            The configured loss function's collator
 
         Returns
         -------
@@ -53,51 +56,22 @@ class Trainer(TrainerBase):
         """
         predictions: list[list[torch.Tensor]] = self.model(inputs)
         num_sides = len(inputs)
-        losses = [self.loss_func([t[:, i] for t in targets], predictions[i], meta[i])
+        losses = [loss_func([t[:, i] for t in targets], predictions[i], meta[i])
                   for i in range(num_sides)]
-        logger.trace("Losses: %s", losses)  # type:ignore[attr-defined]
         return losses
 
-    def _backwards_and_apply(self, loss: list[BatchLoss], optimizer: Optimizer) -> None:
+    def backward(self, loss: torch.Tensor, optimizer: Optimizer) -> None:
         """Perform the backwards pass on the model
 
         Parameters
         ----------
         loss
-            The loss for each output from the model
+            The total loss scalar from the forward pass
         optimizer
             The configured Optimizer to use
         """
-        total_loss = T.cast(torch.Tensor, sum(x.total for x in loss))
-        optimizer.backward(total_loss)
+        optimizer.backward(loss)
         optimizer.step()
-
-    def train_batch(self,
-                    inputs: list[torch.Tensor],
-                    targets: list[torch.Tensor],
-                    optimizer: Optimizer,
-                    meta: BatchMeta) -> list[BatchLoss]:
-        """Run a single forward and backwards pass through the model for a single batch
-
-        Parameters
-        ----------
-        inputs
-            The batch of input image tensors to the model of length(num inputs)
-        targets
-            List of len (num_outputs) of target images in shape (batch_size, num_inputs, height,
-            width, 3) at all model output sizes as float32 0.0 - 1.0 range
-        optimizer
-            The configured Optimizer to use
-        meta
-            The meta information for the batch
-
-        Returns
-        -------
-        The loss for each input to the model in order (A, B, ...)
-        """
-        loss = self._forward(inputs, targets, meta)
-        self._backwards_and_apply(loss, optimizer)
-        return loss
 
 
 __all__ = get_module_objects(__name__)
