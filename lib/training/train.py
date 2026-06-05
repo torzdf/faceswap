@@ -24,11 +24,9 @@ from lib.training.tensorboard import TorchTensorBoard
 from lib.utils import get_module_objects, FaceswapError
 from plugins.train import train_config as mod_cfg
 
-from plugins.plugin_loader import PluginLoader
 from plugins.train.trainer import trainer_config as trn_cfg
 from plugins.train.trainer.base import TrainConfig
 
-from .loss import LossCollator
 from .optimizer import Optimizer
 
 if T.TYPE_CHECKING:
@@ -86,19 +84,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         if summary:
             return
 
-        is_new = not self._model_handler.model_exists
-        self._trainer = self._model_handler.configure_model(
-            TrainConfigure(self._model_info,
-                           loss_config=mod_cfg.Loss,
-                           optimizer_config=mod_cfg.Optimizer,
-                           icnr_init=mod_cfg.icnr_init() and is_new,
-                           conv_aware_init=mod_cfg.conv_aware_init() and is_new,
-                           mixed_precision=mod_cfg.mixed_precision(),
-                           reflect_padding=mod_cfg.reflect_padding()),
-            warmup_steps=train_config.warmup_steps)
-
         self._device = get_device()
-        self._trainer = self._configure_model(trainer_name)
+        self._trainer = self._configure_model(trainer_name,
+                                              train_config.warmup_steps,
+                                              train_config.batch_size)
         self._train_loader = self._get_train_loader()
 
         self._exit_early = self._handle_lr_finder()
@@ -119,7 +108,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         """``True`` if the trainer should exit early, without performing any training steps"""
         return self._exit_early
 
-    def _configure_model(self, trainer_name: str) -> TrainerBase:
+    def _configure_model(self,
+                         trainer_name: str,
+                         warmup_steps: int,
+                         batch_size: int) -> TrainerBase:
         """Add the model and the loss functions to the training plug in and move to the correct
         device
 
@@ -132,32 +124,18 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         -------
         The Faceswap trainer plugin with the Faceswap model loaded
         """
-        loss = LossCollator(
-            functions=[mod_cfg.Loss.loss_function(),
-                       mod_cfg.Loss.loss_function_2(),
-                       mod_cfg.Loss.loss_function_3(),
-                       mod_cfg.Loss.loss_function_4()],
-            weights=[1.0,
-                     mod_cfg.Loss.loss_weight_2() / 100.,
-                     mod_cfg.Loss.loss_weight_3() / 100.,
-                     mod_cfg.Loss.loss_weight_4() / 100.],
-            color_order="rgb" if self._model_handler.model.is_rgb else "bgr",
-            use_mask=mod_cfg.Loss.penalized_mask_loss(),
-            eye_multiplier=mod_cfg.Loss.eye_multiplier(),
-            mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
-            smallest_output=min(x[1] for x in self._model_info.output_shapes[0]
-                                if x[0] != 1),
-            mask_loss=(None if not mod_cfg.Loss.learn_mask()
-                       else mod_cfg.Loss.mask_loss_function()))
-
-        self._model_handler.configure_model(self._device,
-                                            mod_cfg.Optimizer,
-                                            mod_cfg.mixed_precision(),
-                                            self._train_config.warmup_steps)
-        loss.to(self._device)
-        retval = PluginLoader.get_trainer(trainer_name)(self._model_handler.model,
-                                                        self._train_config.batch_size,
-                                                        loss)
+        is_new = not self._model_handler.model_exists
+        train_config = TrainConfigure(self._model_info,
+                                      loss_config=mod_cfg.Loss,
+                                      optimizer_config=mod_cfg.Optimizer,
+                                      icnr_init=mod_cfg.icnr_init() and is_new,
+                                      conv_aware_init=mod_cfg.conv_aware_init() and is_new,
+                                      mixed_precision=mod_cfg.mixed_precision(),
+                                      reflect_padding=mod_cfg.reflect_padding())
+        retval = self._model_handler.configure_model(trainer_name=trainer_name,
+                                                     train_config=train_config,
+                                                     warmup_steps=warmup_steps,
+                                                     batch_size=batch_size)
         logger.debug("[Trainer] Configured model and trainer: %s", retval)
         return retval
 

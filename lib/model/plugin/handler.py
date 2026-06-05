@@ -10,6 +10,8 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.initializers import icnr, ConvolutionAware
+from lib.torch_utils import get_device
+from lib.training.loss import LossCollator
 from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
@@ -21,6 +23,7 @@ from .train_state import State
 
 if T.TYPE_CHECKING:
     from plugins.train.model.base import ModelPlugin
+    from plugins.train.trainer.base import TrainerBase
     from plugins.train.train_config import Loss as loss_cfg, Optimizer as opt_cfg
     from .model_info import Layer
 
@@ -136,6 +139,8 @@ class TrainConfigure:
         self._loss_cfg: type[loss_cfg] = loss_config
         self.optimizer_config: type[opt_cfg] = optimizer_config
         """The configuration options for the optimizer"""
+        self.device = get_device()
+        """The device that is training the model"""
 
         self._init = {"icnr": icnr_init, "conv_aware": conv_aware_init}
         self.mixed_precision = mixed_precision
@@ -161,7 +166,7 @@ class TrainConfigure:
         if not any(self._init.values()):
             logger.debug("[TrainConfigure] No custom initializers to apply")
             return
-
+        # TODO prevent running on ImageNet weights load
         conv_aware = ConvolutionAware()
         icnr_conv = [x.name for v in self._info.structure.values()
                      if v.type == "PixelShuffle"  # TODO all upscales?
@@ -180,15 +185,59 @@ class TrainConfigure:
                 if v.bias is not None:
                     nn.init.zeros_(v.bias)
 
-    def configure(self, model: ModelPlugin) -> None:
+    def _configure_loss(self, is_rgb: bool) -> LossCollator:
+        """Configure the loss collator with the user selected loss functions and weights and
+        copy it to the training device
+
+        Parameters
+        ----------
+        is_rgb
+            ``True`` if the model is training RGB. ``False`` for BGR
+
+        Returns
+        -------
+        The collated loss functions for training the model
+        """
+        retval = LossCollator(
+            functions=[self._loss_cfg.loss_function(),
+                       self._loss_cfg.loss_function_2(),
+                       self._loss_cfg.loss_function_3(),
+                       self._loss_cfg.loss_function_4()],
+            weights=[1.0,
+                     self._loss_cfg.loss_weight_2() / 100.,
+                     self._loss_cfg.loss_weight_3() / 100.,
+                     self._loss_cfg.loss_weight_4() / 100.],
+            color_order="rgb" if is_rgb else "bgr",
+            use_mask=self._loss_cfg.penalized_mask_loss(),
+            eye_multiplier=self._loss_cfg.eye_multiplier(),
+            mouth_multiplier=self._loss_cfg.mouth_multiplier(),
+            smallest_output=min(x[1] for x in self._info.output_shapes[0] if x[0] != 1),
+            mask_loss=(None if not self._loss_cfg.learn_mask()
+                       else self._loss_cfg.mask_loss_function()))
+        retval.to(self.device)
+        logger.info("[TrainConfigure] loss: %s", retval)
+        return retval
+
+    def configure(self, model: ModelPlugin) -> LossCollator:
         """Configure the given faceswap model with the user provided settings
 
         Parameters
         ----------
         model
             The Faceswap model to configure for training
+
+        Returns
+        -------
+        The configured, collated loss functions for training the model, on the training device
         """
         self._apply_initializers(model)
+        # TODO loss y_true/pred switch
+        # TODO reflect padding
+        # TODO Mixed Precision
+        # TODO MSG
+        loss = self._configure_loss(model.is_rgb)
+        logger.debug("[Trainer] Configured model and loss: %s", loss)
+        return loss
 
 
 class TrainHandler:
@@ -246,10 +295,29 @@ class TrainHandler:
         return self._optimizer
 
     def configure_model(self,
+                        trainer_name: str,
                         train_config: TrainConfigure,
-                        warmup_steps: int) -> None:
-        """Load optimize state and move to the correct device"""
-        train_config.configure(self.model)
+                        warmup_steps: int,
+                        batch_size: int) -> TrainerBase:
+        """Configure the model for training, applying any initialization and other post-build
+        routines. Obtain the loss function and optimizer and return the training plugin
+
+        Parameters
+        ----------
+        trainer_name
+            The name of the trainer plugin to use
+        train_config
+            The user training configuration options
+        warmup_steps
+            The number of steps to warmup the learning rate
+        batch_size
+            The batch size to train the model
+
+        Returns
+        -------
+        The trainer plugin containing the configured model on the training device
+        """
+        loss = train_config.configure(self.model)
         self._optimizer = Optimizer(self._model.plugin,
                                     train_config.optimizer_config,
                                     train_config.mixed_precision,
@@ -257,10 +325,12 @@ class TrainHandler:
         self._optimizer.load_state_dict(T.cast(dict[T.Literal["version", "optimizer", "scaler"],
                                                     float | T.Any],
                                                self._optimizer_state))
+        self._optimizer.to(train_config.device)
+        self._model.to(train_config.device)
         self._model.plugin.train()
-        self._model.to(device)
-        self._optimizer.to(device)
-        logger.debug("[Trainer] Configured model and trainer")
+        retval = PluginLoader.get_trainer(trainer_name)(self._model.plugin, batch_size, loss)
+        logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
+        return retval
 
     def step(self, batch_size: int) -> None:
         """Update the iteration count in the state file

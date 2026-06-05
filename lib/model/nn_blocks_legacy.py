@@ -10,8 +10,7 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 from plugins.train import train_config as cfg
 
-from .initializers import ICNR, ConvolutionAware
-from .layers import PixelShuffler, ReflectionPadding2D, Swish, KResizeImages
+from .layers_legacy import PixelShuffler, ReflectionPadding2D, Swish, KResizeImages
 from .normalization import InstanceNormalization
 
 if T.TYPE_CHECKING:
@@ -55,47 +54,12 @@ def reset_naming() -> None:
 
 
 #  << CONVOLUTIONS >>
-def _get_default_initializer(
-        initializer: initializers.Initializer) -> initializers.Initializer:
-    """Returns a default initializer of Convolutional Aware or HeUniform for convolutional
-    layers.
-
-    Parameters
-    ----------
-    initializer
-        The initializer that has been passed into the model. If this value is ``None`` then a
-        default initializer will be set to 'HeUniform'. If Convolutional Aware initialization
-        has been enabled, then any passed through initializer will be replaced with the
-        Convolutional Aware initializer.
-
-    Returns
-    -------
-    The kernel initializer to use for this convolutional layer. Either the original given
-    initializer, HeUniform or convolutional aware (if selected in config options)
-    """
-    if isinstance(initializer, dict) and initializer.get("class_name", "") == "ConvolutionAware":
-        logger.debug("Returning serialized initialized ConvAware initializer: %s", initializer)
-        return initializer
-
-    if cfg.conv_aware_init():
-        retval = ConvolutionAware()
-    elif initializer is None:
-        retval = initializers.HeUniform()
-    else:
-        retval = initializer
-        logger.debug("Using model supplied initializer: %s", retval)
-    logger.debug("Set default kernel_initializer: (original: %s current: %s)", initializer, retval)
-
-    return retval
-
-
 class Conv2D():  # pylint:disable=too-many-ancestors,abstract-method
     """A standard Keras Convolution 2D layer with parameters updated to be more appropriate for
     Faceswap architecture.
 
     Parameters are the same, with the same defaults, as a standard :class:`keras.layers.Conv2D`
-    except where listed below. The default initializer is updated to `HeUniform` or `convolutional
-    aware` based on user configuration settings.
+    except where listed below.
 
     Parameters
     ----------
@@ -103,26 +67,13 @@ class Conv2D():  # pylint:disable=too-many-ancestors,abstract-method
         One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
         slightly inconsistent across backends with `strides` != 1, as described
         `here <https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/>`_.
-    is_upscale
-        ``True`` if the convolution is being called from an upscale layer. This causes the instance
-        to check the user configuration options to see if ICNR initialization has been selected and
-        should be applied. This should only be passed in as ``True`` from :class:`UpscaleBlock`
-        layers. Default: ``False``
     """
-    def __init__(self, *args, padding: str = "same", is_upscale: bool = False, **kwargs) -> None:
+    def __init__(self, *args, padding: str = "same", **kwargs) -> None:
         logger.debug(parse_class_init(locals()))
         if kwargs.get("name", None) is None:
             filters = kwargs["filters"] if "filters" in kwargs else args[0]
             kwargs["name"] = _get_name(f"conv2d_{filters}")
-        initializer = _get_default_initializer(kwargs.pop("kernel_initializer", None))
-        if is_upscale and cfg.icnr_init():
-            initializer = ICNR(initializer=initializer)
-            logger.debug("Using ICNR Initializer: %s", initializer)
-        self._conv2d = layers.Conv2D(
-            *args,
-            padding=padding,
-            kernel_initializer=initializer,  # pyright:ignore[reportArgumentType]
-            **kwargs)
+        self._conv2d = layers.Conv2D(*args, padding=padding, **kwargs)
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, *args, **kwargs) -> KerasTensor:
@@ -146,8 +97,7 @@ class DepthwiseConv2D():  # noqa,pylint:disable=too-many-ancestors,abstract-meth
     appropriate for Faceswap architecture.
 
     Parameters are the same, with the same defaults, as a standard
-    :class:`keras.layers.DepthwiseConv2D` except where listed below. The default initializer is
-    updated to `HeUniform` or `convolutional aware` based on user configuration settings.
+    :class:`keras.layers.DepthwiseConv2D` except where listed below.
 
     Parameters
     ----------
@@ -155,25 +105,12 @@ class DepthwiseConv2D():  # noqa,pylint:disable=too-many-ancestors,abstract-meth
         One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
         slightly inconsistent across backends with `strides` != 1, as described
         `here <https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/>`_.
-    is_upscale
-        ``True`` if the convolution is being called from an upscale layer. This causes the instance
-        to check the user configuration options to see if ICNR initialization has been selected and
-        should be applied. This should only be passed in as ``True`` from :class:`UpscaleBlock`
-        layers. Default: ``False``
     """
-    def __init__(self, *args, padding: str = "same", is_upscale: bool = False, **kwargs) -> None:
+    def __init__(self, *args, padding: str = "same", **kwargs) -> None:
         logger.debug(parse_class_init(locals()))
         if kwargs.get("name", None) is None:
             kwargs["name"] = _get_name("dw_conv2d")
-        initializer = _get_default_initializer(kwargs.pop("depthwise_initializer", None))
-        if is_upscale and cfg.icnr_init():
-            initializer = ICNR(initializer=initializer)
-            logger.debug("Using ICNR Initializer: %s", initializer)
-        self._depthwise_conv2d = layers.DepthwiseConv2D(
-            *args,
-            padding=padding,
-            depthwise_initializer=initializer,  # pyright:ignore[reportArgumentType]
-            **kwargs)
+        self._depthwise_conv2d = layers.DepthwiseConv2D(*args, padding=padding, **kwargs)
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __call__(self, *args, **kwargs) -> KerasTensor:
@@ -201,8 +138,7 @@ class Conv2DOutput():
     architecture.
 
     Parameters are the same, with the same defaults, as a standard :class:`keras.layers.Conv2D`
-    except where listed below. The default initializer is updated to HeUniform or convolutional
-    aware based on user config settings.
+    except where listed below.
 
     Parameters
     ----------
@@ -415,7 +351,7 @@ class SeparableConv2DBlock():
                  strides: int | tuple[int, int] = 2, **kwargs) -> None:
         logger.debug(parse_class_init(locals()))
 
-        initializer = _get_default_initializer(kwargs.pop("kernel_initializer", None))
+        initializer = kwargs.pop("kernel_initializer", None)
 
         name = _get_name(f"separable_conv2d_{filters}")
         self._conv = layers.SeparableConv2D(
@@ -423,8 +359,8 @@ class SeparableConv2DBlock():
             kernel_size=kernel_size,
             strides=strides,
             padding="same",
-            depthwise_initializer=initializer,  # pyright:ignore[reportArgumentType]
-            pointwise_initializer=initializer,  # pyright:ignore[reportArgumentType]
+            depthwise_initializer=initializer,
+            pointwise_initializer=initializer,
             name=f"{name}_separable_conv2d",
             **kwargs)
         self._activation = layers.Activation("relu", name=f"{name}_relu")
@@ -859,10 +795,9 @@ class ResidualBlock():
                                               name=f"{self._name}_reflection_padding2d_1"))
 
         kwargs = {key: val for key, val in self._kwargs.items() if key != "kernel_initializer"}
-        if not cfg.conv_aware_init():
-            kwargs["kernel_initializer"] = initializers.VarianceScaling(scale=0.2,
-                                                                        mode="fan_in",
-                                                                        distribution="uniform")
+        kwargs["kernel_initializer"] = initializers.VarianceScaling(scale=0.2,
+                                                                    mode="fan_in",
+                                                                    distribution="uniform")
         retval.append(Conv2D(self._filters,  # pyright:ignore[reportArgumentType]
                              kernel_size=self._kernel_size,
                              padding=self._padding,
