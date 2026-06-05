@@ -109,15 +109,15 @@ class FocalFrequencyLoss(nn.Module):
         freq = torch.stack([freq.real, freq.imag], dim=-1)
         return freq
 
-    def _get_weight_matrix(self, freq_true: torch.Tensor, freq_pred: torch.Tensor) -> torch.Tensor:
+    def _get_weight_matrix(self, freq_pred: torch.Tensor, freq_true: torch.Tensor) -> torch.Tensor:
         """Calculate a continuous, dynamic weight matrix based on current Euclidean distance.
 
         Parameters
         ----------
-        freq_true
-            The real and imaginary DFT frequencies for the true batch of images
         freq_pred
             The real and imaginary DFT frequencies for the predicted batch of images
+        freq_true
+            The real and imaginary DFT frequencies for the true batch of images
 
         Returns
         -------
@@ -138,17 +138,17 @@ class FocalFrequencyLoss(nn.Module):
         return torch.clamp(weights, min=0.0, max=1.0)
 
     def _calculate_loss(self,
-                        freq_true: torch.Tensor,
                         freq_pred: torch.Tensor,
+                        freq_true: torch.Tensor,
                         weight_matrix: torch.Tensor) -> torch.Tensor:
         """Perform the loss calculation on the DFT spectrum applying the weights matrix.
 
         Parameters
         ----------
-        freq_true
-            The real and imaginary DFT frequencies for the true batch of images
         freq_pred
             The real and imaginary DFT frequencies for the predicted batch of images
+        freq_true
+            The real and imaginary DFT frequencies for the true batch of images
 
         Returns
         -------
@@ -161,32 +161,32 @@ class FocalFrequencyLoss(nn.Module):
         loss = weight_matrix * freq_distance  # dynamic spectrum weighting (Hadamard product)
         return torch.mean(loss, dim=(1, ) if self._spatial else (1, 2, 3, 4))
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the Focal Frequency Loss Function.
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images
         y_pred
             The predicted batch of images
+        y_true
+            The ground truth batch of images
 
         Returns
         -------
         The final loss value for each item in the batch
         """
-        patches_true = self._get_patches(y_true)
         patches_pred = self._get_patches(y_pred)
+        patches_true = self._get_patches(y_true)
 
-        freq_true = self._tensor_to_frequency_spectrum(patches_true)
         freq_pred = self._tensor_to_frequency_spectrum(patches_pred)
+        freq_true = self._tensor_to_frequency_spectrum(patches_true)
 
         if self._ave_spectrum:  # whether to use mini-batch average spectrum
-            freq_true = torch.mean(freq_true, dim=0, keepdim=True)
             freq_pred = torch.mean(freq_pred, dim=0, keepdim=True)
+            freq_true = torch.mean(freq_true, dim=0, keepdim=True)
 
-        weight_matrix = self._get_weight_matrix(freq_true, freq_pred)
-        return self._calculate_loss(freq_true, freq_pred, weight_matrix)
+        weight_matrix = self._get_weight_matrix(freq_pred, freq_true)
+        return self._calculate_loss(freq_pred, freq_true, weight_matrix)
 
 
 class GeneralizedLoss(nn.Module):
@@ -224,15 +224,15 @@ class GeneralizedLoss(nn.Module):
         self._beta = beta
         self._spatial = spatial_output
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the Generalized Loss Function
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------
@@ -352,31 +352,31 @@ class GradientLoss(nn.Module):
         xy_out2 = torch.concatenate([xy1_left, xy1_mid, xy1_right], dim=2)
         return (xy_out1 - xy_out2) * 0.25
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the gradient loss function.
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------
         The final loss value for each item in the batch
         """
         loss = 0.0
-        loss += self._tv_weight * (self.generalized_loss(self._diff_x(y_true),
-                                                         self._diff_x(y_pred)) +
-                                   self.generalized_loss(self._diff_y(y_true),
-                                                         self._diff_y(y_pred)))
-        loss += self._tv2_weight * (self.generalized_loss(self._diff_xx(y_true),
-                                                          self._diff_xx(y_pred)) +
-                                    self.generalized_loss(self._diff_yy(y_true),
-                                    self._diff_yy(y_pred)) +
-                                    self.generalized_loss(self._diff_xy(y_true),
-                                    self._diff_xy(y_pred)) * 2.)
+        loss += self._tv_weight * (self.generalized_loss(self._diff_x(y_pred),
+                                                         self._diff_x(y_true)) +
+                                   self.generalized_loss(self._diff_y(y_pred),
+                                                         self._diff_y(y_true)))
+        loss += self._tv2_weight * (self.generalized_loss(self._diff_xx(y_pred),
+                                                          self._diff_xx(y_true)) +
+                                    self.generalized_loss(self._diff_yy(y_pred),
+                                    self._diff_yy(y_true)) +
+                                    self.generalized_loss(self._diff_xy(y_pred),
+                                    self._diff_xy(y_true)) * 2.)
         loss = loss / (self._tv_weight + self._tv2_weight)
         # TODO simplify to use MSE instead
         if not self._spatial:
@@ -492,24 +492,24 @@ class LaplacianPyramidLoss(nn.Module):
         pyramid.append(current)
         return pyramid
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Calculate the Laplacian Pyramid Loss.
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------
         The final loss value for each item in the batch
         """
-        pyramid_true = self._get_laplacian_pyramid(y_true)
         pyramid_pred = self._get_laplacian_pyramid(y_pred)
+        pyramid_true = self._get_laplacian_pyramid(y_true)
 
-        losses = [F.l1_loss(o, t, reduction="none") for o, t in zip(pyramid_true, pyramid_pred)]
+        losses = [F.l1_loss(p, t, reduction="none") for p, t in zip(pyramid_pred, pyramid_true)]
         if self._spatial:
             size = y_true.shape[-2:]
             loss = torch.stack(
@@ -526,15 +526,15 @@ class LaplacianPyramidLoss(nn.Module):
 class LInfNorm(nn.Module):
     """Calculate the L-inf norm as a loss function."""
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the L-inf norm loss function.
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------
@@ -559,15 +559,15 @@ class LogCosh(nn.Module):
         super().__init__()
         self._spatial = spatial_output
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the LogCosh loss function.
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------

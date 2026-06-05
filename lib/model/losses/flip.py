@@ -131,15 +131,15 @@ class LDRFLIPLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         ch_l = image[:, 0:1]
         return torch.cat([ch_l, image[:, 1:] * (ch_l * 0.01)], dim=1)
 
-    def _hyab(self, y_true: torch.Tensor, y_pred: torch.Tensor | float) -> torch.Tensor:
+    def _hyab(self, y_pred: torch.Tensor | float, y_true: torch.Tensor) -> torch.Tensor:
         """Compute the HyAB distance between true and predicted images.
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images in standard or Hunt-adjusted L*A*B* color space
         y_pred
             The predicted batch of images in in standard or Hunt-adjusted L*A*B* color space
+        y_true
+            The ground truth batch of images in standard or Hunt-adjusted L*A*B* color space
 
         Returns
         -------
@@ -168,50 +168,50 @@ class LDRFLIPLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
                            self._pt + ((power_delta_e_hyab - pcc_max) /
                                        (self._c_max - pcc_max)) * (1.0 - self._pt))
 
-    def _color_pipeline(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def _color_pipeline(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Perform the color processing part of the FLIP loss function
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images in YCxCz color space
         y_pred
             The predicted batch of images in YCxCz color space
+        y_true
+            The ground truth batch of images in YCxCz color space
 
         Returns
         -------
         The exponentiated, maximum HyAB difference between two colors in Hunt-adjusted L*A*B* space
         """
-        filtered_true = self._spatial_filters(y_true)
         filtered_pred = self._spatial_filters(y_pred)
+        filtered_true = self._spatial_filters(y_true)
 
-        preprocessed_true = self._hunt_adjustment(self._rgb2lab(filtered_true))
         preprocessed_pred = self._hunt_adjustment(self._rgb2lab(filtered_pred))
-        delta = self._hyab(preprocessed_true, preprocessed_pred)
+        preprocessed_true = self._hunt_adjustment(self._rgb2lab(filtered_true))
+        delta = self._hyab(preprocessed_pred, preprocessed_true)
         power_delta = delta ** self._computed_distance_exponent
         return self._redistribute_errors(power_delta)
 
-    def _process_features(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def _process_features(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Perform the color processing part of the FLIP loss function
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images in YCxCz color space
         y_pred
             The predicted batch of images in YCxCz color space
+        y_true
+            The ground truth batch of images in YCxCz color space
 
         Returns
         -------
         The exponentiated features delta
         """
-        col_y_true = (y_true[:, 0:1] + 16) / 116.
         col_y_pred = (y_pred[:, 0:1] + 16) / 116.
+        col_y_true = (y_true[:, 0:1] + 16) / 116.
 
-        edges_true = self._feature_detector(col_y_true, "edge")
-        points_true = self._feature_detector(col_y_true, "point")
         edges_pred = self._feature_detector(col_y_pred, "edge")
         points_pred = self._feature_detector(col_y_pred, "point")
+        edges_true = self._feature_detector(col_y_true, "edge")
+        points_true = self._feature_detector(col_y_true, "point")
 
         delta = torch.maximum(torch.abs(torch.norm(edges_true, dim=1, keepdim=True) -
                                         torch.norm(edges_pred, dim=1, keepdim=True)),
@@ -221,31 +221,31 @@ class LDRFLIPLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
         delta = torch.clamp(delta, min=self._epsilon)
         return ((1 / np.sqrt(2)) * delta) ** self._feature_exponent
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the LDR Flip Loss Function
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images
         y_pred
             The predicted batch of images
+        y_true
+            The ground truth batch of images
 
         Returns
         -------
         The calculated Flip loss value
         """
         if self._color_order == "bgr":  # Switch models training in bgr order to rgb
-            y_true = torch.flip(y_true, dims=[1])
             y_pred = torch.flip(y_pred, dims=[1])
+            y_true = torch.flip(y_true, dims=[1])
 
-        y_true = torch.clamp(y_true, 0, 1.)
         y_pred = torch.clamp(y_pred, 0, 1.)
-        true_ycxcz = self._rgb2ycxcz(y_true)
+        y_true = torch.clamp(y_true, 0, 1.)
         pred_ycxcz = self._rgb2ycxcz(y_pred)
+        true_ycxcz = self._rgb2ycxcz(y_true)
 
-        delta_e_color = self._color_pipeline(true_ycxcz, pred_ycxcz)
-        delta_e_features = self._process_features(true_ycxcz, pred_ycxcz)
+        delta_e_color = self._color_pipeline(pred_ycxcz, true_ycxcz)
+        delta_e_features = self._process_features(pred_ycxcz, true_ycxcz)
         loss = delta_e_color ** (1 - delta_e_features)
         if not self._spatial_output:
             loss = loss.mean(dim=(1, 2, 3))

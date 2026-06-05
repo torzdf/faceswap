@@ -395,34 +395,34 @@ class LPIPSLoss(nn.Module):  # pylint:disable=too-many-instance-attributes
             return nn.Upsample(output_dims, mode="bilinear", align_corners=False)(inputs)
         return torch.mean(inputs, dim=(2, 3), keepdim=True)
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor
                 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Perform the LPIPS Loss Function.
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images
         y_pred
             The predicted batch of images
+        y_true
+            The ground truth batch of images
 
         Returns
         -------
         The final loss value for each item in the batch
         """
         if not self._is_rgb:
-            y_true = torch.flip(y_true, dims=[1])
             y_pred = torch.flip(y_pred, dims=[1])
+            y_true = torch.flip(y_true, dims=[1])
 
         if self._normalize:
-            y_true = (y_true * 2.0) - 1.0
             y_pred = (y_pred * 2.0) - 1.0
+            y_true = (y_true * 2.0) - 1.0
 
-        y_true = (y_true - self._shift) / self._scale
         y_pred = (y_pred - self._shift) / self._scale
+        y_true = (y_true - self._shift) / self._scale
 
-        net_true = self._trunk_net(y_true)
         net_pred = self._trunk_net(y_pred)
+        net_true = self._trunk_net(y_true)
 
         diffs = [(out_true - out_pred) ** 2
                  for out_true, out_pred in zip(net_true, net_pred)]

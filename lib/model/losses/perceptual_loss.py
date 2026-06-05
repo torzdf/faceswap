@@ -103,22 +103,22 @@ class GMSDLoss(nn.Module):
         # magnitude of edges -- unified x & y edges don't work well with Neural Networks
         return out
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Return the Gradient Magnitude Similarity Deviation Loss.
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------
         The final loss value for each item in the batch
         """
-        true_edge = self._map_scharr_edges(y_true, True)
         pred_edge = self._map_scharr_edges(y_pred, True)
+        true_edge = self._map_scharr_edges(y_true, True)
         epsilon = 0.0025
         upper = 2.0 * true_edge * pred_edge
         lower = torch.square(true_edge) + torch.square(pred_edge)
@@ -317,15 +317,15 @@ class SSIMLoss(_SSIM):
     https://github.com/tensorflow/tensorflow/blob/v2.16.1/tensorflow/python/ops/image_ops_impl.py
     """
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the SSIM Loss Function.
 
         Parameters
         ----------
-        y_true
-            The input batch of ground truth images
         y_pred
             The input batch of predicted images
+        y_true
+            The input batch of ground truth images
 
         Returns
         -------
@@ -479,18 +479,18 @@ class MSSIMLoss(_SSIM):
         return [F.pad(x, (0, width, 0, height), mode="replicate") for x in images]
 
     def _mssism(self,  # pylint:disable=too-many-locals
-                y_true: torch.Tensor,
-                y_pred: torch.Tensor) -> torch.Tensor:
+                y_pred: torch.Tensor,
+                y_true: torch.Tensor) -> torch.Tensor:
         """Perform the MSSISM calculation.
 
         Ported from Tensorflow implementation `image.ssim_multiscale`
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
         """
         images = [y_true, y_pred]
         shapes = [y_true.shape, y_pred.shape]
@@ -534,22 +534,22 @@ class MSSIMLoss(_SSIM):
             ms_ssim = ms_ssim.mean(dim=-1)  # Avg over color channels.
         return ms_ssim
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Call the MS-SSIM Loss Function.
 
         Parameters
         ----------
-        y_true
-            The ground truth value
         y_pred
             The predicted value
+        y_true
+            The ground truth value
 
         Returns
         -------
         The MS-SSIM Loss value
         """
         self._validate_kernel(y_true)
-        ms_ssim = self._mssism(y_true, y_pred)
+        ms_ssim = self._mssism(y_pred, y_true)
         ms_ssim_loss = 1. - ms_ssim
         return ms_ssim_loss
 

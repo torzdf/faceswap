@@ -188,18 +188,18 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         return tuple(spatial), tuple(non_spatial)
 
     def _get_spatial_loss(self,
-                          y_true: torch.Tensor,
                           y_pred: torch.Tensor,
+                          y_true: torch.Tensor,
                           meta: BatchMeta,
                           index: int) -> dict[str, torch.Tensor]:
         """Obtain the unweighted loss values for the spatial loss functions
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images
         y_pred
             The batch of model predictions
+        y_true
+            The ground truth batch of images
         meta
             The meta information for the batch
         index
@@ -211,7 +211,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         """
         retval: dict[str, torch.Tensor] = {}
         for name in self._spatial:
-            loss: torch.Tensor = self._functions[name](y_true, y_pred)
+            loss: torch.Tensor = self._functions[name](y_pred, y_true)
             if self._use_mask and meta.mask_face is not None:
                 loss *= meta.mask_face[index]
             if self._eye_multiplier > 1. and meta.mask_eye is not None:
@@ -223,8 +223,8 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         return retval
 
     def _get_masked_inputs(self,
-                           y_true: torch.Tensor,
                            y_pred: torch.Tensor,
+                           y_true: torch.Tensor,
                            meta: BatchMeta,
                            index: int
                            ) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], list[float]]:
@@ -232,10 +232,10 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images
         y_pred
             The batch of model predictions
+        y_true
+            The ground truth batch of images
         meta
             The meta information for the batch
         index
@@ -244,38 +244,38 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         Returns
         -------
         inputs
-            The (y_true, y_pred) inputs to the loss function for each supplied mask
+            The (y_pred, y_true) inputs to the loss function for each supplied mask
         weights
             The weight to be applied for each masked input
         """
         weights = [1.0]
         assert meta.mask_face is not None
         face_mask = meta.mask_face[index]
-        inputs = [(y_true * face_mask, y_pred * face_mask)]
+        inputs = [(y_pred * face_mask, y_true * face_mask)]
         for m_type in ("eye", "mouth"):
             masks: list[torch.Tensor] | None = getattr(meta, f"mask_{m_type}")
             if masks is None:
                 continue
             mask = masks[index]
-            inputs.append((y_true * mask, y_pred * mask))
+            inputs.append((y_pred * mask, y_true * mask))
             weights.append(self._eye_multiplier if m_type == "eye" else self._mouth_multiplier)
         logger.trace("[Loss] masked inputs: %s, weights: %s",  # type:ignore[attr-defined]
                      [[x.shape for x in i] for i in inputs], weights)
         return inputs, weights
 
     def _get_non_spatial_loss(self,
-                              y_true: torch.Tensor,
                               y_pred: torch.Tensor,
+                              y_true: torch.Tensor,
                               meta: BatchMeta,
                               index: int) -> dict[str, torch.Tensor]:
         """Obtain the unweighted loss values for the non-spatial loss functions
 
         Parameters
         ----------
-        y_true
-            The ground truth batch of images
         y_pred
             The batch of model predictions
+        y_true
+            The ground truth batch of images
         meta
             The meta information for the batch
         index
@@ -287,31 +287,31 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         """
         retval: dict[str, torch.Tensor] = {}
         if not self._use_mask:
-            inputs = [(y_true, y_pred)]
+            inputs = [(y_pred, y_true)]
             weights = [1.0]
         else:
-            inputs, weights = self._get_masked_inputs(y_true, y_pred, meta, index)
+            inputs, weights = self._get_masked_inputs(y_pred, y_true, meta, index)
 
         for name in self._non_spatial:
-            losses = torch.stack([self._functions[name](inp_true, inp_pred) * weight
-                                 for weight, (inp_true, inp_pred) in zip(weights, inputs)])
+            losses = torch.stack([self._functions[name](inp_pred, inp_true) * weight
+                                 for weight, (inp_pred, inp_true) in zip(weights, inputs)])
             retval[name] = losses.sum(dim=0)
 
         logger.trace("[Loss] Non-spatial loss: %s", retval)  # type:ignore[attr-defined]
         return retval
 
     def forward(self,
-                y_true_all: list[torch.Tensor],
                 y_pred_all: list[torch.Tensor],
+                y_true_all: list[torch.Tensor],
                 meta: BatchMeta) -> BatchLoss:
         """Call the loss functions, reduce to batch dimension, apply masks and weighting and obtain
         the weighted and unweighted per function values and the weighted total loss scalar
 
         Parameters
         ----------
-        y_true_all
-            The ground truth batch of images for all outputs for a side of the model
         y_pred_all
+            The ground truth batch of images for all outputs for a side of the model
+        y_true_all
             The batch of model predictions for all outputs for a side of the model
         meta
             The meta information for the batch
@@ -323,16 +323,16 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         all_unweighted: list[dict[str, torch.Tensor]] = []
         all_weighted: list[dict[str, torch.Tensor]] = []
         mask_loss = None
-        for idx, (y_true, y_pred) in enumerate(zip(y_true_all, y_pred_all)):
+        for idx, (y_pred, y_true) in enumerate(zip(y_pred_all, y_true_all)):
 
             if y_true.shape[1] == 1:
                 assert self._mask_loss_function is not None
-                mask_loss = T.cast(torch.Tensor, self._mask_loss_function(y_true, y_pred))
+                mask_loss = T.cast(torch.Tensor, self._mask_loss_function(y_pred, y_true))
                 mask_loss = mask_loss.mean(dim=tuple(range(1, mask_loss.ndim)))
                 continue
 
-            unweighted = self._get_spatial_loss(y_true, y_pred, meta, idx)
-            unweighted |= self._get_non_spatial_loss(y_true, y_pred, meta, idx)
+            unweighted = self._get_spatial_loss(y_pred, y_true, meta, idx)
+            unweighted |= self._get_non_spatial_loss(y_pred, y_true, meta, idx)
             all_unweighted.append(unweighted)
             all_weighted.append({k: v * self._weights[k] for k, v in unweighted.items()})
 

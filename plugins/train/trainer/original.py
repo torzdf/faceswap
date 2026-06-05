@@ -56,7 +56,7 @@ class Trainer(TrainerBase):
         """
         predictions: list[list[torch.Tensor]] = self.model(inputs)
         num_sides = len(inputs)
-        losses = [loss_func([t[:, i] for t in targets], predictions[i], meta[i])
+        losses = [loss_func(predictions[i], [t[:, i] for t in targets], meta[i])
                   for i in range(num_sides)]
         return losses
 
