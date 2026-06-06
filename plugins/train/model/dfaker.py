@@ -1,62 +1,126 @@
 #!/usr/bin/env python3
 """ DFaker Model
     Based on the dfaker model: https://github.com/dfaker """
+from __future__ import annotations
+
 import logging
 import sys
+from collections import OrderedDict
 
-from keras import initializers, Input, layers, Model as KModel
+import torch
+from torch import nn
+from torch.nn import functional as F
 
-from lib.model.nn_blocks_legacy import Conv2DOutput, UpscaleBlock, ResidualBlock
+from lib.logger import parse_class_init
+from lib.model.nn_blocks import UpscaleSubpixel, ResidualBlockLegacy
+from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
-from .original import Model as OriginalModel
+from .base import ModelPlugin
+
+from .original import Encoder
 from . import dfaker_defaults as cfg
 
 logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Model(OriginalModel):
-    """ Dfaker Model """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._output_size = cfg.output_size()
-        if self._output_size not in (128, 256):
+class Decoder(nn.Module):
+    """The DFaker Decoder Network.
+
+    Parameters
+    ----------
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    """
+    def __init__(self, learn_mask: bool, output_size: int) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+
+        ins = [512, 512, 512, 256, 128]
+        outs = [1024, 512, 256, 128, 64]
+        if output_size == 128:
+            ins = ins[1:]
+            outs = outs[1:]
+        self.upscale = nn.Sequential(
+            *(nn.Sequential(OrderedDict({"up": UpscaleSubpixel(i, o),
+                                         "act": nn.LeakyReLU(negative_slope=0.2),
+                                         "res": ResidualBlockLegacy(o, o)}))
+              for i, o in zip(ins, outs))
+        )
+        self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)
+
+        self.upscale_mask = None
+        if learn_mask:
+            self.upscale_mask = nn.Sequential(*(UpscaleSubpixel(i, o) for i, o in zip(ins, outs)))
+            self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
+
+    def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+        """Forward pass through the Faceswap decoder
+
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
+
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.upscale(inputs)
+        x = F.sigmoid(self.conv(x))
+
+        if self.upscale_mask is None:
+            return [x]
+
+        mask = self.upscale_mask(inputs)
+        mask = F.sigmoid(self.conv_mask(mask))
+        return [x, mask]
+
+
+class DFaker(ModelPlugin):
+    """ Dfaker Faceswap Model.
+
+    Parameters
+    ----------
+    num_identities
+        The number of identities that the model is to be trained on. Default: 2
+    """
+    def __init__(self, num_identities: int = 2) -> None:
+        logger.debug(parse_class_init(locals()))
+
+        output_size = cfg.output_size()
+        if output_size not in (128, 256):
             logger.error("Dfaker output shape should be 128 or 256 px")
             sys.exit(1)
-        self.input_shape = (self._output_size // 2, self._output_size // 2, 3)
-        self.encoder_dim = 1024
-        self.kernel_initializer = initializers.RandomNormal(0, 0.02)
+        super().__init__(num_identities, input_size=output_size // 2)
+        self.encoder = Encoder(low_mem=False)
+        self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask(), output_size)
+                                      for _ in range(num_identities))
 
-    def decoder(self, side):
-        """ Decoder Network """
-        input_ = Input(shape=(8, 8, 512))
-        var_x = input_
+    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Forward pass through the original model
 
-        if self._output_size == 256:
-            var_x = UpscaleBlock(1024, activation=None)(var_x)
-            var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-            var_x = ResidualBlock(1024, kernel_initializer=self.kernel_initializer)(var_x)
-        var_x = UpscaleBlock(512, activation=None)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(512, kernel_initializer=self.kernel_initializer)(var_x)
-        var_x = UpscaleBlock(256, activation=None)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(256, kernel_initializer=self.kernel_initializer)(var_x)
-        var_x = UpscaleBlock(128, activation=None)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(128, kernel_initializer=self.kernel_initializer)(var_x)
-        var_x = UpscaleBlock(64, activation="leakyrelu")(var_x)
-        var_x = Conv2DOutput(3, 5, name=f"face_out_{side}")(var_x)
-        outputs = [var_x]
+        Parameters
+        ----------
+        inputs: list
+            A list of input tensors for the model. This will be of length num_identities with each
+            tensor of shape (N, C, H, W)
 
-        if cfg_loss.learn_mask():
-            var_y = input_
-            if self._output_size == 256:
-                var_y = UpscaleBlock(1024, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(512, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(256, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(128, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(64, activation="leakyrelu")(var_y)
-            var_y = Conv2DOutput(1, 5, name=f"mask_out_{side}")(var_y)
-            outputs.append(var_y)
-        return KModel([input_], outputs=outputs, name=f"decoder_{side}")
+        Returns
+        -------
+        The output for each identity training through the model
+        """
+        encoded = [self.encoder(x) for x in inputs]
+        decoded = [dec(x) for dec, x in zip(self.decoders, encoded)]
+        return decoded
+
+
+__all__ = get_module_objects(__name__)
+
+
+if __name__ == "__main__":
+    # TODO validate and remove test code
+    p = DFaker(2)
+    t = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
+    p(t)
