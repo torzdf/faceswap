@@ -17,12 +17,12 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
-    from lib.model.faceswap import FaceswapModel
+    from .handler import FaceswapModel
 
 logger = logging.getLogger(__name__)
 
 
-class KerasModel:
+class KerasModel:  # pylint:disable=too-few-public-methods
     """Loads data from a .keras model
 
     Parameters
@@ -136,17 +136,75 @@ class KerasToTorch:
         self._state = self._get_state()
 
     def _get_state(self) -> dict[str, T.Any]:
-        """Obtain the legacy state dict removing any removed keys that may break downstream
-        dataclasses
+        """Obtain the legacy state dict removing any keys that may break downstream dataclasses and
+        updating any legacy items to be compatible with state version 2.0
 
         Returns
         -------
-        The keras state file with mixed_precision_layers and no_logs keys removed
+        The keras state file with legacy items fixed for import
         """
-        retval = {k: v for k, v in self._keras.state.items() if k != "mixed_precision_layers"}
+        retval = {k: "none" if v is None else v  # Nonetype used to be allowed
+                  for k, v in self._keras.state.items()
+                  if k not in ("mixed_precision_layers",  # Dropped
+                               "sessions")}  # Handled later
         retval["sessions"] = {int(i): {"batch_size" if k == "batchsize" else k: v
                                        for k, v in s.items() if k != "no_logs"}
                               for i, s in self._keras.state["sessions"].items()}
+
+        legacy_defaults = {  # If these do not exist then state file is v. old. Set sane defaults
+            "centering": "legacy",
+            "coverage": 62.5,
+            "mask_loss_function": "mse",
+            "optimizer": "adam"
+        }
+        for key, val in legacy_defaults:
+            retval[key] = retval.get(key, val)
+
+        if isinstance(retval.get("lowest_avg_loss"), dict):  # Loss used to be stored per side
+            lowest_avg_loss = sum(T.cast(dict[str, float], retval["lowest_avg_loss"]).values())
+            logger.debug("[KerasToTorch] Collating legacy lowest_avg_loss from %s to %s",
+                         retval["lowest_avg_loss"], lowest_avg_loss)
+            retval["lowest_avg_loss"] = lowest_avg_loss
+
+        # Following keys no longer exist or map to new keys
+        priors = ["dssim_loss", "mask_type", "mask_type", "l2_reg_term", "clipnorm", "autoclip"]
+        new_items = ["loss_function", "learn_mask", "mask_type", "loss_function_2",
+                     "gradient_clipping", "clipping"]
+        for old, new in zip(priors, new_items):
+            if old not in retval:
+                logger.debug("[KerasToTorch] Legacy item '%s' not in state config. Skipping", old)
+                continue
+            if old == "dssim_loss":  # dssim_loss > loss_function
+                retval[new] = "ssim" if retval[old] else "mae"
+                del retval[old]
+                logger.debug("[KerasToTorch] Updated state config from legacy dssim format. New"
+                             "config loss function: '%s'", retval[new])
+                continue
+            if (old == "mask_type" and  # Replace removed masks with most similar equivalent
+                    new == "mask_type" and
+                    retval[old] in ("facehull", "dfl_full")):
+                old_mask = retval[old]
+                retval[new] = "components"
+                logger.debug("[KerasToTorch] Updated 'mask_type' from '%s' to '%s' for this model",
+                             old_mask, retval[new])
+            if old == "l2_reg_term":  # Replace l2_reg_term with loss_2 func and update  weight
+                retval[new] = "mse"
+                retval["loss_weight_2"] = retval[old]
+                del retval[old]
+                logger.info("[KerasToTorch] Updated state config from legacy 'l2_reg_term' to "
+                            "'loss_function_2'")
+            if old == "clipnorm":  # Replace clipnorm with correct grad clip type and value
+                retval[new] = "norm"
+                del retval[old]
+                logger.info("[KerasToTorch] Updated state config from legacy '%s' to  '%s: %s'",
+                            old, new, old)
+            if old == "autoclip":  # Replace autoclip with correct gradient clipping type
+                retval[new] = old
+                del retval[old]
+                logger.info("[KerasToTorch] Updated state config from legacy '%s' to '%s: %s'",
+                            old, new, old)
+
+        retval["version"] = 2.0
         logger.debug("[KerasToTorch] Cleaned state: %s", retval)
         return retval
 
@@ -191,7 +249,7 @@ class KerasToTorch:
                        weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
         """Shuffle the order that weights are stored for either the in-channels or out-channels for
         Dense operations from channels last to channels first in place.
-        
+
         This handles the bottleneck for most existing Faceswap models fairly effectively
 
         Parameters
@@ -221,13 +279,14 @@ class KerasToTorch:
         weights["weight"] = weights["weight"].reshape(shape).transpose(trans).reshape(in_, out)
         if d2s and weights.get("bias") is not None:
             logger.info("[KerasToTorch] Converting Dense bias for output. Bias shape: %s, "
-                        "Reshape: %s, Transpose: %s", weights["bias"].shape, shape[:-1], trans[:-1])
+                        "Reshape: %s, Transpose: %s",
+                        weights["bias"].shape, shape[:-1], trans[:-1])
             weights["bias"] = weights["bias"].reshape(
                 shape[:-1]).transpose(trans[:-1]).reshape(in_)
 
     @classmethod
     def _pixel_shuffle_reorder(cls,
-                       weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
+                               weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
         """Shuffle the order that weights are stored to channels first prior to feeding the pixel
         shuffler
 
@@ -243,14 +302,14 @@ class KerasToTorch:
             c = k_prime // (scale * scale)
             dh = (k_prime % (scale * scale)) // scale
             dw = k_prime % scale
-            k  = dh * scale * out_channels + dw * out_channels + c
+            k = dh * scale * out_channels + dw * out_channels + c
             trans.append(k)
         logger.info("[KerasToTorch] Permuting pixel-shuffler input weights of shape %s with index "
                     "of length %s", weights["weight"].shape, len(trans))
         weights["weight"] = weights["weight"][trans]
         if weights.get("bias") is not None:
-            logger.info("[KerasToTorch] Permuting pixel-shuffler input bias of shape %s with index "
-                        "of length %s", weights["bias"].shape, len(trans))
+            logger.info("[KerasToTorch] Permuting pixel-shuffler input bias of shape %s with "
+                        "index of length %s", weights["bias"].shape, len(trans))
             weights["bias"] = weights["bias"][trans]
 
     def _map_weights(self,
@@ -284,12 +343,11 @@ class KerasToTorch:
                        if v["weight"].shape == weights["weight"].shape)
             val = keras_grouped.pop(key)
             if "dense" in lbl and val["weight"].ndim == 2:
-                self._dense_reorder(val) 
+                self._dense_reorder(val)
             if "upscale" in lbl and lbl.endswith(".conv") and val["weight"].ndim == 4:  # TODO more robust capture?
                 self._pixel_shuffle_reorder(val)
 
-
-            logger.info("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
+            logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
                          key, lbl, val["weight"].shape)
             for w in ("weight", "bias"):
                 retval[f"{lbl}.{w}"] = torch.from_numpy(val[w])

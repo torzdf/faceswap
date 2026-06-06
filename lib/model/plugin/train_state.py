@@ -137,9 +137,6 @@ class _Config:
         logger.info("Using configuration saved in state file")
         logger.debug("%s Loaded state_dict: %s", self._name, state_dict)
 
-        # TODO migration:
-        # old_val = "none" if old_val is None else old_val  # We used to allow NoneType. No more
-
     def state_dict(self) -> dict[str, T.Any]:
         """This _config object's state_dict"""
         return {k: v() for k, v in self._config.items()}
@@ -179,7 +176,11 @@ class State:
         self._sessions: dict[int, Session] = {}
         self.lowest_avg_loss: float = 0.0
         """float: The lowest average loss seen between save intervals. """
+        self.learning_rate_from_finder: bool = False
+        """bool. Set to ``True`` if learning rate is being read from the finder rather than user
+        config"""
         self._config = _Config(plugin_path)
+        self._version = 2.0
 
         self._total_steps = 0
         self._step_called = False
@@ -202,6 +203,18 @@ class State:
         """The total number of iterations the model has been trained for"""
         return self._total_steps
 
+    @property
+    def session_iterations(self) -> int:
+        """The number of iterations the model has been trained for during the current session"""
+        if not self._sessions or self.session_id not in self._sessions:
+            return 0
+        return self._sessions[self.session_id].iterations
+
+    @property
+    def lr_finder(self) -> float:
+        """ The value discovered from the learning rate finder. -1 if no value stored """
+        return self._lr_finder
+
     def load_state_dict(self, state_dict: dict[str, T.Any]):
         """Load the contents of the state_dict into this state object
 
@@ -213,11 +226,6 @@ class State:
         self._total_steps = state_dict.get("iterations", 0)
         self._sessions = {k: Session(**v) for k, v in state_dict.get("sessions", {}).items()}
         self.lowest_avg_loss = state_dict.get("lowest_avg_loss", 0.0)
-        if isinstance(self.lowest_avg_loss, dict):  # TODO move to migration code
-            lowest_avg_loss = sum(self.lowest_avg_loss.values())
-            logger.debug("Collating legacy lowest_avg_loss from %s to %s",
-                         self.lowest_avg_loss, lowest_avg_loss)
-            self.lowest_avg_loss = lowest_avg_loss
         self._lr_finder = state_dict.get("lr_finder", -1.0)
         self._config.load_state_dict(state_dict.get("config", {}))
         logger.debug("[State] Loaded state_dict: %s", state_dict)
@@ -229,14 +237,24 @@ class State:
                 "lr_finder": self._lr_finder,
                 "sessions": {k: asdict(v) for k, v in self._sessions.items()
                              if v.iterations > 0},
-                "config": self._config.state_dict()}
+                "config": self._config.state_dict(),
+                "version": self._version}
 
     def step(self) -> None:
-        """Increment the session and total steps"""
+        """Increment the session and total steps
+
+        Parameters
+        ----------
+        lr_from_finder
+            ``True`` if the learning rate
+        """
         if not self._step_called:
             assert self._batch_size is not None, "batch_size must be provided when training"
-            self._sessions[self.session_id + 1] = Session(self._batch_size,
-                                                          self._config.session_config)
+            config = self._config.session_config
+            if self.learning_rate_from_finder:
+                logger.debug("[State] Storing learning rate from finder: %s", self.lr_finder)
+                config["learning_rate"] = self.lr_finder
+            self._sessions[self.session_id + 1] = Session(self._batch_size, config)
             self._step_called = True
 
         self._total_steps += 1
