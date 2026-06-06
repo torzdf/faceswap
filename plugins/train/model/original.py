@@ -67,7 +67,7 @@ class Encoder(nn.Module):
         x = self.flatten(x)
         x = self.dense1(x)
         x = self.dense2(x)
-        x = x.reshape(x.shape[0], 1024, 4, 4)
+        x = x.view(x.shape[0], 1024, 4, 4)
         return self.upscale(x)
 
 

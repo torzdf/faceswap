@@ -53,7 +53,7 @@ class Encoder(nn.Module):
         x = self.conv3(x)
         x = self.dense1(x.flatten(start_dim=1))
         x = T.cast(torch.Tensor, self.dense2(x))
-        x = x.reshape(x.shape[0], 512, 4, 4)
+        x = x.view(x.shape[0], 512, 4, 4)
         return self.upscale(x)
 
 

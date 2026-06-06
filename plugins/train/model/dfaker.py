@@ -55,7 +55,7 @@ class Decoder(nn.Module):
             self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
-        """Forward pass through the Faceswap decoder
+        """Forward pass through the DFaker decoder
 
         Parameters
         ----------
@@ -99,7 +99,7 @@ class DFaker(ModelPlugin):
                                       for _ in range(num_identities))
 
     def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
-        """Forward pass through the original model
+        """Forward pass through the DFaker model
 
         Parameters
         ----------
