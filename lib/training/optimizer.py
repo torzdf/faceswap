@@ -20,6 +20,7 @@ from .lr_warmup import WarmupScheduler
 
 if T.TYPE_CHECKING:
     from keras import Variable
+    from lib.model.plugin.handler import TrainHandler
     from plugins.train.model.base import ModelPlugin
     from plugins.train.train_config import Optimizer as OptConfig
     from .train import Trainer
@@ -172,6 +173,9 @@ class Optimizer:
         self._optimizer = self._get_optimizer(model, config)
         self._warmup = None if warmup_steps < 1 else WarmupScheduler(self._optimizer, warmup_steps)
         self._lr_scheduler: ExponentialLR | None = None
+
+        self.save = T.cast(T.Literal["always", "exit", "never"], config.save_optimizer())
+        """`When the optimizer should be saved"""
 
         self._accumulation_count = 0
         self._session_steps = 0
@@ -418,6 +422,7 @@ class Optimizer:
 
     def find_learning_rate(self,
                            trainer: Trainer,
+                           model: TrainHandler,
                            steps: int,
                            start_lr: float,
                            end_lr: float,
@@ -453,7 +458,11 @@ class Optimizer:
         gamma: float = (end_lr / start_lr) ** (1.0 / steps)
         self._lr_scheduler = ExponentialLR(self._optimizer, gamma=gamma)
 
-        lrf = LearningRateFinder(trainer, self._lr_scheduler, steps, strength, mode)
+        lrf = LearningRateFinder(trainer,
+                                 self._lr_scheduler,
+                                 steps,
+                                 strength,
+                                 mode)
         lrf.find()
 
         del self._lr_scheduler

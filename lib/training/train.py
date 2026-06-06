@@ -28,7 +28,6 @@ from plugins.train.trainer.base import TrainConfig
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt
-    from collections.abc import Callable
     from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerBase
     from .loss import BatchLoss
@@ -229,8 +228,8 @@ class LossHandler:
         -------
         The average total loss since the last save iteration
         """
-        assert self._tensorboard is not None  # TODO why does this work? Test with no-logs
-        self._tensorboard.on_save()
+        if self._tensorboard is not None:
+            self._tensorboard.on_save()
         self._output_contributions()
 
         retval = T.cast(torch.Tensor, sum(self._averages["weighted"].values())).item()
@@ -291,6 +290,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                            len(train_config.folders),
                                            train_config.batch_size,
                                            train_config.model_folder,
+                                           train_config.save_interval,
                                            train_config.snapshot_interval)
         self._model_info = Info(self._model_handler.model)
         self._model_info.summary(logger.info if summary
@@ -395,38 +395,30 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         if not self._train_config.lr_finder:
             return False
 
-        assert self._model_handler.optimizer is not None
-        if self._model_handler.state.lr_finder > -1:
-            learning_rate = self._model_handler.state.lr_finder
-            logger.info("Setting learning rate from Learning Rate Finder to %s",
-                        f"{learning_rate:.1e}")
-            self._model_handler.optimizer.set_lr(learning_rate)
-            self._model_handler.state.update_session_config("learning_rate", learning_rate)
+        if self._model_handler.set_lr_from_finder():
             return False
 
-        if self._model_handler.total_iterations == 0 and self._model_handler.session_id == 1:
-            success = self._model_handler.optimizer.find_learning_rate(
-                self,
-                mod_cfg.lr_finder_iterations(),
-                1e-10,
-                1e-1,
-                T.cast(T.Literal["default", "aggressive", "extreme"],
-                       mod_cfg.lr_finder_strength()),
-                T.cast(T.Literal["set", "graph_and_set", "graph_and_exit"],
-                       mod_cfg.lr_finder_mode())
-                )
-            return mod_cfg.lr_finder_mode() == "graph_and_exit" or not success
+        if self._model_handler.total_iterations > 0 or self._model_handler.session_id > 0:
+            return False
 
-        logger.debug("[Trainer] No learning rate finder rate. Not setting")
-        return False
+        success = self._model_handler.optimizer.find_learning_rate(
+            self,
+            mod_cfg.lr_finder_iterations(),
+            1e-10,
+            1e-1,
+            T.cast(T.Literal["default", "aggressive", "extreme"],
+                   mod_cfg.lr_finder_strength()),
+            T.cast(T.Literal["set", "graph_and_set", "graph_and_exit"],
+                   mod_cfg.lr_finder_mode())
+        )
+        return mod_cfg.lr_finder_mode() == "graph_and_exit" or not success
 
     def toggle_mask(self) -> None:
         """Toggle the mask overlay on or off based on user input."""
         self._tester.toggle_mask()
 
-    def train_one_step(self,
-                       viewer: Callable[[np.ndarray, str], None] | None,
-                       do_timelapse: bool = False) -> None:
+    def step(self, gen_preview: bool, timelapse_enabled: bool
+             ) -> tuple[npt.NDArray[np.uint8], str] | None:
         """Running training on a batch of images for each side.
 
         Triggered from the training cycle in :class:`scripts.train.Train`.
@@ -450,10 +442,19 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
         Parameters
         ----------
-        viewer
-            The function that will display the preview image
-        do_timelapse
-            ``True`` to generate a timelapse preview image
+        gen_preview
+            ``True`` to force run inference to generate preview images
+        timelapse_enabled
+            ``True`` if timelapse generation is enabled
+
+        Returns
+        -------
+        image
+            The composed preview image
+        name
+            The name (header) of the image
+
+        or ``None`` if a preview has not been generated
         """
         iteration = self._model_handler.total_iterations + 1
         logger.trace("[Trainer] Training one step: (iteration: %s)",  # type:ignore[attr-defined]
@@ -466,9 +467,17 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                   self._model_handler.loss,
                                   self._model_handler.optimizer)
         self._loss_handler.step(loss, iteration)
-        self._model_handler.step()
-        if viewer is not None:
-            self._tester(viewer, do_timelapse)
+        is_saved = self._model_handler.step(self._loss_handler)
+        gen_preview = gen_preview or is_saved
+
+        if is_saved and timelapse_enabled:
+            logger.debug("[Trainer] Generating timelapse")
+            self._tester(True)
+        if gen_preview:
+            logger.debug("[Trainer] Generating preview")
+            return self._tester(False)
+
+        return None
 
     def save(self, is_exit: bool = False) -> None:
         """Save the model
@@ -478,10 +487,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         is_exit
             ``True`` if save has been called on model exit. Default: ``False``
         """
-        save_optimizer = mod_cfg.Optimizer.save_optimizer()
-        save_optimizer = save_optimizer == "always" or (is_exit and save_optimizer == "exit")
-        average_loss = self._loss_handler.on_save()
-        self._model_handler.save(average_loss, save_optimizer)
+        self._model_handler.save(self._loss_handler, is_exit=is_exit)
         if is_exit:
             self._loss_handler.close()
 
@@ -548,7 +554,7 @@ class Tester:
                                preview_folders,
                                self._batch_size,
                                torch.utils.data.RandomSampler)
-        logger.debug("[Trainer] Preview data loader: %s", retval)
+        logger.debug("[Tester] Preview data loader: %s", retval)
         return retval
 
     def _get_timelapse_loader(self) -> PreviewLoader | None:
@@ -575,7 +581,7 @@ class Tester:
                                self._batch_size,
                                torch.utils.data.SequentialSampler,
                                num_samples=num_samples)
-        logger.debug("[Trainer] Preview data loader: %s", retval)
+        logger.debug("[Tester] Preview data loader: %s", retval)
         return retval
 
     def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
@@ -607,7 +613,7 @@ class Tester:
                                       self._batch_size,
                                       *feed_batch.shape[2:]),
                                      dtype=feed.dtype)
-                logger.debug("[Trainer] Padding undersized batch of shape %s to %s",
+                logger.debug("[Tester] Padding undersized batch of shape %s to %s",
                              feed_batch.shape, holder.shape)
                 holder[:, :feed_size] = feed_batch
                 feed_batch = holder
@@ -626,19 +632,25 @@ class Tester:
         return retval
 
     def __call__(self,  # pylint:disable=too-many-locals
-                 viewer: Callable[[np.ndarray, str], None],
-                 do_timelapse: bool) -> None:
+                 do_timelapse: bool) -> tuple[npt.NDArray[np.uint8], str] | None:
         """Update the preview viewer and timelapse output
 
         Parameters
         ----------
-        viewer
-            The function that will display the preview image
         do_timelapse
-            ``True`` to generate a timelapse preview image
+            ``True`` to generate a timelapse preview image, ``False`` to return a preview image
+
+        Returns
+        -------
+        image
+            The composed preview image
+        name
+            The name (header) of the image
+
+        or ``None`` if a preview has not been generated
         """
         if self._preview_loader is None and not do_timelapse:
-            return
+            return None
 
         if do_timelapse:
             assert self._timelapse_loader is not None
@@ -657,7 +669,7 @@ class Tester:
                                                          self._model_info.output_size,
                                                          ndim),
                                                         dtype=np.float32)
-        logger.debug("[Trainer] feed: %s, target: %s, predictions_holder: %s",
+        logger.debug("[Tester] feed: %s, target: %s, predictions_holder: %s",
                      feed.shape, target.shape, predictions.shape)
         for side_idx in range(num_sides):
             rolled_feed = torch.roll(feed, shifts=side_idx, dims=0)
@@ -670,7 +682,7 @@ class Tester:
         if self._trainer.model.is_rgb:
             predictions[..., :3] = predictions[..., 2::-1]
             targets[..., :3] = targets[..., 2::-1]
-        logger.debug("[Trainer] Got preview images: predictions: %s, targets: %s",
+        logger.debug("[Tester] Got preview images: predictions: %s, targets: %s",
                      format_array(predictions), format_array(targets))
 
         samples = self._samples.get_preview(predictions, targets)
@@ -678,13 +690,12 @@ class Tester:
         if do_timelapse:
             filename = os.path.join(self._timelapse_output, str(int(time.time())) + ".jpg")
             cv2.imwrite(filename, samples)
-            logger.debug("[Trainer] Created time-lapse: '%s'", filename)
-            return
+            logger.debug("[Tester] Created time-lapse: '%s'", filename)
+            return None
 
-        if viewer is not None:
-            viewer(samples,
-                   "Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
-                   "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
+        return (samples,
+                "Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
+                "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
 
     def toggle_mask(self) -> None:
         """Toggle the preview mask display on or off"""

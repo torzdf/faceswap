@@ -9,9 +9,9 @@ from shutil import copyfile, copytree, rmtree
 
 import torch
 
-from lib.model.faceswap import KerasToTorch
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
+from .legacy import KerasToTorch
 
 if T.TYPE_CHECKING:
     from .handler import FaceswapModel

@@ -42,6 +42,10 @@ class TrainConfig:  # pylint:disable=too-many-instance-attributes
         The folder that the model is to be loaded/saved to or from
     batch_size
         The batch size to load data from each of the loaders
+    save interval
+        The number of iterations between saves
+    snapshot interval
+        The number of iterations between snapshots
     warmup_steps
         The number of steps to warm the learning rate up for
     augment_color
@@ -54,8 +58,6 @@ class TrainConfig:  # pylint:disable=too-many-instance-attributes
         ``True`` to cache landmarks from the other side for Warp to landmarks
     use_lr_finder
         ``True`` to use the learning rate finder. Default: ``False``
-    snapshot interval
-        The number of iterations between snapshots. Default -1 (Disabled)
     """
     folders: list[str]
     """List of folders to be used as inputs to the model. Folders are provided in processing order
@@ -64,6 +66,10 @@ class TrainConfig:  # pylint:disable=too-many-instance-attributes
     """The folder that the model is to be loaded/saved to or from"""
     batch_size: int
     """The batch size to load data from each of the loaders"""
+    save_interval: int
+    """The number of iterations between saves"""
+    snapshot_interval: int
+    """The number of iterations between snapshots"""
     warmup_steps: int
     """The number of steps to warm the learning rate up for"""
     augment_color: bool
@@ -78,8 +84,6 @@ class TrainConfig:  # pylint:disable=too-many-instance-attributes
     """``True`` to cache landmarks from the other side for Warp to landmarks"""
     lr_finder: bool = False
     """``True`` to use the learning rate finder"""
-    snapshot_interval: int = -1
-    """The number of iterations between snapshots"""
 
 
 class TrainerBase(abc.ABC):

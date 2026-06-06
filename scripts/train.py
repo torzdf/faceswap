@@ -28,7 +28,6 @@ from plugins.train.trainer.base import TrainConfig
 
 if T.TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
     from plugins.train.model.base import ModelPlugin
 
 
@@ -298,14 +297,15 @@ class Train():
         config = TrainConfig(folders=self._images,
                              model_folder=self._args.model_dir,
                              batch_size=self._args.batch_size,
+                             save_interval=self._args.save_interval,
+                             snapshot_interval=self._args.snapshot_interval,
                              warmup_steps=self._args.warmup,
                              augment_color=not self._args.no_augment_color,
                              flip=not self._args.no_flip,
                              warp=not self._args.no_warp,
                              no_logs=self._args.no_logs,
                              cache_landmarks=self._args.warp_to_landmarks,
-                             lr_finder=self._args.use_lr_finder,
-                             snapshot_interval=self._args.snapshot_interval)
+                             lr_finder=self._args.use_lr_finder)
 
         retval = Trainer(trainer,
                          self._args.trainer,
@@ -331,44 +331,35 @@ class Train():
             The requested model trainer plugin
         """
         logger.debug("[Train] Running Training Cycle")
-        update_preview_images = False
-        if self._args.write_image or self._args.redirect_gui or self._args.preview:
-            display_func: Callable | None = self._show
-        else:
-            display_func = None
+        preview_enabled = self._args.write_image or self._args.redirect_gui or self._args.preview
+        update_preview_images = preview_enabled  # Update on 1st iter
 
-        for iteration in range(1, self._args.iterations + 1):
+        for iteration in range(self._args.iterations):
             logger.trace("[Train] Training iteration: %s", iteration)  # type:ignore
-            save_iteration = iteration % self._args.save_interval == 0 or iteration == 1
             gui_triggers = self._process_gui_triggers()
 
             if self._preview.should_toggle_mask or gui_triggers["mask"]:
                 trainer.toggle_mask()
-                update_preview_images = True
+                update_preview_images = preview_enabled
 
-            if self._preview.should_refresh or gui_triggers["refresh"] or update_preview_images:
-                viewer = display_func
+            if self._preview.should_refresh or gui_triggers["refresh"]:
+                update_preview_images = preview_enabled
+
+            preview = trainer.step(update_preview_images, self._timelapse)
+            if preview is not None:
                 update_preview_images = False
-            else:
-                viewer = None
-
-            trainer.train_one_step(viewer, self._timelapse and save_iteration)
-
-            if viewer is not None and not save_iteration:
-                # Ugly spam but required by GUI to know to update window
-                print("\x1b[2K", end="\r")  # Clear last line
-                logger.info("[Preview Updated]")
+                self._show(preview[0], preview[1])
 
             if self._stop:
                 logger.debug("[Train] Stop received. Terminating")
                 break
 
-            if save_iteration or self._save_now:
-                logger.debug("[Train] Saving (save_iterations: %s, save_now: %s) Iteration: "
-                             "(iteration: %s)", save_iteration, self._save_now, iteration)
+            if self._save_now:
+                logger.debug("[Train] Saving on keypress. Iteration: (iteration: %s)",
+                             iteration + 1)
                 trainer.save(is_exit=False)
                 self._save_now = False
-                update_preview_images = True
+                update_preview_images = preview_enabled
 
         logger.debug("[Train] Training cycle complete")
         trainer.save(is_exit=True)

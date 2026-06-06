@@ -22,6 +22,7 @@ from .saving import ModelIO
 from .train_state import State
 
 if T.TYPE_CHECKING:
+    from lib.training.train import LossHandler
     from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerBase
     from plugins.train.train_config import Loss as loss_cfg, Optimizer as opt_cfg
@@ -254,6 +255,8 @@ class TrainHandler:
         The batch size that the model is to be trained at
     model_folder
         Full path to load/save model weights
+    save_interval
+        The number of steps between each model save
     snapshot_interval
         The number of steps between full model checkpoint snapshots
     """
@@ -262,12 +265,14 @@ class TrainHandler:
                  num_identities: int,
                  batch_size: int,
                  model_folder: str,
-                 snapshot_interval) -> None:
+                 save_interval: int,
+                 snapshot_interval: int) -> None:
         logger.debug(parse_class_init(locals()))
 
         self.name = name
         """The name of the model plugin"""
         self._batch_size = batch_size
+        self._save_interval = save_interval
         self._snapshot_interval = snapshot_interval
 
         self._model = FaceswapModel(name, num_identities, batch_size=batch_size)
@@ -312,6 +317,11 @@ class TrainHandler:
         """The configured loss functions in use"""
         return self._loss
 
+    @property
+    def lr_finder_rate(self) -> float:
+        """ The value discovered from the learning rate finder. -1.0 if no value stored """
+        return self._model.state.lr_finder
+
     def configure_model(self,
                         trainer_name: str,
                         train_config: TrainConfigure,
@@ -350,11 +360,43 @@ class TrainHandler:
         logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
         return retval
 
-    def step(self) -> None:
-        """Update the iteration count in the state file"""
-        self._model.state.step()
-        step = self._model.state.iterations
+    def set_lr_from_finder(self) -> bool:
+        """Set the learning rate from a previous learning rate finder run
 
+        Returns
+        -------
+        ``True`` if a previous LR finder rate was found and has been set. ``False`` if the LR
+        finder has not been run for this model
+        """
+        lrf_rate = self._model.state.lr_finder
+        if lrf_rate < 0:
+            logger.debug("[TrainHandler] Learning rate finder has not been run. Not setting LR")
+            return False
+        logger.info("Setting learning rate from Learning Rate Finder: %s", f"{lrf_rate:.1e}")
+        self.optimizer.set_lr(lrf_rate)
+        self._model.state.learning_rate_from_finder = True
+        return True
+
+    def step(self, loss_handler: LossHandler) -> bool:
+        """Update the iteration count in the state file
+
+        Parameters
+        ----------
+        loss_handler
+            Holds the information about loss for the current save iteration. Reset on save
+            iteration
+
+        Returns
+        -------
+        ``True`` if the model was saved
+        """
+        self._model.state.step()
+
+        retval = self._model.state.session_iterations % self._save_interval == 0
+        if retval:
+            self.save(loss_handler=loss_handler, is_exit=False)
+
+        step = self._model.state.iterations
         if self._snapshot_interval != 0 and step % self._snapshot_interval == 0:
             state_dict = T.cast(
                 dict[T.Literal["model", "state", "version", "optimizer"],
@@ -363,22 +405,25 @@ class TrainHandler:
                 )
             self._io.snapshot(step, state_dict)
 
-    def save(self, average_loss: float, with_optimizer: bool) -> None:
+        return retval
+
+    def save(self, loss_handler: LossHandler, is_exit: bool = False) -> None:
         """Save the model, state and optionally the optimizer. Backup the last save if total
         average loss has dropped
 
         Parameters
         ----------
-        average_loss
-            The average loss since the last save iteration
-        with_optimizer
-            ``True`` to include the optimizer weights in the save file
+        loss_handler
+            Holds the information about loss for the current save iteration. Is reset ons save
+        is_exit
+            ``True`` if save is being called on program exit
         """
-        logger.debug("[TrainHandler] Saving. average_loss: %s, with_optimizer: %s",
-                     average_loss, with_optimizer)
         state_dict = T.cast(dict[T.Literal["model", "state", "version", "optimizer"],
                                  float | dict[str, T.Any]], self._model.state_dict())
-        if with_optimizer:
+        average_loss = loss_handler.on_save()
+        logger.debug("[TrainHandler] Saving. average_loss: %s, is_exit: %s", average_loss, is_exit)
+
+        if self.optimizer.save == "always" or (is_exit and self.optimizer.save == "exit"):
             state_dict |= {"optimizer": self._optimizer.state_dict()}
 
         if self._model.state.lowest_avg_loss <= 0.0:
