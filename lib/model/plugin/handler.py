@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import typing as T
 
 import torch
@@ -10,9 +11,6 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.initializers import icnr, ConvolutionAware
-from lib.torch_utils import get_device
-from lib.training.loss import LossCollator
-from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
 from plugins.plugin_loader import PluginLoader
@@ -22,10 +20,10 @@ from .saving import ModelIO
 from .train_state import State
 
 if T.TYPE_CHECKING:
+    from lib.training.optimizer import Optimizer
     from lib.training.train import LossHandler
     from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerBase
-    from plugins.train.train_config import Loss as loss_cfg, Optimizer as opt_cfg
     from .model_info import Layer
 
 
@@ -116,42 +114,39 @@ class TrainConfigure:
     ----------
     model_info
         The information about the loaded model's structure
-    loss_config
-        The loss configuration options object
-    optimizer_config
-        The optimizer configuration options object
     icnr_init
         ``True`` to initialize convolutions prior to up-scales with ICNR
     conv_aware_init
         ``True`` to apply conv_aware_init to all convolutions
-    mixed_precision
-        ``True`` to train with mixed precision
     reflect_padding
         ``True`` to apply reflect padding to convolutions
     """
     def __init__(self,
                  model_info: Info,
-                 loss_config: type[loss_cfg],
-                 optimizer_config: type[opt_cfg],
                  icnr_init: bool,
                  conv_aware_init: bool,
-                 mixed_precision: bool,
                  reflect_padding: bool) -> None:
         logger.debug(parse_class_init(locals()))
-
         self._info = model_info
-        self._loss_cfg: type[loss_cfg] = loss_config
-        self.optimizer_config: type[opt_cfg] = optimizer_config
-        """The configuration options for the optimizer"""
-        self.device = get_device()
-        """The device that is training the model"""
-
         self._init = {"icnr": icnr_init, "conv_aware": conv_aware_init}
-        self.mixed_precision = mixed_precision
-        """``True`` if mixed precision is enabled."""
         self._reflect_padding = reflect_padding
 
     def _get_prev_conv(self, layer: Layer, collected: list[Layer] | None = None) -> list[Layer]:
+        """Recurse backwards through the model info to get the next Convolution layer that exists
+        prior to the given layer
+
+        Parameters
+        ----------
+        layer
+            The layer to work backwards from
+        collected
+            List of found convolutions, for recursion
+
+        Returns
+        -------
+        The next convolutions prior to the given layer (multiple if path splits prior to a conv
+        being found)
+        """
         collected = [] if collected is None else collected
         if layer.type == "Conv2d":
             return collected + [layer]
@@ -189,57 +184,18 @@ class TrainConfigure:
                 if v.bias is not None:
                     nn.init.zeros_(v.bias)
 
-    def _configure_loss(self, is_rgb: bool) -> LossCollator:
-        """Configure the loss collator with the user selected loss functions and weights and
-        copy it to the training device
-
-        Parameters
-        ----------
-        is_rgb
-            ``True`` if the model is training RGB. ``False`` for BGR
-
-        Returns
-        -------
-        The collated loss functions for training the model
-        """
-        retval = LossCollator(
-            functions=[self._loss_cfg.loss_function(),
-                       self._loss_cfg.loss_function_2(),
-                       self._loss_cfg.loss_function_3(),
-                       self._loss_cfg.loss_function_4()],
-            weights=[1.0,
-                     self._loss_cfg.loss_weight_2() / 100.,
-                     self._loss_cfg.loss_weight_3() / 100.,
-                     self._loss_cfg.loss_weight_4() / 100.],
-            color_order="rgb" if is_rgb else "bgr",
-            use_mask=self._loss_cfg.penalized_mask_loss(),
-            eye_multiplier=self._loss_cfg.eye_multiplier(),
-            mouth_multiplier=self._loss_cfg.mouth_multiplier(),
-            smallest_output=min(x[1] for x in self._info.output_shapes[0] if x[0] != 1),
-            mask_loss=(None if not self._loss_cfg.learn_mask()
-                       else self._loss_cfg.mask_loss_function()))
-        retval.to(self.device)
-        logger.debug("[TrainConfigure] loss: %s", retval)
-        return retval
-
-    def configure(self, model: ModelPlugin) -> LossCollator:
+    def configure(self, model: ModelPlugin) -> None:
         """Configure the given faceswap model with the user provided settings
 
         Parameters
         ----------
         model
             The Faceswap model to configure for training
-
-        Returns
-        -------
-        The configured, collated loss functions for training the model, on the training device
         """
         self._apply_initializers(model)
         # TODO reflect padding
         # TODO MSG
-        loss = self._configure_loss(model.is_rgb)
-        logger.debug("[Trainer] Configured model and loss: %s", loss)
-        return loss
+        logger.debug("[Trainer] Configured model")
 
 
 class TrainHandler:
@@ -271,19 +227,17 @@ class TrainHandler:
 
         self.name = name
         """The name of the model plugin"""
-        self._batch_size = batch_size
+        self.batch_size = batch_size
+        """The batch size that is configured for training"""
+
         self._save_interval = save_interval
         self._snapshot_interval = snapshot_interval
 
         self._model = FaceswapModel(name, num_identities, batch_size=batch_size)
         self._io = ModelIO(self._model.name, model_folder)
-
-        state_dict = self._io.load(model=self._model)
-        self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
-        self._optimizer_state = state_dict.get("optimizer")
+        self._lrf_steps = 0
 
         self._optimizer: Optimizer
-        self._loss: LossCollator
 
     @property
     def model(self) -> ModelPlugin:
@@ -303,6 +257,11 @@ class TrainHandler:
         return self._model.state.session_id
 
     @property
+    def model_folder(self) -> str:
+        """The folder that is being used to save the Faceswap model's weights"""
+        return os.path.dirname(self._io.checkpoint_path)
+
+    @property
     def model_exists(self) -> bool:
         """``True`` if a model weights file/checkpoint exists within the save folder"""
         return self._io.file_exists
@@ -312,62 +271,129 @@ class TrainHandler:
         """The configured optimizer in use"""
         return self._optimizer
 
-    @property
-    def loss(self) -> LossCollator:
-        """The configured loss functions in use"""
-        return self._loss
+    def load_state_dict(self, optimizer: Optimizer | None) -> None:
+        """Load the state from disk and set to the Model and State objects. Also loads Optimizer
+        weights if one is attached to this object or provided here.
 
-    @property
-    def lr_finder_rate(self) -> float:
-        """ The value discovered from the learning rate finder. -1.0 if no value stored """
-        return self._model.state.lr_finder
+        Parameters
+        ----------
+        optimizer
+            The configured Faceswap optimizer to additionally be loaded or ``None``. If an
+            optimizer is already attached to this object it will be replaced with the given
+            optimizer.
+        """
+        logger.info("[TrainHandler] Loading state_dict: %s", self._model)
+        state_dict = self._io.load(model=self._model)
+        self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
+        if optimizer is not None:
+            logger.debug("[TrainHandler] adding and Optimizer: %s", optimizer)
+            self._optimizer = optimizer
+        if hasattr(self, "_optimizer"):
+            logger.debug("[TrainHandler] Loading optimizer state_dict: %s", self._optimizer)
+            self._optimizer.load_state_dict(
+                T.cast(dict[T.Literal["version", "optimizer", "scaler"],
+                       float | dict[str, T.Any]],
+                       state_dict.get("optimizer", {}))
+            )
 
     def configure_model(self,
                         trainer_name: str,
-                        train_config: TrainConfigure,
-                        warmup_steps: int) -> TrainerBase:
+                        model_info: Info,
+                        mixed_precision: bool,
+                        icnr_init: bool,
+                        conv_aware_init: bool,
+                        reflect_padding: bool,
+                        device: torch.Device) -> TrainerBase:
         """Configure the model for training, applying any initialization and other post-build
-        routines. Obtain the loss function and optimizer and return the training plugin
+        routines. Place the model onto the training device and return the object responsible for
+        forward and backward passes through the model
 
         Parameters
         ----------
         trainer_name
             The name of the trainer plugin to use
-        train_config
-            The user training configuration options
-        warmup_steps
-            The number of steps to warmup the learning rate
+        model_info
+            The information about the loaded model's structure
+        mixed_precision
+            ``True`` for mixed precision training. ``False`` for full precision
+        icnr_init
+            ``True`` to initialize convolutions prior to up-scales with ICNR
+        conv_aware_init
+            ``True`` to apply conv_aware_init to all convolutions
+        reflect_padding
+            ``True`` to apply reflect padding to convolutions
 
         Returns
         -------
         The trainer plugin containing the configured model on the training device
         """
-        self._loss = train_config.configure(self.model)
-        self._optimizer = Optimizer(self._model.plugin,
-                                    train_config.optimizer_config,
-                                    train_config.mixed_precision,
-                                    warmup_steps)
-        self._optimizer.load_state_dict(T.cast(dict[T.Literal["version", "optimizer", "scaler"],
-                                                    float | T.Any],
-                                               self._optimizer_state))
-        self._optimizer.to(train_config.device)
-        self._model.to(train_config.device)
+        is_new = not self._io.file_exists
+        configurator = TrainConfigure(model_info,
+                                      icnr_init and is_new,
+                                      conv_aware_init and is_new,
+                                      reflect_padding)
+        configurator.configure(self.model)
+        self._optimizer.to(device)
+        self._model.to(device)
         self._model.plugin.train()
         retval = PluginLoader.get_trainer(trainer_name)(self._model.plugin,
-                                                        self._batch_size,
-                                                        train_config.mixed_precision,
-                                                        str(train_config.device))
+                                                        self.batch_size,
+                                                        mixed_precision,
+                                                        str(device))
+        if mixed_precision:  # TODO resume issues
+            logger.info("Enabled Auto Mixed Precision")
+
         logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
         return retval
 
-    def set_lr_from_finder(self) -> bool:
+    def _get_state_dict(self, with_optimizer: bool
+                        ) -> dict[T.Literal["model", "state", "version", "optimizer"],
+                                  float | dict[str, T.Any]]:
+        """Obtain the latest model state dict
+
+        Parameters
+        ----------
+        with_optimizer
+            ``True`` to include the optimizer's state dict
+
+        Returns
+        -------
+        The current faceswap model's state dict
+        """
+        retval = T.cast(dict[T.Literal["model", "state", "version", "optimizer"],
+                             float | dict[str, T.Any]],
+                        self._model.state_dict())
+        if with_optimizer:
+            retval |= {"optimizer": self._optimizer.state_dict()}
+        return retval
+
+    def set_lr_from_finder(self, value: float | None = None) -> bool:
         """Set the learning rate from a previous learning rate finder run
+
+        Parameters
+        ----------
+        value
+            If this is a value being loaded from the state_dict this should be ``None``. If it has
+            been received from the learning rate finder, then it should be the value that will be
+            stored, and the model set to
 
         Returns
         -------
         ``True`` if a previous LR finder rate was found and has been set. ``False`` if the LR
         finder has not been run for this model
         """
+        if value is not None:
+            # TODO Currently an issue with resuming MP. May not be LRF specific
+            self.optimizer.disable_learning_rate_finder()
+            self._model.state.lr_finder = value
+            logger.debug("[TrainHandler] Restoring model weights")
+            original_weights = torch.load(self._io.checkpoint_path)
+            self._model.load_state_dict({"model": original_weights["model"]})
+            logger.debug("[TrainHandler] Restoring optimizer weights")
+            opt_state = {k: v for k, v in original_weights["optimizer"].items()
+                         if k != "lrf_scheduler"}
+            self._optimizer.load_state_dict(opt_state)
+
         lrf_rate = self._model.state.lr_finder
         if lrf_rate < 0:
             logger.debug("[TrainHandler] Learning rate finder has not been run. Not setting LR")
@@ -377,7 +403,7 @@ class TrainHandler:
         self._model.state.learning_rate_from_finder = True
         return True
 
-    def step(self, loss_handler: LossHandler) -> bool:
+    def step(self, loss_handler: LossHandler, lrf_enabled: bool) -> bool:
         """Update the iteration count in the state file
 
         Parameters
@@ -385,11 +411,17 @@ class TrainHandler:
         loss_handler
             Holds the information about loss for the current save iteration. Reset on save
             iteration
+        lrf_enabled
+            ``True`` if the learning rate finder is enabled and running
 
         Returns
         -------
         ``True`` if the model was saved
         """
+        if lrf_enabled:  # Just signal if preview would have been updated on a save interval
+            self._lrf_steps += 1
+            return self._lrf_steps % self._save_interval == 0
+
         self._model.state.step()
 
         retval = self._model.state.session_iterations % self._save_interval == 0
@@ -407,37 +439,46 @@ class TrainHandler:
 
         return retval
 
-    def save(self, loss_handler: LossHandler, is_exit: bool = False) -> None:
+    def save(self, loss_handler: LossHandler | None, is_exit: bool = False) -> None:
         """Save the model, state and optionally the optimizer. Backup the last save if total
         average loss has dropped
 
         Parameters
         ----------
         loss_handler
+            If this is part of the main training loop then this should be the loss handler, which
+            is used to calculate if a backup should be made and resets the object for the next
+            save iteration.
+            If ``None`` then a full model checkpoint is made with no other action
             Holds the information about loss for the current save iteration. Is reset ons save
         is_exit
             ``True`` if save is being called on program exit
         """
-        state_dict = T.cast(dict[T.Literal["model", "state", "version", "optimizer"],
-                                 float | dict[str, T.Any]], self._model.state_dict())
-        average_loss = loss_handler.on_save()
-        logger.debug("[TrainHandler] Saving. average_loss: %s, is_exit: %s", average_loss, is_exit)
+        logger.debug("[TrainHandler] Saving. loss_handler: %s, is_exit: %s", loss_handler, is_exit)
+        average_loss = None
+        do_backup = False
 
-        if self.optimizer.save == "always" or (is_exit and self.optimizer.save == "exit"):
-            state_dict |= {"optimizer": self._optimizer.state_dict()}
+        average_loss = 0.0
+        if loss_handler is not None:
+            average_loss = loss_handler.on_save()
 
-        if self._model.state.lowest_avg_loss <= 0.0:
-            self._model.state.lowest_avg_loss = average_loss
+            if self._model.state.lowest_avg_loss <= 0.0:
+                self._model.state.lowest_avg_loss = average_loss
 
-        do_backup = average_loss < self._model.state.lowest_avg_loss
-        if do_backup:
-            self._io.backup()
-            self._model.state.lowest_avg_loss = average_loss
+            if do_backup:
+                self._io.backup()
+                self._model.state.lowest_avg_loss = average_loss
 
+        incl_optimizer = (loss_handler is None or
+                          average_loss == 0.0 or
+                          self.optimizer.save == "always" or
+                          (is_exit and self.optimizer.save == "exit"))
+        state_dict = self._get_state_dict(incl_optimizer)
         is_checkpoint = self._io.save(state_dict)
 
         msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"
-        msg += f" - Average loss since save: {average_loss:.5f}"
+        if average_loss != 0.0:
+            msg += f" - Average loss since save: {average_loss:.5f}"
         if do_backup:
             msg += " [Model backed up]"
         logger.info(msg)

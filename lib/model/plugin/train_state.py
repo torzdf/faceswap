@@ -172,7 +172,8 @@ class State:
                       f"batch_size={batch_size}")
 
         self._batch_size = batch_size
-        self._lr_finder = -1.0
+        self.lr_finder = -1.0
+        """The value discovered from the learning rate finder. -1 if no value stored"""
         self._sessions: dict[int, Session] = {}
         self.lowest_avg_loss: float = 0.0
         """float: The lowest average loss seen between save intervals. """
@@ -210,11 +211,6 @@ class State:
             return 0
         return self._sessions[self.session_id].iterations
 
-    @property
-    def lr_finder(self) -> float:
-        """ The value discovered from the learning rate finder. -1 if no value stored """
-        return self._lr_finder
-
     def load_state_dict(self, state_dict: dict[str, T.Any]):
         """Load the contents of the state_dict into this state object
 
@@ -226,7 +222,7 @@ class State:
         self._total_steps = state_dict.get("iterations", 0)
         self._sessions = {k: Session(**v) for k, v in state_dict.get("sessions", {}).items()}
         self.lowest_avg_loss = state_dict.get("lowest_avg_loss", 0.0)
-        self._lr_finder = state_dict.get("lr_finder", -1.0)
+        self.lr_finder = state_dict.get("lr_finder", -1.0)
         self._config.load_state_dict(state_dict.get("config", {}))
         logger.debug("[State] Loaded state_dict: %s", state_dict)
 
@@ -234,7 +230,7 @@ class State:
         """This State object's state_dict"""
         return {"iterations": self._total_steps,
                 "lowest_avg_loss": self.lowest_avg_loss,
-                "lr_finder": self._lr_finder,
+                "lr_finder": self.lr_finder,
                 "sessions": {k: asdict(v) for k, v in self._sessions.items()
                              if v.iterations > 0},
                 "config": self._config.state_dict(),
@@ -251,7 +247,7 @@ class State:
         if not self._step_called:
             assert self._batch_size is not None, "batch_size must be provided when training"
             config = self._config.session_config
-            if self.learning_rate_from_finder:
+            if self.learning_rate_from_finder:  # TODO check this
                 logger.debug("[State] Storing learning rate from finder: %s", self.lr_finder)
                 config["learning_rate"] = self.lr_finder
             self._sessions[self.session_id + 1] = Session(self._batch_size, config)

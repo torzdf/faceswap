@@ -6,6 +6,7 @@ import logging
 import os
 import typing as T
 import time
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -14,25 +15,40 @@ import torch
 
 from lib.logger import format_array, parse_class_init
 from lib.model.plugin.model_info import Info
-from lib.model.plugin import TrainHandler, TrainConfigure
 
 from lib.torch_utils import get_device
-from lib.training.preview import Samples
-from lib.training.data import get_label, PreviewLoader, TrainLoader
 from lib.training.tensorboard import TorchTensorBoard
 from lib.utils import get_module_objects, FaceswapError
 from plugins.train import train_config as mod_cfg
 
 from plugins.train.trainer import trainer_config as trn_cfg
-from plugins.train.trainer.base import TrainConfig
+
+from .data import AugmentOptions, get_label, PreviewLoader, TrainLoader
+from .loss import LossCollator
+from .lr_finder import LearningRateFinder
+from .optimizer import Optimizer
+from .preview import Samples
+
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt
+    from lib.model.plugin import TrainHandler
     from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerBase
     from .loss import BatchLoss
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrainerReturn:
+    """Return object from training loop to calling script"""
+    exit: bool = False
+    """``True`` to exist training"""
+    preview_image: npt.NDArray[np.uint8] | None = None
+    """Generated preview image if one should be shown"""
+    preview_title: str = ""
+    """Title for the generated preview image if one should be shown"""
 
 
 class LossHandler:
@@ -44,47 +60,52 @@ class LossHandler:
         The device that is being used for training
     nan_protection
         ``True`` to enable NaN protection
+    model
+        The faceswap model that is to be trained for Tensorboard. ``None`` for not logged.
+        Default: ``None``
+    model_folder
+        The full path to the folder that the model is saved to for Tensorboard. ``None`` for not
+        logged. Default: ``None``
+    model_name
+        The name of the model plugin for Tensorboard. ``None`` for not logged. Default: ``None``
+    session_id
+        The ID of the session about to commence training for Tensorboard. ``None`` for not logged.
+        Default: ``None``
     """
-    def __init__(self, device: torch.Device, nan_protection: bool) -> None:
+    def __init__(self,
+                 device: torch.Device,
+                 nan_protection: bool,
+                 model: ModelPlugin | None = None,
+                 model_folder: str | None = None,
+                 model_name: str | None = None,
+                 session_id: int | None = None) -> None:
         logger.debug(parse_class_init(locals()))
         self._device = device
         self._nan_protection = nan_protection
+        self._model = model
+        self._model_folder = model_folder
+        self._model_name = model_name
+        self._session_id = session_id
 
         self._tensorboard: TorchTensorBoard | None = None
         self._averages: dict[T.Literal["unweighted", "weighted"], dict[str, torch.Tensor]] = {}
         self._loss_count = 0
 
-    def __repr__(self) -> str:
-        """Pretty print for logging"""
-        return (f"{self.__class__.__name__}(device={repr(self._device)}, "
-                f"nan_protection={repr(self._nan_protection)})")
-
-    def set_tensorboard(self,
-                        model: ModelPlugin,
-                        model_folder: str,
-                        model_name: str,
-                        session_id: int) -> None:
-        """Set up Tensorboard callback for logging loss.
-
-        Parameters
-        ----------
-        model
-            The faceswap model that is to be trained
-        model_folder
-            The full path to the folder that the model is saved to
-        model_name
-            The name of the model plugin
-        session_id
-            The ID of the session about to commence training
-        """
-        logger.debug("[LossHandler] Setting up TensorBoard Logging. model: %s, model_folder: %s, "
-                     "model_name: %s, session_id: %s",
-                     model, repr(model_folder), repr(model_name), session_id)
-        log_dir = os.path.join(model_folder, f"{model_name}_logs", f"session_{session_id}")
+    def _set_tensorboard(self) -> None:
+        """Set up Tensorboard callback for logging loss."""
+        if self._model is None:
+            return
+        assert (self._model_folder is not None and
+                self._model_name is not None and
+                self._session_id is not None)
+        logger.debug("[LossHandler] Setting up TensorBoard Logging")
+        log_dir = os.path.join(self._model_folder,
+                               f"{self._model_name}_logs",
+                               f"session_{self._session_id}")
         tensorboard = TorchTensorBoard(log_dir=log_dir,
                                        write_graph=True,
                                        update_freq="batch")
-        tensorboard.set_model(model)
+        tensorboard.set_model(self._model)
         logger.verbose("Enabled TensorBoard Logging")  # type: ignore[attr-defined]
         self._tensorboard = tensorboard
 
@@ -140,8 +161,12 @@ class LossHandler:
         iteration
             The total training step being processed
         """
+        if iteration == 1:
+            self._set_tensorboard()
+
         if not self._tensorboard:
             return
+
         logger.trace("[LossHandler] Updating TensorBoard. iteration: %s log: %s",  # type: ignore
                      iteration, loss)
         logs: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
@@ -196,15 +221,25 @@ class LossHandler:
         print(f"{output}", end="\r")
 
     def step(self, loss: list[BatchLoss], iteration: int) -> None:
-        """Handle the logging and output of loss values for a batch
+        """Handle the logging and output of loss values for a batch.
+
+        - If lrf is not enabled:
+            - Detaches all loss values
+            - Handles NaNs
+            - Logs out to Tensorboard
+            - Tracks average since last save
+            - Prints the loss to logger if lrf is not enabled
 
         Parameters
         ----------
         loss
             The collated attached loss values on the training device in order (A, B, ...)
         iteration
-            The current total training iteration
+            The current total training iteration. Is -1 if training has not fully started (eg
+            during learning rate warmup))
         """
+        if iteration < 0:
+            return
         loss = [x.detach() for x in loss]
         self._handle_nan(loss)
         self._log_tensorboard(loss, iteration)
@@ -226,8 +261,13 @@ class LossHandler:
 
         Returns
         -------
-        The average total loss since the last save iteration
+        The average total loss since the last save iteration. 0.0 if no loss has been collated (eg
+        during learning rate finder)
         """
+        if not self._averages:
+            logger.debug("[LossHandler] No averages to output. Returning zero loss")
+            return 0.0
+
         if self._tensorboard is not None:
             self._tensorboard.on_save()
         self._output_contributions()
@@ -257,10 +297,16 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
     ----------
     trainer_name
         The name of the trainer plugin to load
-    model_name
-        The name of the faceswap model plugin that is to be trained
-    train_config:
-        The Training Configuration options
+    data_folders
+        The folders that contain the training images for each input
+    model_handler
+        The object that handles configuring and loading/saving the Faceswap model during training
+    augment_opts
+        The training data augmentation options
+    warmup_steps
+        The number of steps to warmup the learning rate
+    no_logs
+        ``True`` to disable tensorboard logging
     preview
         ``True`` to generate previews
     timelapse_folders
@@ -270,155 +316,171 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
     summary
         ``True`` to just output a summary of the model and exit. ``False`` to train.
         Default: ``False``
+    lr_finder
+        ``True`` to use the learning rate finder. Default: ``False``
     config_file
         The custom location to load configuration options from or ``None`` if default location
     """
     def __init__(self,
                  trainer_name: str,
-                 model_name: str,
-                 train_config: TrainConfig,
+                 data_folders: list[str],
+                 model_handler: TrainHandler,
+                 augment_opts: AugmentOptions,
+                 warmup_steps: int,
+                 no_logs: bool,
                  preview: bool,
                  timelapse_folders: list[str] | None = None,
-                 timelapse_output: str = "",
+                 timelapse_output: str = "",  # TODO remove and always save to model dir
                  summary: bool = False,
+                 lr_finder: bool = False,
                  config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        mod_cfg.load_config(config_file=config_file)
+        mod_cfg.load_config(config_file=config_file)  # Set global config
 
-        self._train_config = train_config
-        self._model_handler = TrainHandler(model_name,
-                                           len(train_config.folders),
-                                           train_config.batch_size,
-                                           train_config.model_folder,
-                                           train_config.save_interval,
-                                           train_config.snapshot_interval)
-        self._model_info = Info(self._model_handler.model)
-        self._model_info.summary(logger.info if summary
-                                 else logger.verbose)  # type:ignore[attr-defined]
+        self._model_handler = model_handler
+        self._optimizer = None if summary else Optimizer(self._model_handler.model,
+                                                         mod_cfg.Optimizer,
+                                                         mod_cfg.mixed_precision(),
+                                                         warmup_steps)
+
+        self._model_handler.load_state_dict(self._optimizer)  # Load saved model config
+        model_info = Info(self._model_handler.model)
+        model_info.summary(logger.info if summary else logger.verbose)  # type:ignore[attr-defined]
         if summary:
             return
 
         self._device = get_device()
-        self._trainer = self._configure_model(trainer_name, train_config.warmup_steps)
-        self._train_loader = self._get_train_loader()
+        self._loss_fn, self._trainer = self._configure_model(trainer_name, model_info)
+        self._train_loader = self._get_train_loader(model_info.input_size,
+                                                    model_info.output_shapes,
+                                                    self._model_handler.batch_size,
+                                                    data_folders,
+                                                    augment_opts)
+        self._tester = Tester(trainer_plugin=self._trainer,
+                              input_size=model_info.input_size,
+                              output_size=model_info.output_size,
+                              device=self._device,
+                              preview_folders=data_folders if preview else None,
+                              timelapse_folders=timelapse_folders,
+                              timelapse_output=timelapse_output)
 
-        self._exit_early = self._handle_lr_finder()
-        if self._exit_early:
-            logger.debug("[Trainer] Exiting from LR Finder")
-            return
-
-        self._tester = Tester(self._trainer,
-                              self._model_info,
-                              self._device,
-                              self._train_config.folders if preview else None,
-                              timelapse_folders,
-                              timelapse_output)
-        self._loss_handler = LossHandler(self._device, mod_cfg.nan_protection())
-        if not train_config.no_logs:
-            self._loss_handler.set_tensorboard(self._model_handler.model,
-                                               train_config.model_folder,
-                                               model_name,
-                                               self._model_handler.session_id + 1)
+        self._lr_finder = LearningRateFinder(
+            enabled=lr_finder,
+            trainer=self,
+            steps=mod_cfg.lr_finder_iterations(),
+            strength=T.cast(T.Literal["default", "aggressive", "extreme"],
+                            mod_cfg.lr_finder_strength()),
+            mode=T.cast(T.Literal["set", "graph_and_set", "graph_and_exit"],
+                        mod_cfg.lr_finder_mode())
+        )
+        self._loss_handler = LossHandler(self._device,
+                                         mod_cfg.nan_protection(),
+                                         None if no_logs else self._model_handler.model,
+                                         None if no_logs else self._model_handler.model_folder,
+                                         None if no_logs else self._model_handler.name,
+                                         None if no_logs else self._model_handler.session_id + 1)
 
     @property
-    def exit_early(self) -> bool:
-        """``True`` if the trainer should exit early, without performing any training steps"""
-        return self._exit_early
+    def optimizer(self) -> Optimizer:
+        """The currently training optimizer"""
+        assert self._optimizer is not None
+        return self._optimizer
 
-    def _configure_model(self, trainer_name: str, warmup_steps: int) -> TrainerBase:
-        """Add the model and the loss functions to the training plug in and move to the correct
-        device
+    def _get_train_loader(self,
+                          input_size: int,
+                          output_shapes: list[list[tuple[int, int, int]]],
+                          batch_size: int,
+                          folders: list[str],
+                          augment_opts: AugmentOptions) -> TrainLoader:
+        """Get the loaders for training the model
 
         Parameters
         ----------
-        trainer_name
-            The name of the trainer plugin to load
-        warmup_steps
-            The number of steps to warmup learning rate for
-
-        Returns
-        -------
-        The Faceswap trainer plugin with the Faceswap model loaded
-        """
-        is_new = not self._model_handler.model_exists
-        train_config = TrainConfigure(self._model_info,
-                                      loss_config=mod_cfg.Loss,
-                                      optimizer_config=mod_cfg.Optimizer,
-                                      icnr_init=mod_cfg.icnr_init() and is_new,
-                                      conv_aware_init=mod_cfg.conv_aware_init() and is_new,
-                                      mixed_precision=mod_cfg.mixed_precision(),
-                                      reflect_padding=mod_cfg.reflect_padding())
-        if train_config.mixed_precision:
-            logger.info("Enabled Auto Mixed Precision")
-        retval = self._model_handler.configure_model(trainer_name=trainer_name,
-                                                     train_config=train_config,
-                                                     warmup_steps=warmup_steps)
-        logger.debug("[Trainer] Configured model and trainer: %s", retval)
-        return retval
-
-    def _get_train_loader(self) -> TrainLoader:
-        """Get the loaders for training the model
+        input_size
+            The input size of the model
+        output_shapes
+            The shape of each output from the model ([sideA[outputs], sideB[outputs], ...])
+        batch_size
+            The batch size to load data at
+        folders
+            The folders to load data from
+        augment_opts
+            The augmentation options collected from the command line
 
         Returns
         -------
         The loaders for feeding the model's training loop
         """
-        out_sizes = [[x[1] for x in side if x[0] != 1] for side in self._model_info.output_shapes]
-        num_sides = len(self._train_config.folders)
+        out_sizes = [[x[1] for x in side if x[0] != 1] for side in output_shapes]
+        num_sides = len(folders)
         assert len(out_sizes) % num_sides == 0, (
             f"Output count ({len(out_sizes)}) doesn't match number of inputs ({num_sides})")
 
         assert len(set(x for side in out_sizes
                        for x in side)) == len(out_sizes[0]), "Sizes for each output must match"
-        retval = TrainLoader(self._model_info.input_size,
+        retval = TrainLoader(folders,
+                             batch_size,
+                             input_size,
                              tuple(out_sizes[0]),
                              "rgb" if self._model_handler.model.is_rgb else "bgr",
-                             self._train_config,
+                             augment_opts,
                              self._trainer.sampler)
         logger.debug("[Trainer] data loader: %s", retval)
         return retval
 
-    def _handle_lr_finder(self) -> bool:  # TODO
-        """Handle the learning rate finder.
+    def _configure_model(self, trainer_name: str, model_info: Info
+                         ) -> tuple[LossCollator, TrainerBase]:
+        """Add the model and the loss functions to the training plugin and move all objects to the
+        correct device
 
-        If this is a new model, then find the optimal learning rate and return ``True`` if user has
-        just requested the graph, otherwise return ``False`` to continue training
-
-        If it as existing model, set the learning rate to the value found by the learning rate
-        finder and return ``False`` to continue training
+        Parameters
+        ----------
+        trainer_name
+            The name of the trainer plugin to load
+        model_info
+            The object that contains structural information about the model
 
         Returns
         -------
-        ``True`` if the learning rate finder options dictate that training should not continue
-        after finding the optimal leaning rate
+        loss_fn
+            The collated loss functions for training the model
+        trainer
+            The Faceswap trainer plugin with the Faceswap model loaded
         """
-        if not self._train_config.lr_finder:
-            return False
+        loss = LossCollator(
+            functions=[mod_cfg.Loss.loss_function(),
+                       mod_cfg.Loss.loss_function_2(),
+                       mod_cfg.Loss.loss_function_3(),
+                       mod_cfg.Loss.loss_function_4()],
+            weights=[1.0,
+                     mod_cfg.Loss.loss_weight_2() / 100.,
+                     mod_cfg.Loss.loss_weight_3() / 100.,
+                     mod_cfg.Loss.loss_weight_4() / 100.],
+            color_order="rgb" if self._model_handler.model.is_rgb else "bgr",
+            use_mask=mod_cfg.Loss.penalized_mask_loss(),
+            eye_multiplier=mod_cfg.Loss.eye_multiplier(),
+            mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
+            smallest_output=min(x[1] for x in model_info.output_shapes[0] if x[0] != 1),
+            mask_loss=(None if not mod_cfg.Loss.learn_mask()
+                       else mod_cfg.Loss.mask_loss_function()))
 
-        if self._model_handler.set_lr_from_finder():
-            return False
-
-        if self._model_handler.total_iterations > 0 or self._model_handler.session_id > 0:
-            return False
-
-        success = self._model_handler.optimizer.find_learning_rate(
-            self,
-            mod_cfg.lr_finder_iterations(),
-            1e-10,
-            1e-1,
-            T.cast(T.Literal["default", "aggressive", "extreme"],
-                   mod_cfg.lr_finder_strength()),
-            T.cast(T.Literal["set", "graph_and_set", "graph_and_exit"],
-                   mod_cfg.lr_finder_mode())
-        )
-        return mod_cfg.lr_finder_mode() == "graph_and_exit" or not success
+        trainer = self._model_handler.configure_model(trainer_name=trainer_name,
+                                                      model_info=model_info,
+                                                      mixed_precision=mod_cfg.mixed_precision(),
+                                                      icnr_init=mod_cfg.icnr_init(),
+                                                      conv_aware_init=mod_cfg.conv_aware_init(),
+                                                      reflect_padding=mod_cfg.reflect_padding(),
+                                                      device=self._device)
+        loss.to(self._device)
+        self.optimizer.to(self._device)
+        logger.debug("[Trainer] Configured model and trainer. loss: %s trainer: %s", loss, trainer)
+        return loss, trainer
 
     def toggle_mask(self) -> None:
         """Toggle the mask overlay on or off based on user input."""
         self._tester.toggle_mask()
 
-    def step(self, gen_preview: bool, timelapse_enabled: bool
-             ) -> tuple[npt.NDArray[np.uint8], str] | None:
+    def step(self, gen_preview: bool, timelapse_enabled: bool) -> TrainerReturn:
         """Running training on a batch of images for each side.
 
         Triggered from the training cycle in :class:`scripts.train.Train`.
@@ -449,14 +511,10 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
         Returns
         -------
-        image
-            The composed preview image
-        name
-            The name (header) of the image
-
-        or ``None`` if a preview has not been generated
+        The return object with any relevant information to the caller
         """
-        iteration = self._model_handler.total_iterations + 1
+        retval = TrainerReturn()
+        iteration = -1 if self._lr_finder.is_enabled else self._model_handler.total_iterations + 1
         logger.trace("[Trainer] Training one step: (iteration: %s)",  # type:ignore[attr-defined]
                      iteration)
 
@@ -464,20 +522,26 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         loss = self._trainer.step([i.to(self._device) for i in inputs],
                                   [t.to(self._device) for t in targets],
                                   meta.to(self._device),
-                                  self._model_handler.loss,
-                                  self._model_handler.optimizer)
+                                  self._loss_fn,
+                                  self.optimizer)
         self._loss_handler.step(loss, iteration)
-        is_saved = self._model_handler.step(self._loss_handler)
-        gen_preview = gen_preview or is_saved
+        self.optimizer.step()
 
-        if is_saved and timelapse_enabled:
-            logger.debug("[Trainer] Generating timelapse")
+        if self._lr_finder.is_enabled:
+            if self._lr_finder.step(T.cast(torch.Tensor, sum(x.total for x in loss))):
+                retval.exit = True
+                return retval
+        update_preview = self._model_handler.step(self._loss_handler, self._lr_finder.is_enabled)
+
+        if update_preview and timelapse_enabled:  # TODO no TL on LRF
             self._tester(True)
-        if gen_preview:
-            logger.debug("[Trainer] Generating preview")
-            return self._tester(False)
+        if update_preview or gen_preview:
+            out = self._tester(False)
+            assert out is not None and len(out) == 2
+            retval.preview_image = out[0]
+            retval.preview_title = out[1]
 
-        return None
+        return retval
 
     def save(self, is_exit: bool = False) -> None:
         """Save the model
@@ -497,10 +561,12 @@ class Tester:
 
     Parameters
     ----------
-    trainer
+    trainer_plugin
         The faceswap trainer plugin to obtain previews from
-    model_info
-        The object containing information about the loaded model
+    input_size
+        The input size of the model
+    output_size
+        The output size of the model
     device
         The device that the model resides on
     preview_folders
@@ -512,15 +578,17 @@ class Tester:
         The folder to output timelapse images. Default: "" (no timelapse)
     """
     def __init__(self,
-                 trainer: TrainerBase,
-                 model_info: Info,
+                 trainer_plugin: TrainerBase,
+                 input_size: int,
+                 output_size: int,
                  device: torch.Device,
                  preview_folders: list[str] | None,
                  timelapse_folders: list[str] | None = None,
                  timelapse_output: str = "") -> None:
         logger.debug(parse_class_init(locals()))
-        self._trainer = trainer
-        self._model_info = model_info
+        self._trainer = trainer_plugin
+        self._input_size = input_size
+        self._output_size = output_size
         self._device = device
         self._timelapse_folders = [] if timelapse_folders is None else timelapse_folders
         self._timelapse_output = timelapse_output
@@ -548,8 +616,8 @@ class Tester:
         """
         if not preview_folders:
             return None
-        retval = PreviewLoader(self._model_info.input_size,
-                               self._model_info.output_size,
+        retval = PreviewLoader(self._input_size,
+                               self._output_size,
                                "rgb" if self._trainer.model.is_rgb else "bgr",
                                preview_folders,
                                self._batch_size,
@@ -574,8 +642,8 @@ class Tester:
         num_samples = min(num_images, avail_images)
         logger.debug("[Train] preview count: %s, available_images: %s, timelapse count: %s",
                      num_images, avail_images, num_samples)
-        retval = PreviewLoader(self._model_info.input_size,
-                               self._model_info.output_size,
+        retval = PreviewLoader(self._input_size,
+                               self._output_size,
                                "rgb" if self._trainer.model.is_rgb else "bgr",
                                self._timelapse_folders,
                                self._batch_size,
@@ -600,8 +668,8 @@ class Tester:
         ndim = 4 if mod_cfg.Loss.learn_mask() else 3
         retval = np.empty((feed.shape[0],
                            feed.shape[1],
-                           self._model_info.output_size,
-                           self._model_info.output_size, ndim),
+                           self._output_size,
+                           self._output_size, ndim),
                           dtype=np.float32)
         for idx in range(0, feed.shape[1], self._batch_size):
             feed_batch = feed[:, idx:idx + self._batch_size]
@@ -622,7 +690,7 @@ class Tester:
                 out = [y.cpu().numpy().transpose(0, 2, 3, 1)
                        for x in self._trainer.model(list(feed_batch.to(self._device)))
                        for y in x
-                       if y.shape[2] == self._model_info.output_size]  # Filter multi-scale output
+                       if y.shape[2] == self._output_size]  # Filter multi-scale output
             if mod_cfg.Loss.learn_mask():  # Apply mask to alpha channel
                 out = [np.concatenate(out[i:i + 2], axis=-1) for i in range(0, len(out), 2)]
             out_arr = np.stack(out, axis=0)
@@ -653,9 +721,11 @@ class Tester:
             return None
 
         if do_timelapse:
+            logger.debug("[Tester] Generating timelapse")
             assert self._timelapse_loader is not None
             loader = self._timelapse_loader
         else:
+            logger.debug("[Tester] Generating preview")
             assert self._preview_loader is not None
             loader = self._preview_loader
         feed, target = next(loader)
@@ -665,8 +735,8 @@ class Tester:
         predictions: npt.NDArray[np.float32] = np.empty((num_sides,
                                                          num_sides,
                                                          target.shape[1],
-                                                         self._model_info.output_size,
-                                                         self._model_info.output_size,
+                                                         self._output_size,
+                                                         self._output_size,
                                                          ndim),
                                                         dtype=np.float32)
         logger.debug("[Tester] feed: %s, target: %s, predictions_holder: %s",

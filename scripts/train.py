@@ -17,18 +17,17 @@ from lib.image import read_image_meta
 from lib.keypress import KBHit
 from lib.logger import parse_class_init
 from lib.multithreading import MultiThread, FSThread
+
 from lib.training import Preview, PreviewBuffer, TriggerType
-from lib.training.data import get_label
+from lib.training.data import AugmentOptions, get_label
+from lib.model.plugin.handler import TrainHandler
 from lib.training.train import Trainer
 from lib.utils import (get_folder, get_image_paths, get_module_objects, handle_deprecated_cli_opts,
                        FaceswapError)
-from plugins.plugin_loader import PluginLoader
-from plugins.train.trainer.base import TrainConfig
 
 
 if T.TYPE_CHECKING:
     import argparse
-    from plugins.train.model.base import ModelPlugin
 
 
 logger = logging.getLogger(__name__)
@@ -52,12 +51,13 @@ class Train():
     def __init__(self, arguments: argparse.Namespace) -> None:
         logger.debug(parse_class_init(locals()))
         self._args = handle_deprecated_cli_opts(arguments)
-        self._images = self._get_images()
 
         if self._args.summary:
-            # If just outputting summary we don't need to initialize everything
+            # If just outputting summary we don't need to initialize anything
+            self._images = [self._args.input_a, self._args.input_b]  # Just need count for summary
             return
 
+        self._images = self._get_images()
         self._timelapse = self._set_timelapse()
         gui_cache = os.path.join(
             os.path.realpath(os.path.dirname(sys.argv[0])), "lib", "gui", ".cache")
@@ -186,6 +186,52 @@ class Train():
         logger.debug("[Train] Timelapse enabled")
         return True
 
+    def _load_trainer(self) -> Trainer:
+        """Load the trainer requested for training.
+
+        Returns
+        -------
+        The model training loop with the requested trainer plugin loaded for the requested model
+        """
+        logger.debug("[Train] Loading Trainer")
+        trainer = ("distributed" if self._args.distributed and not self._args.summary
+                   else "original")
+        if trainer == "distributed":
+            import torch  # pylint:disable=import-outside-toplevel
+            gpu_count = torch.cuda.device_count()
+            if gpu_count < 2:
+                logger.warning("Distributed selected but fewer than 2 GPUs detected. Switching "
+                               "to Original")
+                trainer = "original"
+
+        aug_opts = AugmentOptions(augment_color=not self._args.no_augment_color,
+                                  flip=not self._args.no_flip,
+                                  warp=not self._args.no_warp,
+                                  cache_landmarks=self._args.warp_to_landmarks)
+        handler = TrainHandler(self._args.trainer,
+                               len(self._images),
+                               batch_size=self._args.batch_size,
+                               model_folder=self._args.model_dir,
+                               save_interval=self._args.save_interval,
+                               snapshot_interval=self._args.snapshot_interval)
+        retval = Trainer(trainer_name=trainer,
+                         data_folders=self._images,
+                         model_handler=handler,
+                         augment_opts=aug_opts,
+                         warmup_steps=self._args.warmup,
+                         no_logs=self._args.no_logs,
+                         preview=(self._args.preview or
+                                  self._args.write_image or
+                                  self._args.redirect_gui),
+                         timelapse_folders=[self._args.timelapse_input_a,
+                                            self._args.timelapse_input_b],
+                         timelapse_output=self._args.timelapse_output,
+                         summary=self._args.summary,
+                         lr_finder=self._args.use_lr_finder,
+                         config_file=self._args.config_file)
+        logger.debug("[Train] Loaded Trainer")
+        return retval
+
     def process(self) -> None:
         """The entry point for triggering the Training Process.
 
@@ -195,7 +241,6 @@ class Train():
             self._load_trainer()
             return
         logger.debug("[Train] Starting Training Process")
-        logger.info("Model directory: %s", self._args.model_dir)
         thread = self._start_thread()
         # from lib.queue_manager import queue_manager; queue_manager.debug_monitor(1)
         err = self._monitor(thread)
@@ -250,10 +295,6 @@ class Train():
             logger.debug("[Train] Commencing Training")
             logger.info("Loading data, this may take a while...")
             trainer = self._load_trainer()
-            if trainer.exit_early:  # LRF on exit
-                logger.debug("[Train] Trainer exits early")
-                self._stop = True
-                return
             self._run_training_cycle(trainer)
         except KeyboardInterrupt:
             try:
@@ -265,59 +306,6 @@ class Train():
             sys.exit(0)
         except Exception as err:
             raise err
-
-    def _load_model_old(self) -> type[ModelPlugin]:
-        """Load the model requested for training.
-
-        Returns
-        -------
-        The uninitialized requested model plugin
-        """
-        logger.debug("[Train] Loading Model")
-        return PluginLoader.get_model(self._args.trainer)
-
-    def _load_trainer(self) -> Trainer:
-        """Load the trainer requested for training.
-
-        Returns
-        -------
-        The model training loop with the requested trainer plugin loaded for the requested model
-        """
-        logger.debug("[Train] Loading Trainer")
-        trainer = ("distributed" if self._args.distributed and not self._args.summary
-                   else "original")
-        if trainer == "distributed":
-            import torch  # pylint:disable=import-outside-toplevel
-            gpu_count = torch.cuda.device_count()
-            if gpu_count < 2:
-                logger.warning("Distributed selected but fewer than 2 GPUs detected. Switching "
-                               "to Original")
-                trainer = "original"
-
-        config = TrainConfig(folders=self._images,
-                             model_folder=self._args.model_dir,
-                             batch_size=self._args.batch_size,
-                             save_interval=self._args.save_interval,
-                             snapshot_interval=self._args.snapshot_interval,
-                             warmup_steps=self._args.warmup,
-                             augment_color=not self._args.no_augment_color,
-                             flip=not self._args.no_flip,
-                             warp=not self._args.no_warp,
-                             no_logs=self._args.no_logs,
-                             cache_landmarks=self._args.warp_to_landmarks,
-                             lr_finder=self._args.use_lr_finder)
-
-        retval = Trainer(trainer,
-                         self._args.trainer,
-                         config,
-                         self._args.preview or self._args.write_image or self._args.redirect_gui,
-                         timelapse_folders=[self._args.timelapse_input_a,
-                                            self._args.timelapse_input_b],
-                         timelapse_output=self._args.timelapse_output,
-                         summary=self._args.summary,
-                         config_file=self._args.config_file)
-        logger.debug("[Train] Loaded Trainer")
-        return retval
 
     def _run_training_cycle(self, trainer: Trainer) -> None:
         """Perform the training cycle.
@@ -345,10 +333,14 @@ class Train():
             if self._preview.should_refresh or gui_triggers["refresh"]:
                 update_preview_images = preview_enabled
 
-            preview = trainer.step(update_preview_images, self._timelapse)
-            if preview is not None:
+            train_ret = trainer.step(update_preview_images, self._timelapse)
+            if train_ret.exit:
+                logger.debug("[Train] Exit received from trainer. Terminating")
+                break
+
+            if train_ret.preview_image is not None:
                 update_preview_images = False
-                self._show(preview[0], preview[1])
+                self._show(train_ret.preview_image, train_ret.preview_title)
 
             if self._stop:
                 logger.debug("[Train] Stop received. Terminating")

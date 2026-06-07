@@ -15,15 +15,12 @@ from lib.model.autoclip import AutoClipper
 from lib.model import optimizers
 from lib.utils import get_module_objects
 
-from .lr_finder import LearningRateFinder
 from .lr_warmup import WarmupScheduler
 
 if T.TYPE_CHECKING:
     from keras import Variable
-    from lib.model.plugin.handler import TrainHandler
     from plugins.train.model.base import ModelPlugin
     from plugins.train.train_config import Optimizer as OptConfig
-    from .train import Trainer
 
 
 logger = logging.getLogger(__name__)
@@ -172,7 +169,7 @@ class Optimizer:
 
         self._optimizer = self._get_optimizer(model, config)
         self._warmup = None if warmup_steps < 1 else WarmupScheduler(self._optimizer, warmup_steps)
-        self._lr_scheduler: ExponentialLR | None = None
+        self._lrf_scheduler: ExponentialLR | None = None
 
         self.save = T.cast(T.Literal["always", "exit", "never"], config.save_optimizer())
         """`When the optimizer should be saved"""
@@ -284,6 +281,7 @@ class Optimizer:
         -------
             The final state_dict grouped for torch or ``None`` if weights could not be mapped
         """
+        # TODO move to legacy?
         logger.debug("[Optimizer] Loading weights from legacy Keras optimizer")
         imported_params = state["optimizer"]["state"]
         p_groups = self._optimizer.param_groups
@@ -338,6 +336,22 @@ class Optimizer:
             logger.debug("[Optimizer] Loading scaler state_dict: %s", state_dict["scaler"])
             self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
 
+        lrf_dict = state_dict.get("lrf_scheduler")
+        if lrf_dict and self._lrf_scheduler is not None:
+            logger.info("[Optimizer] Loading LRF scheduler state_dict")
+            self._lrf_scheduler.load_state_dict(lrf_dict)
+            return
+
+        if lrf_dict:
+            logger.error("self._lrf_scheduler is NONE. Got: %s", lrf_dict)
+            # TODO
+            return
+
+        if self._lrf_scheduler is not None:
+            logger.info("[Optimizer] Deleting LRF scheduler as state_dict not imported")  # TODO
+            del self._lrf_scheduler
+            self._lrf_scheduler = None
+
     def backward(self, loss: torch.Tensor) -> None:
         """Perform the optimizer's backward pass
 
@@ -355,7 +369,13 @@ class Optimizer:
     def step(self) -> None:
         """Perform the optimizer step if valid and zero the gradients.
 
-        Handles gradient accumulation, scaling for mixed precision and gradient clipping
+        Handles gradient accumulation, scaling for mixed precision, gradient clipping and the
+        learning rate finder
+
+        Parameters
+        ----------
+        loss
+            The total loss scalar from the latest forward pass
         """
         self._accumulation_count += 1
         if self._accumulation_count != self._accumulation_steps:
@@ -372,8 +392,8 @@ class Optimizer:
             self._scaler.step(self._optimizer)
             self._scaler.update()
 
-        if self._lr_scheduler is not None:
-            self._lr_scheduler.step()
+        if self._lrf_scheduler is not None:
+            self._lrf_scheduler.step()
         elif self._warmup is not None and self._session_steps < self._warmup.steps:
             self._session_steps += 1
             self._warmup.step()
@@ -390,7 +410,9 @@ class Optimizer:
         """
         return {"version": 1.0,
                 "optimizer": self._optimizer.state_dict(),
-                "scaler": None if self._scaler is None else self._scaler.state_dict()}
+                "scaler": None if self._scaler is None else self._scaler.state_dict(),
+                "lrf_scheduler": (None if self._lrf_scheduler is None
+                                  else self._lrf_scheduler.state_dict())}
 
     def to(self, device: torch.Device) -> None:
         """Place the optimizer onto the given device
@@ -420,67 +442,35 @@ class Optimizer:
             if "initial_lr" in p:
                 p["initial_lr"] = lr
 
-    def find_learning_rate(self,
-                           trainer: Trainer,
-                           model: TrainHandler,
-                           steps: int,
-                           start_lr: float,
-                           end_lr: float,
-                           strength: T.Literal["default", "aggressive", "extreme"],
-                           mode: T.Literal["set", "graph_and_set", "graph_and_exit"]) -> bool:
-        """Use the Learning Rate Finder to discover the optimal learning rate
+    def enable_learning_rate_finder(self, steps: int, start_lr: float, end_lr: float
+                                    ) -> ExponentialLR:
+        """Enable the Learning Rate Finder on this optimizer to discover the optimal learning rate
 
         Parameters
         ----------
-        trainer
-            The training loop with the loaded training plugin
         steps
             The number of iterations to run the learning rate finder for
         start_lr
             The learning rate to start scanning from
         end_lr
             The final learning rate to scan until
-        strength
-            How aggressively to set the optimal learning rate
-        mode
-            The mode to run the Learning Rate Finder in
 
         Returns
         -------
-        ``True`` if an optimal learning rate was discovered.
+        The LearningRate scheduler used for discovering the learning rate
         """
-        original_lr = self._optimizer.param_groups[0].get("initial_lr",
-                                                          self._optimizer.param_groups[0]["lr"])
         self.set_lr(start_lr)
-        opt_state = self._optimizer.state_dict()
-        scaler_state = None if self._scaler is None else self._scaler.state_dict()
-
+        # TODO load ExponentialLR state_dict here
         gamma: float = (end_lr / start_lr) ** (1.0 / steps)
-        self._lr_scheduler = ExponentialLR(self._optimizer, gamma=gamma)
+        self._lrf_scheduler = ExponentialLR(self._optimizer, gamma=gamma)
+        logger.debug("[Optimizer] Enabled learning rate scheduler: %s", self._lrf_scheduler)
+        return self._lrf_scheduler
 
-        lrf = LearningRateFinder(trainer,
-                                 self._lr_scheduler,
-                                 steps,
-                                 strength,
-                                 mode)
-        lrf.find()
-
-        del self._lr_scheduler
-        self._lr_scheduler = None
-
-        if lrf.best_lr is None:
-            return False
-
-        logger.debug("[Optimizer] Resetting optimizer for LearningRateFinder: %s", opt_state)
-        self._optimizer.load_state_dict(opt_state)
-        if self._scaler is not None and scaler_state is not None:
-            self._scaler.load_state_dict(scaler_state)
-
-        logger.info("Updating Learning Rate from %s to %s",
-                    f"{original_lr:.1e}", f"{lrf.best_lr:.1e}")
-        self.set_lr(lrf.best_lr)
-
-        return True
+    def disable_learning_rate_finder(self) -> None:
+        """Disables the learning rate finder for the optimizer by deleting the scheduler"""
+        del self._lrf_scheduler
+        self._lrf_scheduler = None
+        logger.debug("[Optimizer] Disabled learning rate scheduler")
 
 
 __all__ = get_module_objects(__name__)

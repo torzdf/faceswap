@@ -25,9 +25,33 @@ from .data_set import get_label, get_sorted_images, to_float32
 if T.TYPE_CHECKING:
     import numpy.typing as npt
     from lib.align import CenteringType
-    from plugins.train.trainer.base import TrainConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AugmentOptions:
+    """Options denoting enabled and disabled augmentation options when data loading
+
+    Parameters
+    ----------
+    augment_color
+        ``True`` to perform color augmentation otherwise ``False``
+    flip
+        ``True`` to perform image flipping otherwise ``False``
+    warp
+        ``False`` to disable warping ``True`` to enable warping
+    cache_landmarks
+        ``True`` to cache landmarks from the other side for Warp to landmarks
+    """
+    augment_color: bool
+    """``True`` to perform color augmentation otherwise ``False``"""
+    flip: bool
+    """``False`` to disable warping ``True`` to enable warping"""
+    warp: bool
+    """``False`` to disable warping ``True`` to enable warping"""
+    cache_landmarks: bool
+    """``True`` to cache landmarks from the other side for Warp to landmarks"""
 
 
 @dataclass
@@ -278,6 +302,10 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
     Parameters
     ----------
+    num_inputs
+        The number of identities that data is being prepared for
+    batch_size
+        The batch size to collate data to
     input_size
         The pixel size of the model input
     output_sizes
@@ -285,7 +313,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
     color_order
         The color order that the model expects
     config
-        The training configuration for the model
+        The training augmentation configuration options
     landmarks
         The landmark matching object for the (A and B) sides of the model if warp_to_landmarks is
         enabled otherwise ``None``
@@ -294,20 +322,21 @@ class Collate:  # pylint:disable=too-many-instance-attributes
     """The masks that are stacked to the end of the targets in the order they are stacked"""
 
     def __init__(self,
+                 num_inputs: int,
+                 batch_size: int,
                  input_size: int,
                  output_sizes: tuple[int, ...],
                  color_order: T.Literal["bgr", "rgb"],
-                 config: TrainConfig,
+                 config: AugmentOptions,
                  landmarks: LandmarkMatcher | None) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"{self.__class__.__name__}"
+        self._num_inputs = num_inputs
+        self._batch_size = batch_size
         self._input_size = input_size
         self._output_sizes = output_sizes
         self._color_order = color_order.lower()
         self._config = config
-
-        self._num_inputs = len(config.folders)
-        self._batch_size = config.batch_size
 
         # For Warp to Landmarks
         self._landmarks = landmarks
@@ -317,15 +346,6 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         self._resize_inputs = self._process_size != self._input_size
         self._aug = ImageAugmentation(batch_size=self._batch_size * self._num_inputs,
                                       processing_size=self._process_size)
-
-    def __repr__(self) -> str:
-        """Pretty print for logging"""
-        params = {f"{k}"[1:]: format_array(v) if isinstance(v, np.ndarray) else v
-                  for k, v in self.__dict__.items()
-                  if k in ("_input_size", "_output_sizes", "_color_order",
-                           "_config", "_landmarks")}
-        s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
-        return f"{self.__class__.__name__}({s_params})"
 
     def _create_targets(self, batch: npt.NDArray[np.uint8]
                         ) -> tuple[list[torch.Tensor], BatchMeta]:

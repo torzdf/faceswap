@@ -10,7 +10,7 @@ from shutil import copyfile, copytree, rmtree
 import torch
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects
+from lib.utils import get_module_objects, get_folder
 from .legacy import KerasToTorch
 
 if T.TYPE_CHECKING:
@@ -33,7 +33,7 @@ class ModelIO:
         logger.debug(parse_class_init(locals()))
         self._name = f"[{self.__class__.__name__}.{model_name}]"
         self._model_name = model_name
-        self._model_dir = model_dir
+        self._model_dir = get_folder(model_dir)
 
         self._checkpoint_path = os.path.join(model_dir, f"{model_name}.ckpt")
         self._weights_path = os.path.join(model_dir, f"{model_name}.pth")
@@ -55,6 +55,11 @@ class ModelIO:
     def file_exists(self) -> bool:
         """``True`` if a save file exists otherwise ``False``"""
         return any(os.path.isfile(x) for x in (self._checkpoint_path, self._weights_path))
+
+    @property
+    def checkpoint_path(self) -> str:
+        """Full path to the full model checkpoint save location"""
+        return self._checkpoint_path
 
     def _get_latest_save(self) -> str | None:
         """Obtain the latest model's .ckpt or .pth file
@@ -134,7 +139,6 @@ class ModelIO:
         print("\x1b[2K", end="\r")  # Clear last line
         logger.verbose("Saving %s...",  # type:ignore[attr-defined]
                        'checkpoint' if is_checkpoint else 'model')
-
         # TODO Remove/update
         import json
         with open(f"{os.path.splitext(fname)[0]}.json", "w") as o_file:

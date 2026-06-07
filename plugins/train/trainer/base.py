@@ -10,7 +10,6 @@ from __future__ import annotations
 import abc
 import logging
 import typing as T
-from dataclasses import dataclass
 from contextlib import nullcontext
 
 import torch
@@ -27,63 +26,6 @@ if T.TYPE_CHECKING:
     from plugins.train.model.base import ModelPlugin
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TrainConfig:  # pylint:disable=too-many-instance-attributes
-    """Configuration for training a model
-
-    Parameters
-    ----------
-    image_folders
-        List of folders to be used as inputs to the model. Folders are provided in processing order
-        (eg: [A, B, ...])
-    model_folder
-        The folder that the model is to be loaded/saved to or from
-    batch_size
-        The batch size to load data from each of the loaders
-    save interval
-        The number of iterations between saves
-    snapshot interval
-        The number of iterations between snapshots
-    warmup_steps
-        The number of steps to warm the learning rate up for
-    augment_color
-        ``True`` to perform color augmentation otherwise ``False``
-    flip
-        ``True`` to perform image flipping otherwise ``False``
-    warp
-        ``False`` to disable warping ``True`` to enable warping
-    cache_landmarks
-        ``True`` to cache landmarks from the other side for Warp to landmarks
-    use_lr_finder
-        ``True`` to use the learning rate finder. Default: ``False``
-    """
-    folders: list[str]
-    """List of folders to be used as inputs to the model. Folders are provided in processing order
-    (eg: [A, B, ...])"""
-    model_folder: str
-    """The folder that the model is to be loaded/saved to or from"""
-    batch_size: int
-    """The batch size to load data from each of the loaders"""
-    save_interval: int
-    """The number of iterations between saves"""
-    snapshot_interval: int
-    """The number of iterations between snapshots"""
-    warmup_steps: int
-    """The number of steps to warm the learning rate up for"""
-    augment_color: bool
-    """``True`` to perform color augmentation otherwise ``False``"""
-    flip: bool
-    """``False`` to disable warping ``True`` to enable warping"""
-    warp: bool
-    """``False`` to disable warping ``True`` to enable warping"""
-    no_logs: bool
-    """``True`` to disable Tensorboard logging, ``False`` to enable"""
-    cache_landmarks: bool
-    """``True`` to cache landmarks from the other side for Warp to landmarks"""
-    lr_finder: bool = False
-    """``True`` to use the learning rate finder"""
 
 
 class TrainerBase(abc.ABC):
@@ -166,7 +108,7 @@ class TrainerBase(abc.ABC):
              meta: BatchMeta,
              loss_func: LossCollator,
              optimizer: Optimizer) -> list[BatchLoss]:
-        """Runs the plugin's forward and backwards passed through the model for a single batch
+        """Runs the plugin's forward and backwards pass through the model for a single batch
 
         Parameters
         ----------
@@ -215,7 +157,6 @@ class TrainerBase(abc.ABC):
                    "\n4) Use a more lightweight model, or select the model's 'LowMem' option "
                    "(in config) if it has one.")
             raise FaceswapError(msg) from err
-        optimizer.step()
         return loss
 
 

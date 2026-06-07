@@ -19,8 +19,7 @@ from .collate import Collate, LandmarkMatcher
 
 if T.TYPE_CHECKING:
     from lib.align.constants import CenteringType
-    from plugins.train.trainer.base import TrainConfig
-    from .collate import BatchMeta
+    from .collate import AugmentOptions, BatchMeta
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +30,10 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
 
     Parameters
     ----------
+    folders
+        The training dataset folders for the model
+    batch_size
+        The batch size to be trained at
     input_size
         The input size to the model
     output_sizes
@@ -38,26 +41,31 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
     color_order
         The color order of the model
     config
-        The training configuration for feeding the model
+        The training augmentation configuration options
     sampler
         The sampler to use for the data loaders. Default: ``None`` (RandomSampler)
     """
     def __init__(self,
+                 folders: list[str],
+                 batch_size: int,
                  input_size: int,
                  output_sizes: tuple[int, ...],
                  color_order: T.Literal["bgr", "rgb"],
-                 config: TrainConfig,
+                 config: AugmentOptions,
                  sampler: None | type[tch_data.RandomSampler |
                                       tch_data.DistributedSampler] = None) -> None:
         logger.debug(parse_class_init(locals()))
         self._learn_mask = mod_cfg.Loss.learn_mask()
+
+        self._folders = folders
+        self._batch_size = batch_size
         self._output_sizes = output_sizes
         self._config = config
         self._process_size = max(*self._output_sizes, input_size)
         self._landmarks: None | LandmarkMatcher = None
 
         if config.warp and config.cache_landmarks:
-            self._landmarks = LandmarkMatcher(config.folders,
+            self._landmarks = LandmarkMatcher(self._folders,
                                               self._process_size,
                                               T.cast("CenteringType", mod_cfg.centering()),
                                               mod_cfg.coverage() / 100.,
@@ -100,16 +108,18 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                            "Lowering to %s", num_workers, max_proc, max_proc - 1)
             num_workers = max_proc - 1
 
-        data_sets = tuple(TrainSet(get_label(i, len(self._config.folders)), f, self._process_size)
-                          for i, f in enumerate(self._config.folders))
+        data_sets = tuple(TrainSet(get_label(i, len(self._folders)), f, self._process_size)
+                          for i, f in enumerate(self._folders))
         train_set = MultiDataset(data_sets, is_random=True)
-        collate_fn = Collate(self._input_size,
+        collate_fn = Collate(len(self._folders),
+                             self._batch_size,
+                             self._input_size,
                              self._output_sizes,
                              self._color_order,
                              self._config,
                              landmarks=self._landmarks)
         retval = DataLoader(dataset=train_set,
-                            batch_size=self._config.batch_size,
+                            batch_size=self._batch_size,
                             sampler=self._sampler(train_set),
                             num_workers=num_workers,
                             prefetch_factor=trn_cfg.Loader.pre_fetch(),
