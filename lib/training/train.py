@@ -531,6 +531,9 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
             if self._lr_finder.step(T.cast(torch.Tensor, sum(x.total for x in loss))):
                 retval.exit = True
                 return retval
+            if not self._lr_finder.is_enabled:
+                logger.debug("[Trainer] LRF Finished")
+                return retval
         update_preview = self._model_handler.step(self._loss_handler, self._lr_finder.is_enabled)
 
         if update_preview and timelapse_enabled:  # TODO no TL on LRF

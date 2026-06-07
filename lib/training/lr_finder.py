@@ -24,6 +24,8 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# TODO save + resume during LRF
+
 class LRStrength(Enum):
     """Enum for how aggressively to set the optimal learning rate"""
     DEFAULT = 10
