@@ -193,12 +193,16 @@ class _Structure:
             hooks.append(module.register_forward_hook(self._add_forward_hook(retval, name)))
         inp = [torch.zeros([1, *model.input_shape], dtype=torch.float32)
                for _ in range(model.num_identities)]
-        # TODO put model back in correct state
+        
+        is_training = model.training
         model.eval()
         model(inp)
 
         for hook in hooks:
             hook.remove()
+
+        if is_training:
+            model.train()
 
         return retval
 

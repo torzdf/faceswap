@@ -60,6 +60,8 @@ class LossHandler:
         The device that is being used for training
     nan_protection
         ``True`` to enable NaN protection
+    input_shapes
+        The [(C, H, W)] shape of each input to the model
     model
         The faceswap model that is to be trained for Tensorboard. ``None`` for not logged.
         Default: ``None``
@@ -75,6 +77,7 @@ class LossHandler:
     def __init__(self,
                  device: torch.Device,
                  nan_protection: bool,
+                 input_shapes: list[tuple[int, int, int]],
                  model: ModelPlugin | None = None,
                  model_folder: str | None = None,
                  model_name: str | None = None,
@@ -82,6 +85,7 @@ class LossHandler:
         logger.debug(parse_class_init(locals()))
         self._device = device
         self._nan_protection = nan_protection
+        self._input_shapes = input_shapes
         self._model = model
         self._model_folder = model_folder
         self._model_name = model_name
@@ -105,7 +109,11 @@ class LossHandler:
         tensorboard = TorchTensorBoard(log_dir=log_dir,
                                        write_graph=True,
                                        update_freq="batch")
-        tensorboard.set_model(self._model)
+        if self._session_id == 1:
+            tensorboard.write_torch_graph(self._model, self._device, self._input_shapes)
+
+        del self._model  # De-ref model as no longer required
+        self._model = None
         logger.verbose("Enabled TensorBoard Logging")  # type: ignore[attr-defined]
         self._tensorboard = tensorboard
 
@@ -182,7 +190,7 @@ class LossHandler:
                 logs[f"unweighted_{key}"] = unweighted
             if out.mask is not None:
                 logs[f"mask_{lbl}"] = out.mask.mean()
-        self._tensorboard.on_train_batch_end(iteration, logs=logs)
+        self._tensorboard.step(iteration, logs=logs)
 
     def _update_averages(self, loss: list[BatchLoss]) -> None:
         """Store the total running weighted and unweighted averages for each loss function since
@@ -375,6 +383,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         )
         self._loss_handler = LossHandler(self._device,
                                          mod_cfg.nan_protection(),
+                                         model_info.input_shapes,
                                          None if no_logs else self._model_handler.model,
                                          None if no_logs else self._model_handler.model_folder,
                                          None if no_logs else self._model_handler.name,

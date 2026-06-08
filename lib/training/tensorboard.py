@@ -8,8 +8,7 @@ import os
 import struct
 import typing as T
 
-import keras
-from torch import Tensor
+import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from lib.logger import parse_class_init
@@ -110,8 +109,7 @@ class RecordIterator:
 
         return data
 
-
-class TorchTensorBoard(keras.callbacks.Callback):
+class TorchTensorBoard:
     """Enable visualizations for TensorBoard. Adapted from Keras' Tensorboard Callback keeping
     only the parts we need, and using Torch rather than TensorFlow
 
@@ -123,7 +121,7 @@ class TorchTensorBoard(keras.callbacks.Callback):
         other callbacks.
     write_graph
         Whether to visualize the graph in TensorBoard. Note that the log file can become quite
-        large when `write_graph` is set to `True`. Note: Not supported at this time
+        large when `write_graph` is set to `True`.
     update_freq
         When using `"epoch"`, writes the losses and metrics to TensorBoard after every epoch.
         If using an integer, let's say `1000`, all metrics and losses (including custom ones
@@ -145,13 +143,7 @@ class TorchTensorBoard(keras.callbacks.Callback):
         self.write_graph = write_graph
         self.update_freq = 1 if update_freq == "batch" else update_freq
 
-        self._should_write_train_graph = False
         self._train_dir = os.path.join(self.log_dir, "train")
-        self._train_step = 0
-        self._global_train_batch = 0
-        self._previous_epoch_iterations = 0
-
-        self._model: ModelPlugin | None = None
         self._writers: dict[str, SummaryWriter] = {}
         logger.debug("Initialized %s", self.__class__.__name__)
 
@@ -162,47 +154,33 @@ class TorchTensorBoard(keras.callbacks.Callback):
             self._writers["train"] = SummaryWriter(self._train_dir)
         return self._writers["train"]
 
-    def _write_keras_model_summary(self) -> None:
-        """Writes Keras graph network summary to TensorBoard."""
-        assert self._model is not None
-        # TODO model summary
-        # summary = self._model.to_json()
-        # self._train_writer.add_text("keras", summary, global_step=0)
-
-    def _write_keras_model_train_graph(self) -> None:
-        """Writes Keras graph to TensorBoard."""
-        # TODO implement
-        logger.debug("Tensorboard graph logging not yet implemented")
-
-    def set_model(self, model: ModelPlugin) -> None:
-        """Sets Keras model and writes graph if specified.
-
+    def write_torch_graph(self,
+                          model: ModelPlugin,
+                          device: torch.Device,
+                          input_shapes: list[tuple[int, int, int]]) -> None:
+        """Writes Faceswap model graph network to TensorBoard.
+        
         Parameters
         ----------
         model
-            The model that is being trained
+            The Faceswap model plugin to trace
+        device
+            The device the model is training on
+        input_shapes
+            The shape of the inputs to the model [(C, H, W), ]
         """
-        self._model = model
+        logger.debug("[TorchTensorboard] Writing model graph: %s", model)
+        is_training = model.training
+        model.eval()
+        with torch.no_grad():
+            inputs = tuple(torch.rand((1, *shape)).to(device) for shape in input_shapes)
+            self._train_writer.add_graph(model, (inputs, ), use_strict_trace=True)  # TODO switch to False
+        if is_training:
+            model.train()
 
-        if self.write_graph:
-            self._write_keras_model_summary()
-            self._should_write_train_graph = True
-
-    def on_train_begin(self, logs=None) -> None:
-        """Initialize the call back on train start
-
-        Parameters
-        ----------
-        logs
-            Unused
-        """
-        self._global_train_batch = 0
-        self._previous_epoch_iterations = 0
-
-    def on_train_batch_end(
-            self,
-            batch: int,
-            logs: dict[str, Tensor | dict[str, Tensor]] | None = None) -> None:
+    def step(self,
+             batch: int,
+             logs: dict[str, torch.Tensor | dict[str, torch.Tensor]] | None = None) -> None:
         """Update Tensorboard logs on batch end
 
         Parameters
@@ -213,13 +191,9 @@ class TorchTensorBoard(keras.callbacks.Callback):
             The logs to write
         """
         assert logs is not None
-        if self._should_write_train_graph:
-            self._write_keras_model_train_graph()
-            self._should_write_train_graph = False
-
         for key, value in logs.items():
             tag = f"batch_{key}"
-            if isinstance(value, Tensor):
+            if isinstance(value, torch.Tensor):
                 self._train_writer.add_scalar(tag, value, global_step=batch)
             elif isinstance(value, dict):
                 for k, v in value.items():

@@ -165,6 +165,6 @@ if __name__ == "__main__":
     print(p)
     print(dir(list(p.modules())[-1]))
     print(list(p.modules())[-1].out_channels)
-    x = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
-    out = p(x)
-    print([[y.shape for y in x] for x in out])
+    i = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
+    out = p(i)
+    print([[k.shape for k in j] for j in out])
