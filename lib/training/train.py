@@ -374,7 +374,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
         self._lr_finder = LearningRateFinder(
             enabled=lr_finder,
-            trainer=self,
+            model_handler=self._model_handler,
             steps=mod_cfg.lr_finder_iterations(),
             strength=T.cast(T.Literal["default", "aggressive", "extreme"],
                             mod_cfg.lr_finder_strength()),

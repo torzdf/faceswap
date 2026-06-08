@@ -19,7 +19,6 @@ from lib.utils import get_module_objects
 if T.TYPE_CHECKING:
     from torch import Tensor
     from lib.model.plugin.handler import TrainHandler
-    from lib.training.train import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,7 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
     enabled
         ``True`` if LRF has been enabled. ``False`` if disabled
     trainer
-        The configured and loaded training pipeline
+        The configured and loaded model handler
     steps
         The number of steps to run the finder for
     strength
@@ -55,7 +54,7 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
     """
     def __init__(self,
                  enabled: bool,
-                 trainer: Trainer,
+                 model_handler: TrainHandler,
                  steps: int,
                  strength: T.Literal["default", "aggressive", "extreme"],
                  mode: T.Literal["set", "graph_and_set", "graph_and_exit"],
@@ -64,28 +63,27 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         logger.debug(parse_class_init(locals()))
         self._name = "[LearningRateFinder]"
 
-        self.is_enabled = self._on_launch(enabled, trainer._model_handler)
+        self.is_enabled = self._on_launch(enabled, model_handler)
         """``True`` if LRF has been enabled. ``False`` if disabled"""
 
         if not self.is_enabled:
             logger.debug("%s Disabled. Exiting early", self._name)
             return
 
-        self._trainer = trainer
         self._steps = steps
         self._strength = LRStrength[strength.upper()].value
         self._mode = mode
         self._stop_factor = stop_factor
         self._beta = beta
 
-        self._model_handler = trainer._model_handler
+        self._model_handler = model_handler
 
         self._losses: list[float | Tensor] = []
         self._learning_rates: list[float] = []
         self._loss: dict[T.Literal["avg", "best"], float | Tensor] = {"avg": 0.0, "best": 1e9}
         self._best_lr: None | float = None
 
-        self._scheduler = trainer.optimizer.enable_learning_rate_finder(steps, 1e-10, 1e-1)
+        self._scheduler = model_handler.optimizer.enable_learning_rate_finder(steps, 1e-10, 1e-1)
 
         logger.info("Finding learning rate...")
         self._p_bar = tqdm(range(1, self._steps + 1),

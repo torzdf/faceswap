@@ -449,8 +449,7 @@ class TrainHandler:
             If this is part of the main training loop then this should be the loss handler, which
             is used to calculate if a backup should be made and resets the object for the next
             save iteration.
-            If ``None`` then a full model checkpoint is made with no other action
-            Holds the information about loss for the current save iteration. Is reset ons save
+            If ``None`` then a full model checkpoint is made with no other action.
         is_exit
             ``True`` if save is being called on program exit
         """

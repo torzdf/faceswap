@@ -242,7 +242,6 @@ class Train():
             return
         logger.debug("[Train] Starting Training Process")
         thread = self._start_thread()
-        # from lib.queue_manager import queue_manager; queue_manager.debug_monitor(1)
         err = self._monitor(thread)
         self._end_thread(thread, err)
         logger.debug("[Train] Completed Training Process")
