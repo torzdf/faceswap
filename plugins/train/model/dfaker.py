@@ -54,7 +54,7 @@ class Decoder(nn.Module):
             self.upscale_mask = nn.Sequential(*(UpscaleSubpixel(i, o) for i, o in zip(ins, outs)))
             self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
-    def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the DFaker decoder
 
         Parameters
@@ -71,11 +71,11 @@ class Decoder(nn.Module):
         x = F.sigmoid(self.conv(x))
 
         if self.upscale_mask is None:
-            return [x]
+            return (x, )
 
         mask = self.upscale_mask(inputs)
         mask = F.sigmoid(self.conv_mask(mask))
-        return [x, mask]
+        return (x, mask)
 
 
 class DFaker(ModelPlugin):
@@ -98,7 +98,7 @@ class DFaker(ModelPlugin):
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask(), output_size)
                                       for _ in range(num_identities))
 
-    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+    def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
         """Forward pass through the DFaker model
 
         Parameters
@@ -112,7 +112,7 @@ class DFaker(ModelPlugin):
         The output for each identity training through the model
         """
         encoded = [self.encoder(x) for x in inputs]
-        decoded = [dec(x) for dec, x in zip(self.decoders, encoded)]
+        decoded = tuple(dec(x) for dec, x in zip(self.decoders, encoded))
         return decoded
 
 

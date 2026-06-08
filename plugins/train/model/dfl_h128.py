@@ -92,7 +92,7 @@ class Decoder(nn.Module):
             self.upscale_mask3 = UpscaleSubpixel(encoder_dim // 2, encoder_dim // 4)
             self.conv_mask = nn.Conv2d(encoder_dim // 4, 1, 5, stride=1, padding=2)
 
-    def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the DFL-H128 decoder
 
         Parameters
@@ -111,13 +111,13 @@ class Decoder(nn.Module):
         x = F.sigmoid(self.conv(x))
 
         if self.upscale_mask1 is None:
-            return [x]
+            return (x, )
 
         mask = self.upscale_mask1(inputs)
         mask = self.upscale_mask2(mask)
         mask = self.upscale_mask3(mask)
         mask = F.sigmoid(self.conv_mask(mask))
-        return [x, mask]
+        return (x, mask)
 
 
 class DFLH128(ModelPlugin):
@@ -136,7 +136,7 @@ class DFLH128(ModelPlugin):
         self.decoders = nn.ModuleList(Decoder(encoder_dim, cfg_loss.learn_mask())
                                       for _ in range(num_identities))
 
-    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+    def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
         """Forward pass through the DFL-H128 model
 
         Parameters
@@ -150,7 +150,7 @@ class DFLH128(ModelPlugin):
         The output for each identity training through the model
         """
         encoded = [self.encoder(x) for x in inputs]
-        decoded = [dec(x) for dec, x in zip(self.decoders, encoded)]
+        decoded = tuple(dec(x) for dec, x in zip(self.decoders, encoded))
         return decoded
 
 

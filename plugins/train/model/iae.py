@@ -100,7 +100,7 @@ class Decoder(nn.Module):
             self.upscale_mask4 = UpscaleSubpixel(128, 64)
             self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
-    def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Faceswap decoder
 
         Parameters
@@ -120,7 +120,7 @@ class Decoder(nn.Module):
         x = F.sigmoid(self.conv(x))
 
         if self.upscale_mask1 is None:
-            return [x]
+            return (x, )
 
         assert (self.upscale_mask1 is not None and
                 self.upscale_mask2 is not None and
@@ -131,7 +131,7 @@ class Decoder(nn.Module):
         mask = self.upscale_mask3(mask)
         mask = self.upscale_mask4(mask)
         mask = F.sigmoid(self.conv_mask(mask))
-        return [x, mask]
+        return (x, mask)
 
 
 class IAE(ModelPlugin):
@@ -150,7 +150,7 @@ class IAE(ModelPlugin):
         self.inter_side = nn.ModuleList(Intermediate() for _ in range(num_identities))
         self.decoder = Decoder(cfg_loss.learn_mask())
 
-    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+    def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
         """Forward pass through the IAE model
 
         Parameters
@@ -166,7 +166,7 @@ class IAE(ModelPlugin):
         encoded = [self.encoder(x) for x in inputs]
         inters = [torch.concat([int(enc), self.inter_both(enc)], dim=1)
                   for enc, int in zip(encoded, self.inter_side)]
-        decoded = [self.decoder(x) for x in inters]
+        decoded = tuple(self.decoder(x) for x in inters)
         return decoded
 
 

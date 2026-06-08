@@ -11,7 +11,6 @@ import logging
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from lib.logger import parse_class_init
 from lib.model.nn_blocks import ConvBlockLegacy, UpscaleSubpixel
@@ -94,7 +93,7 @@ class Decoder(nn.Module):
             self.upscale_mask3 = UpscaleSubpixel(128, 64)
             self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
-    def forward(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Faceswap decoder
 
         Parameters
@@ -110,10 +109,10 @@ class Decoder(nn.Module):
         x = self.upscale1(inputs)
         x = self.upscale2(x)
         x = self.upscale3(x)
-        x = F.sigmoid(self.conv(x))
+        x = torch.sigmoid(self.conv(x))
 
         if self.upscale_mask1 is None:
-            return [x]
+            return (x, )
 
         assert (self.upscale_mask1 is not None and
                 self.upscale_mask2 is not None and
@@ -121,8 +120,8 @@ class Decoder(nn.Module):
         mask = self.upscale_mask1(inputs)
         mask = self.upscale_mask2(mask)
         mask = self.upscale_mask3(mask)
-        mask = F.sigmoid(self.conv_mask(mask))
-        return [x, mask]
+        mask = torch.sigmoid(self.conv_mask(mask))
+        return (x, mask)
 
 
 class Original(ModelPlugin):
@@ -140,7 +139,7 @@ class Original(ModelPlugin):
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask())
                                       for _ in range(num_identities))
 
-    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+    def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
         """Forward pass through the original model
 
         Parameters
@@ -154,7 +153,7 @@ class Original(ModelPlugin):
         The output for each identity training through the model
         """
         encoded = [self.encoder(x) for x in inputs]
-        decoded = [dec(x) for dec, x in zip(self.decoders, encoded)]
+        decoded = tuple(dec(x) for dec, x in zip(self.decoders, encoded))
         return decoded
 
 
@@ -166,3 +165,6 @@ if __name__ == "__main__":
     print(p)
     print(dir(list(p.modules())[-1]))
     print(list(p.modules())[-1].out_channels)
+    x = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
+    out = p(x)
+    print([[y.shape for y in x] for x in out])
