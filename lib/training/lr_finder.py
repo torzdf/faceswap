@@ -10,6 +10,7 @@ from enum import Enum
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
+from torch.optim.lr_scheduler import ExponentialLR
 from tqdm import tqdm
 
 from lib.logger import parse_class_init
@@ -17,18 +18,108 @@ from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
     from torch import Tensor
+    from torch.optim.optimizer import Optimizer
     from lib.model.plugin.handler import TrainHandler
 
 logger = logging.getLogger(__name__)
 
-
-# TODO save + resume during LRF
 
 class LRStrength(Enum):
     """Enum for how aggressively to set the optimal learning rate"""
     DEFAULT = 10
     AGGRESSIVE = 5
     EXTREME = 2.5
+
+
+class LRFScheduler(ExponentialLR):
+    """A scheduler that expands on ExponentialLR Scheduler to capture loss history for the Learning
+    Rate Finder duration
+
+    When last_epoch=-1, sets initial lr as lr.
+
+    Parameters
+    ----------
+    optimizer
+        Wrapped optimizer.
+    gamma
+        Multiplicative factor of learning rate decay.
+    beta
+        Amount to smooth loss by
+    total_steps
+        The number of steps to run the finder for
+    last_epoch
+        The index of last epoch. Default: -1.
+    """
+    def __init__(self,
+                 optimizer: Optimizer,
+                 gamma: float,
+                 beta: float,
+                 total_steps: int,
+                 last_epoch: int = -1
+                 ) -> None:
+        self.beta = beta
+        self.total_steps = total_steps
+        self.losses: list[float | Tensor] = []
+        self.learning_rates: list[float] = []
+        self.loss: dict[T.Literal["avg", "best"], float | Tensor] = {"avg": 0.0, "best": 1e9}
+        super().__init__(optimizer, gamma, last_epoch)
+
+    def state_dict(self) -> dict[str, T.Any]:
+        """Obtain the state dict for this scheduler"""
+        retval = super().state_dict()
+        retval["beta"] = self.beta
+        retval["total_steps"] = self.total_steps
+        retval["losses"] = self.losses
+        retval["learning_rates"] = self.learning_rates
+        return retval
+
+    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
+        """Load the state dict for the scheduler"""
+        self.beta = state_dict.pop("beta")
+        self.total_steps = state_dict.pop("total_steps")
+        self.losses = state_dict.pop("losses")
+        self.learning_rates = state_dict.pop("learning_rates")
+        super().load_state_dict(state_dict)
+
+    def step(self, epoch: int | None = None) -> None:
+        """Step the scheduler.
+
+        Parameters
+        ----------
+        epoch
+            .. deprecated:: 1.4
+            If provided, sets :attr:`last_epoch` to ``epoch`` and uses :meth:`_get_closed_form_lr`
+            if it is available. This is not universally supported. Use :meth:`step` without
+            arguments instead.
+
+        Note
+        ----
+        Call this method after calling the optimizer's :meth:`~torch.optim.Optimizer.step`.
+        """
+        super().step(epoch=epoch)
+        if self.last_epoch > 0:
+            self.learning_rates.append(T.cast(float, self.get_last_lr()[0]))
+
+    def track_loss(self, loss: Tensor) -> float | torch.Tensor:
+        """Track the latest lost values for the current step
+
+        Parameters
+        ----------
+        loss
+            The total loss scalar for the current LRF step
+
+        Returns
+        -------
+        The smoothed loss value
+        """
+        self.loss["avg"] = (self.beta * self.loss["avg"]) + ((1 - self.beta) * loss)
+        smoothed = self.loss["avg"] / (1 - (self.beta ** self.last_epoch))
+        self.losses.append(smoothed)
+
+        if self.last_epoch == 1 or smoothed < self.loss["best"]:
+            self.loss["best"] = smoothed
+
+        return smoothed
 
 
 class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
@@ -73,30 +164,23 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
             logger.debug("%s Disabled. Exiting early", self._name)
             return
 
-        self._steps = steps
         self._strength = LRStrength[strength.upper()].value
         self._mode = mode
         self._stop_factor = stop_factor
-        self._beta = beta
 
         self._model_handler = model_handler
+        self._scheduler = model_handler.optimizer.enable_learning_rate_finder(steps,
+                                                                              beta,
+                                                                              1e-10,
+                                                                              1e-1)
 
-        self._losses: list[float | Tensor] = []
-        self._learning_rates: list[float] = []
-        self._loss: dict[T.Literal["avg", "best"], float | Tensor] = {"avg": 0.0, "best": 1e9}
-        self._best_lr: None | float = None
-
-        self._scheduler = model_handler.optimizer.enable_learning_rate_finder(steps, 1e-10, 1e-1)
-
-        logger.info("Finding learning rate...")
-        self._p_bar = tqdm(range(1, self._steps + 1),
+        is_resume = self._scheduler.last_epoch > 0
+        logger.info("%s learning rate...", "Resuming" if is_resume else "Finding")
+        self._p_bar = tqdm(range(1, self._scheduler.total_steps + 1),
                            desc="Current: N/A      Best: N/A    ",
                            leave=False)
-
-    @property
-    def best_lr(self) -> None | float:
-        """The discovered best learning rate or ``None`` if not found"""
-        return self._best_lr
+        if is_resume:
+            self._update_progress_bar(self._scheduler.last_epoch + 1)
 
     def _handle_resume(self, model_handler: TrainHandler, selected_lr: float) -> bool:
         """Handle resuming the learning rate finder when model has saved and exited
@@ -115,8 +199,11 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         if os.path.exists(self._backing_file):
             logger.debug("%s Weights file exists. LRF resumes: '%s'",
                          self._name, self._backing_file)
-            # TODO save/load history
+            sched = model_handler.optimizer.lrf_scheduler
+            assert sched is not None
+            self._scheduler = sched
             return True
+
         logger.warning("Resuming Learning Rate Finder, but original weights not found: '%s'",
                        self._backing_file)
         logger.warning("Finder has been cancelled and training will commence at your selected "
@@ -147,7 +234,7 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         -------
         ``True`` if the learning rate finder should run in the training loop, otherwise ``False``
         """
-        if model_handler.optimizer.lrf_mode:
+        if model_handler.optimizer.lrf_scheduler is not None:  # Only exists when resuming LRF
             return self._handle_resume(model_handler, selected_lr)
 
         if not enabled:
@@ -185,20 +272,13 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
             logger.info("Loss has NaN'd. Exiting early")
             return True
 
-        self._learning_rates.append(T.cast(float, self._scheduler.get_last_lr()[0]))
-        self._loss["avg"] = (self._beta * self._loss["avg"]) + ((1 - self._beta) * loss)
-        smoothed = self._loss["avg"] / (1 - (self._beta ** self._scheduler.last_epoch))
-        self._losses.append(smoothed)
-
-        stop_loss = self._stop_factor * self._loss["best"]
+        smoothed = self._scheduler.track_loss(loss.detach())
+        stop_loss = self._stop_factor * self._scheduler.loss["best"]
         if self._scheduler.last_epoch > 1 and smoothed > stop_loss:
             logger.info("Loss has diverged. Exiting early")
             return True
 
-        if self._scheduler.last_epoch == 1 or smoothed < self._loss["best"]:
-            self._loss["best"] = smoothed
-
-        if self._scheduler.last_epoch == self._steps:
+        if self._scheduler.last_epoch == self._scheduler.total_steps:
             logger.debug("[LearningRateFinder] Reached final step. Exiting")
             return True
 
@@ -218,11 +298,11 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
             return
 
         matplotlib.use("Agg")
-        lrs = self._learning_rates[skip_begin:-skip_end]
-        losses = T.cast(list[float], self._losses[skip_begin:-skip_end])
+        lrs = self._scheduler.learning_rates[skip_begin:-skip_end]
+        losses = T.cast(list[float], self._scheduler.losses[skip_begin:-skip_end])
         plt.plot(lrs, losses, label="Learning Rate")
-        best_idx = self._losses.index(self._loss["best"])
-        best_lr = self._learning_rates[best_idx]
+        best_idx = self._scheduler.losses.index(self._scheduler.loss["best"])
+        best_lr = self._scheduler.learning_rates[best_idx]
         for val, color in zip(LRStrength, ("g", "y", "r")):
             l_r = best_lr / val.value
             idx = lrs.index(next(r for r in lrs if r >= l_r))
@@ -249,10 +329,10 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         ``True`` if training should exit. ``False`` to continue
         """
         print("\x1b[2K", end="\r")  # Clear line
-        self._losses = [x.item() if isinstance(x, torch.Tensor) else x for x in self._losses]
-        best_idx = self._losses.index(self._loss["best"])
-        new_lr = self._learning_rates[best_idx] / self._strength
-        self._best_lr = new_lr
+        self._scheduler.losses = [x.item() if isinstance(x, torch.Tensor) else x
+                                  for x in self._scheduler.losses]
+        best_idx = self._scheduler.losses.index(self._scheduler.loss["best"])
+        new_lr = self._scheduler.learning_rates[best_idx] / self._strength
         self._plot_loss()
 
         if new_lr < 1e-9:
@@ -266,7 +346,6 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
 
         self._model_handler.handle_lr_finder_completion(new_lr, self._backing_file)
         os.remove(self._backing_file)
-        del self._losses
         self.is_enabled = False
         return self._mode == "graph_and_exit"
 
@@ -278,9 +357,9 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         amount
             The amount to iterate the progress bar by. Default: ``None`` (1 step)
         """
-        current = self._learning_rates[-1]
-        best_idx = self._losses.index(self._loss["best"])
-        best = self._learning_rates[best_idx] / self._strength
+        current = self._scheduler.learning_rates[-1]
+        best_idx = self._scheduler.losses.index(self._scheduler.loss["best"])
+        best = self._scheduler.learning_rates[best_idx] / self._strength
         self._p_bar.update(1 if amount is None else amount)
         self._p_bar.set_description(f"Current: {current:.1e}  Best: {best:.1e}")
 

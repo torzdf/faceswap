@@ -471,12 +471,15 @@ class TrainHandler:
         if loss_handler is not None:
             average_loss = loss_handler.on_save()
 
-            if self._model.state.lowest_avg_loss <= 0.0:
-                self._model.state.lowest_avg_loss = average_loss
+        if self._model.state.lowest_avg_loss <= 0.0 and average_loss > 0.0:
+            logger.debug("[Optimizer] Setting initial lowest average loss: %s", average_loss)
+            self._model.state.lowest_avg_loss = average_loss
 
         do_backup = 0.0 < average_loss < self._model.state.lowest_avg_loss
         if do_backup:
             self._io.backup()
+            logger.debug("[Optimizer] Updating lowest average loss from: %s, to: %s",
+                         self._model.state.lowest_avg_loss, average_loss)
             self._model.state.lowest_avg_loss = average_loss
 
         incl_optimizer = (loss_handler is None or

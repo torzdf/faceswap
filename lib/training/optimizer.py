@@ -8,7 +8,6 @@ import typing as T
 
 import torch
 from torch import nn
-from torch.optim.lr_scheduler import ExponentialLR
 
 from lib.logger import parse_class_init
 from lib.model.autoclip import AutoClipper
@@ -16,6 +15,7 @@ from lib.model import optimizers
 from lib.utils import get_module_objects
 
 from .lr_warmup import WarmupScheduler
+from .lr_finder import LRFScheduler
 
 if T.TYPE_CHECKING:
     from keras import Variable
@@ -169,7 +169,7 @@ class Optimizer:
 
         self._optimizer = self._get_optimizer(model, config)
         self._warmup = None if warmup_steps < 1 else WarmupScheduler(self._optimizer, warmup_steps)
-        self._lrf_scheduler: ExponentialLR | None = None
+        self._lrf_scheduler: LRFScheduler | None = None
 
         self.save = T.cast(T.Literal["always", "exit", "never"], config.save_optimizer())
         """`When the optimizer should be saved"""
@@ -178,9 +178,9 @@ class Optimizer:
         self._session_steps = 0
 
     @property
-    def lrf_mode(self) -> bool:
-        """```True`` if the optimizer is currently running in Learning Rate Finder mode"""
-        return self._lrf_scheduler is not None
+    def lrf_scheduler(self) -> LRFScheduler | None:
+        """The learning rate scheduler, if learning rate finder is running, otherwise ``None``"""
+        return self._lrf_scheduler
 
     # TODO keep this for weight porting
     @classmethod
@@ -329,7 +329,7 @@ class Optimizer:
         """
         if not state_dict:
             return
-        logger.debug("[Optimizer] Loading state_dict")
+        logger.debug("[Optimizer] Loading state_dict: %s", list(state_dict))
 
         if state_dict["version"] == 0.5:  # Migrating from keras optimizer
             keras_state = self._from_legacy(state_dict)  # TODO validate
@@ -343,23 +343,17 @@ class Optimizer:
             self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
 
         # Learning Rate Finder resume
+        assert self._lrf_scheduler is None, ("LRF_Scheduler should not pre-exist when loading"
+                                             "state_dict")
         lrf_dict = T.cast(dict[str, T.Any], state_dict.get("lrf_scheduler"))
-        if lrf_dict and self._lrf_scheduler is not None:  # TODO this shouldn't happen
-            logger.info("[Optimizer] Loading LRF scheduler state_dict")
-            self._lrf_scheduler.load_state_dict(lrf_dict)
-            return
-
         if lrf_dict:
-            self._lrf_scheduler = ExponentialLR(self._optimizer, 1.0)
+            self._lrf_scheduler = LRFScheduler(self._optimizer,
+                                               gamma=1.0,
+                                               beta=1.0,
+                                               total_steps=1000)
             self._lrf_scheduler.load_state_dict(lrf_dict)
             logger.debug("[Optimizer] Resuming LRF from scheduler: %s",
                          self._lrf_scheduler.state_dict())
-            return
-
-        if self._lrf_scheduler is not None:  # TODO this shouldn't happen
-            logger.info("[Optimizer] Deleting LRF scheduler as state_dict not imported")
-            del self._lrf_scheduler
-            self._lrf_scheduler = None
 
     def backward(self, loss: torch.Tensor) -> None:
         """Perform the optimizer's backward pass
@@ -451,14 +445,18 @@ class Optimizer:
             if "initial_lr" in p:
                 p["initial_lr"] = lr
 
-    def enable_learning_rate_finder(self, steps: int, start_lr: float, end_lr: float
-                                    ) -> ExponentialLR:
-        """Enable the Learning Rate Finder on this optimizer to discover the optimal learning rate
+    def enable_learning_rate_finder(self, steps: int, beta: float, start_lr: float, end_lr: float
+                                    ) -> LRFScheduler:
+        """Enable the Learning Rate Finder on this optimizer to discover the optimal learning rate.
+        If a scheduler already exists (from loading state_dict from a resuming LRF session), then
+        loaded scheduler is returned. Otherwise a new scheduler is created and returned
 
         Parameters
         ----------
         steps
             The number of iterations to run the learning rate finder for
+        beta
+            The amount to smooth accumulated loss by
         start_lr
             The learning rate to start scanning from
         end_lr
@@ -468,9 +466,17 @@ class Optimizer:
         -------
         The LearningRate scheduler used for discovering the learning rate
         """
+        if self._lrf_scheduler is not None:
+            logger.debug("[Optimizer] Resuming saved learning rate scheduler: %s",
+                         self._lrf_scheduler)
+            return self._lrf_scheduler
+
         self.set_lr(start_lr)
         gamma: float = (end_lr / start_lr) ** (1.0 / steps)
-        self._lrf_scheduler = ExponentialLR(self._optimizer, gamma=gamma)
+        self._lrf_scheduler = LRFScheduler(self._optimizer,
+                                           gamma=gamma,
+                                           beta=beta,
+                                           total_steps=steps)
         logger.debug("[Optimizer] Enabled learning rate scheduler: %s", self._lrf_scheduler)
         return self._lrf_scheduler
 
