@@ -262,6 +262,11 @@ class TrainHandler:
         return os.path.dirname(self._io.checkpoint_path)
 
     @property
+    def checkpoint_file(self) -> str:
+        """The full path to where full checkpoints are saved"""
+        return self._io.checkpoint_path
+
+    @property
     def model_exists(self) -> bool:
         """``True`` if a model weights file/checkpoint exists within the save folder"""
         return self._io.file_exists
@@ -346,9 +351,9 @@ class TrainHandler:
         logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
         return retval
 
-    def _get_state_dict(self, with_optimizer: bool
-                        ) -> dict[T.Literal["model", "state", "version", "optimizer"],
-                                  float | dict[str, T.Any]]:
+    def get_state_dict(self, with_optimizer: bool
+                       ) -> dict[T.Literal["model", "state", "version", "optimizer"],
+                                 float | dict[str, T.Any]]:
         """Obtain the latest model state dict
 
         Parameters
@@ -367,33 +372,14 @@ class TrainHandler:
             retval |= {"optimizer": self._optimizer.state_dict()}
         return retval
 
-    def set_lr_from_finder(self, value: float | None = None) -> bool:
+    def set_lr_from_finder(self) -> bool:
         """Set the learning rate from a previous learning rate finder run
-
-        Parameters
-        ----------
-        value
-            If this is a value being loaded from the state_dict this should be ``None``. If it has
-            been received from the learning rate finder, then it should be the value that will be
-            stored, and the model set to
 
         Returns
         -------
         ``True`` if a previous LR finder rate was found and has been set. ``False`` if the LR
         finder has not been run for this model
         """
-        if value is not None:
-            # TODO Currently an issue with resuming MP. May not be LRF specific
-            self.optimizer.disable_learning_rate_finder()
-            self._model.state.lr_finder = value
-            logger.debug("[TrainHandler] Restoring model weights")
-            original_weights = torch.load(self._io.checkpoint_path)
-            self._model.load_state_dict({"model": original_weights["model"]})
-            logger.debug("[TrainHandler] Restoring optimizer weights")
-            opt_state = {k: v for k, v in original_weights["optimizer"].items()
-                         if k != "lrf_scheduler"}
-            self._optimizer.load_state_dict(opt_state)
-
         lrf_rate = self._model.state.lr_finder
         if lrf_rate < 0:
             logger.debug("[TrainHandler] Learning rate finder has not been run. Not setting LR")
@@ -402,6 +388,30 @@ class TrainHandler:
         self.optimizer.set_lr(lrf_rate)
         self._model.state.learning_rate_from_finder = True
         return True
+
+    def handle_lr_finder_completion(self, learning_rate: float, backing_file: str) -> None:
+        """Handle actions on the completion of a learning rate finder run.
+
+        Loads the original weights and sets the discovered learning rate to the state file.
+
+        Parameters
+        ----------
+        learning_rate
+            The optimal learning rate discovered from the learning rate finder
+        backing_file
+            The file that stores the initial weights prior to the learning rate finder being run
+        """
+        # TODO Currently an issue with resuming MP. May not be LRF specific
+        self.optimizer.disable_learning_rate_finder()
+        self._model.state.lr_finder = learning_rate
+        logger.debug("[TrainHandler] Restoring model weights from: '%s'", backing_file)
+        original_weights = torch.load(backing_file)
+        self._model.load_state_dict({"model": original_weights["model"]})
+        logger.debug("[TrainHandler] Restoring optimizer weights")
+        opt_state = {k: v for k, v in original_weights["optimizer"].items()
+                     if k != "lrf_scheduler"}  # Strip the LRF scheduler
+        self._optimizer.load_state_dict(opt_state)
+        self.set_lr_from_finder()
 
     def step(self, loss_handler: LossHandler, lrf_enabled: bool) -> bool:
         """Update the iteration count in the state file
@@ -473,7 +483,7 @@ class TrainHandler:
                           average_loss == 0.0 or
                           self.optimizer.save == "always" or
                           (is_exit and self.optimizer.save == "exit"))
-        state_dict = self._get_state_dict(incl_optimizer)
+        state_dict = self.get_state_dict(incl_optimizer)
         is_checkpoint = self._io.save(state_dict)
 
         msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 import logging
 import os
-import shutil
 import typing as T
 from datetime import datetime
 from enum import Enum
@@ -77,6 +76,8 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         self._beta = beta
 
         self._model_handler = model_handler
+        self._backing_file = os.path.join(model_handler.model_folder,
+                                          f"_{model_handler.name}_lrf.ckpt")
 
         self._losses: list[float | Tensor] = []
         self._learning_rates: list[float] = []
@@ -126,6 +127,12 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
             logger.debug("%s Disabled as not new model", self._name)
             return False
         return True
+
+    def _backup_initial_weights(self) -> None:
+        """Back up the initial weights after the first step (when optimizer has been populated)"""
+        state_dict = self._model_handler.get_state_dict(with_optimizer=True)
+        logger.debug("%s Saving initial weights: '%s'", self._name, self._backing_file)
+        torch.save(state_dict, self._backing_file)
 
     def _on_batch_end(self, loss: Tensor) -> bool:
         """Learning rate actions to perform at the end of a batch
@@ -210,15 +217,20 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         self._losses = [x.item() if isinstance(x, torch.Tensor) else x for x in self._losses]
         best_idx = self._losses.index(self._loss["best"])
         new_lr = self._learning_rates[best_idx] / self._strength
+        self._best_lr = new_lr
+        self._plot_loss()
+
         if new_lr < 1e-9:
             logger.error("The optimal learning rate could not be found. This is most likely "
                          "because you did not run the finder for enough iterations.")
-            shutil.rmtree(self._model_handler.model_folder)  # TODO
+            logger.debug("%s Removing generated files: %s",
+                         self._name, [self._backing_file, self._model_handler.checkpoint_file])
+            if os.path.exists(self._model_handler.checkpoint_file):
+                os.remove(self._model_handler.checkpoint_file)
             return True
 
-        self._best_lr = new_lr
-        self._plot_loss()
-        self._model_handler.set_lr_from_finder(new_lr)
+        self._model_handler.handle_lr_finder_completion(new_lr, self._backing_file)
+        os.remove(self._backing_file)
         del self._losses
         self.is_enabled = False
         return self._mode == "graph_and_exit"
@@ -250,8 +262,7 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         ``True`` if Process should exit. ``False`` to keep running
         """
         if self._scheduler.last_epoch == 1:  # Need to have populated optimizer weights on step 1
-            logger.debug("%s Saving initial weights", self._name)
-            self._model_handler.save(None)
+            self._backup_initial_weights()
 
         if self._on_batch_end(loss):
             self._p_bar.close()
