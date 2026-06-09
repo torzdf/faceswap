@@ -177,6 +177,11 @@ class Optimizer:
         self._accumulation_count = 0
         self._session_steps = 0
 
+    @property
+    def lrf_mode(self) -> bool:
+        """```True`` if the optimizer is currently running in Learning Rate Finder mode"""
+        return self._lrf_scheduler is not None
+
     # TODO keep this for weight porting
     @classmethod
     def _get_optimizer_kwargs(cls, config: type[OptConfig]) -> dict[str, T.Any]:
@@ -312,7 +317,8 @@ class Optimizer:
 
         return state
 
-    def load_state_dict(self, state_dict: dict[T.Literal["version", "optimizer", "scaler"],
+    def load_state_dict(self, state_dict: dict[T.Literal["version", "optimizer",
+                                                         "scaler", "lrf_scheduler"],
                                                float | dict[str, T.Any]]) -> None:
         """Load the serialized data from a state dict into this object
 
@@ -336,19 +342,22 @@ class Optimizer:
             logger.debug("[Optimizer] Loading scaler state_dict: %s", state_dict["scaler"])
             self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
 
-        lrf_dict = state_dict.get("lrf_scheduler")
-        if lrf_dict and self._lrf_scheduler is not None:
+        # Learning Rate Finder resume
+        lrf_dict = T.cast(dict[str, T.Any], state_dict.get("lrf_scheduler"))
+        if lrf_dict and self._lrf_scheduler is not None:  # TODO this shouldn't happen
             logger.info("[Optimizer] Loading LRF scheduler state_dict")
             self._lrf_scheduler.load_state_dict(lrf_dict)
             return
 
         if lrf_dict:
-            logger.error("self._lrf_scheduler is NONE. Got: %s", lrf_dict)
-            # TODO
+            self._lrf_scheduler = ExponentialLR(self._optimizer, 1.0)
+            self._lrf_scheduler.load_state_dict(lrf_dict)
+            logger.debug("[Optimizer] Resuming LRF from scheduler: %s",
+                         self._lrf_scheduler.state_dict())
             return
 
-        if self._lrf_scheduler is not None:
-            logger.info("[Optimizer] Deleting LRF scheduler as state_dict not imported")  # TODO
+        if self._lrf_scheduler is not None:  # TODO this shouldn't happen
+            logger.info("[Optimizer] Deleting LRF scheduler as state_dict not imported")
             del self._lrf_scheduler
             self._lrf_scheduler = None
 
@@ -460,7 +469,6 @@ class Optimizer:
         The LearningRate scheduler used for discovering the learning rate
         """
         self.set_lr(start_lr)
-        # TODO load ExponentialLR state_dict here
         gamma: float = (end_lr / start_lr) ** (1.0 / steps)
         self._lrf_scheduler = ExponentialLR(self._optimizer, gamma=gamma)
         logger.debug("[Optimizer] Enabled learning rate scheduler: %s", self._lrf_scheduler)

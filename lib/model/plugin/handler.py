@@ -291,12 +291,12 @@ class TrainHandler:
         state_dict = self._io.load(model=self._model)
         self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
         if optimizer is not None:
-            logger.debug("[TrainHandler] adding and Optimizer: %s", optimizer)
+            logger.debug("[TrainHandler] adding Optimizer: %s", optimizer)
             self._optimizer = optimizer
         if hasattr(self, "_optimizer"):
             logger.debug("[TrainHandler] Loading optimizer state_dict: %s", self._optimizer)
             self._optimizer.load_state_dict(
-                T.cast(dict[T.Literal["version", "optimizer", "scaler"],
+                T.cast(dict[T.Literal["version", "optimizer", "scaler", "lrf_scheduler"],
                        float | dict[str, T.Any]],
                        state_dict.get("optimizer", {}))
             )

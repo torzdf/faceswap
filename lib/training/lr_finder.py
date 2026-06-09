@@ -40,6 +40,8 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         ``True`` if LRF has been enabled. ``False`` if disabled
     trainer
         The configured and loaded model handler
+    selected_lr
+        The selected learning rate from the user configuration options
     steps
         The number of steps to run the finder for
     strength
@@ -54,6 +56,7 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
     def __init__(self,
                  enabled: bool,
                  model_handler: TrainHandler,
+                 selected_lr: float,
                  steps: int,
                  strength: T.Literal["default", "aggressive", "extreme"],
                  mode: T.Literal["set", "graph_and_set", "graph_and_exit"],
@@ -61,8 +64,9 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
                  beta: float = 0.98) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = "[LearningRateFinder]"
-
-        self.is_enabled = self._on_launch(enabled, model_handler)
+        self._backing_file = os.path.join(model_handler.model_folder,
+                                          f"_{model_handler.name}_lrf.ckpt")
+        self.is_enabled = self._on_launch(enabled, model_handler, selected_lr)
         """``True`` if LRF has been enabled. ``False`` if disabled"""
 
         if not self.is_enabled:
@@ -76,8 +80,6 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         self._beta = beta
 
         self._model_handler = model_handler
-        self._backing_file = os.path.join(model_handler.model_folder,
-                                          f"_{model_handler.name}_lrf.ckpt")
 
         self._losses: list[float | Tensor] = []
         self._learning_rates: list[float] = []
@@ -96,7 +98,34 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         """The discovered best learning rate or ``None`` if not found"""
         return self._best_lr
 
-    def _on_launch(self, enabled: bool, model_handler: TrainHandler) -> bool:
+    def _handle_resume(self, model_handler: TrainHandler, selected_lr: float) -> bool:
+        """Handle resuming the learning rate finder when model has saved and exited
+
+        Parameters
+        ----------
+        model_handler
+            The object that handles the model and the optimizer
+        selected_lr
+            The selected learning rate from the user configuration options
+
+        Returns
+        -------
+        ``True`` if learning rate finder can resume
+        """
+        if os.path.exists(self._backing_file):
+            logger.debug("%s Weights file exists. LRF resumes: '%s'",
+                         self._name, self._backing_file)
+            # TODO save/load history
+            return True
+        logger.warning("Resuming Learning Rate Finder, but original weights not found: '%s'",
+                       self._backing_file)
+        logger.warning("Finder has been cancelled and training will commence at your selected "
+                       "learning rate: %s", selected_lr)
+        model_handler.optimizer.disable_learning_rate_finder()
+        model_handler.optimizer.set_lr(selected_lr)
+        return False
+
+    def _on_launch(self, enabled: bool, model_handler: TrainHandler, selected_lr: float) -> bool:
         """Process the LR Finder on startup.
 
         If not enabled just return ``False``.
@@ -109,11 +138,18 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         ----------
         enabled
             ``True`` if the Learning Rate Finder is enabled. ``False`` if it is disabled
+        model_handler
+            The object that handles the model and the optimizer
+        selected_lr
+            The selected learning rate from the user configuration options
 
         Returns
         -------
         ``True`` if the learning rate finder should run in the training loop, otherwise ``False``
         """
+        if model_handler.optimizer.lrf_mode:
+            return self._handle_resume(model_handler, selected_lr)
+
         if not enabled:
             logger.debug("%s Disabled", self._name)
             return False
@@ -122,7 +158,6 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
             logger.debug("%s Disabling as LR set from previous Finder", self._name)
             return False
 
-        # TODO check for state resume. Will have implications for existence of state file
         if model_handler.total_iterations > 0 or model_handler.session_id > 0:
             logger.debug("%s Disabled as not new model", self._name)
             return False
