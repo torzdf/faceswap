@@ -11,6 +11,7 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.initializers import icnr, ConvolutionAware
+from lib.model.layers import SamePad2d
 from lib.utils import get_module_objects
 
 from plugins.plugin_loader import PluginLoader
@@ -184,6 +185,62 @@ class TrainConfigure:
                 if v.bias is not None:
                     nn.init.zeros_(v.bias)
 
+    def _apply_reflect_padding_pad(self, parent: nn.Module, qual_name="") -> None:
+        """Recurse through the modules to switch padding on legacy SamePad2d layers
+
+        Parameters
+        ----------
+        parent
+            The parent module to evaluate for SamePad2d layers
+        """
+        for name, module in parent.named_children():
+            if isinstance(module, SamePad2d):
+                logger.debug("[TrainConfigure] Reflect pad SamePad2D '%s.%s'. kernel: %s, "
+                             "stride: %s, original mode: %s",
+                             qual_name, name, module.kernel, module.stride, module.mode)
+                setattr(parent, name, SamePad2d(module.kernel, module.stride, mode="reflect"))
+            else:
+                qual_name = ".".join(x for x in (qual_name, name) if x)
+                self._apply_reflect_padding_pad(module, qual_name)
+
+    def _apply_reflect_padding(self, model: ModelPlugin) -> None:
+        """Apply reflect padding on qualifying convolution layers
+
+        Parameters
+        ----------
+        model
+            The Faceswap model to apply reflect padding to
+        """
+        if not self._reflect_padding:
+            logger.debug("[TrainConfigure] No reflect padding to apply")
+            return
+        self._apply_reflect_padding_pad(model)
+        for name, module in model.named_modules():
+            if not isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                continue
+            pad = module.padding
+            stride = module.stride
+            kern = module.kernel_size
+            if all(p == 0 for p in (pad if isinstance(pad, tuple) else (pad, pad))):
+                logger.debug("[TrainConfigure] Skip conv '%s' with zero padding: %s",
+                             name, pad)
+                continue
+            if module.padding_mode != "zeros":
+                logger.debug("[TrainConfigure] Skip conv '%s' with non-zero padding: %s",
+                             name, repr(module.padding_mode))
+                continue
+            if all(k == 1 for k in (kern if isinstance(kern, tuple) else (kern, kern))):
+                logger.debug("[TrainConfigure] Skip conv '%s' with kernel size == 1", name)
+                continue
+            if any(s > 1 for s in (stride if isinstance(stride, tuple) else (stride, stride))):
+                logger.debug("[TrainConfigure] Skip conv '%s' with stride > 1: %s",
+                             name, stride)
+                continue
+            logger.debug("[TrainConfigure] Reflect pad conv '%s'. padding: %s, kernel: %s, "
+                         "stride: %s, original mode: %s",
+                         name, pad, module.kernel_size, module.stride, module.padding_mode)
+            module.padding_mode = "reflect"
+
     def configure(self, model: ModelPlugin) -> None:
         """Configure the given faceswap model with the user provided settings
 
@@ -193,7 +250,7 @@ class TrainConfigure:
             The Faceswap model to configure for training
         """
         self._apply_initializers(model)
-        # TODO reflect padding
+        self._apply_reflect_padding(model)
         # TODO MSG
         logger.debug("[Trainer] Configured model")
 
@@ -471,7 +528,7 @@ class TrainHandler:
         if loss_handler is not None:
             average_loss = loss_handler.on_save()
 
-        if self._model.state.lowest_avg_loss <= 0.0 and average_loss > 0.0:
+        if self._model.state.lowest_avg_loss <= 0.0 < average_loss:
             logger.debug("[Optimizer] Setting initial lowest average loss: %s", average_loss)
             self._model.state.lowest_avg_loss = average_loss
 
