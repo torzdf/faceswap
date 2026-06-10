@@ -40,6 +40,8 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# TODO ping-pong
+
 @dataclass
 class TrainerReturn:
     """Return object from training loop to calling script"""

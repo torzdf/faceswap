@@ -9,7 +9,7 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlockLegacy, UpscaleSubpixel
-from lib.utils import get_module_objects
+from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
 from . import dfl_sae_defaults as cfg
@@ -259,10 +259,10 @@ class DFLSae(ModelPlugin):
     """
     def __init__(self, num_identities: int = 2) -> None:
         logger.debug(parse_class_init(locals()))
+        if num_identities != 2:
+            raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
+                                "the number of identities or choose a different model")
         super().__init__(num_identities, input_size=cfg.input_size())
-        print(self.input_shape, cfg.input_size())
-        exit()
-
         self.architecture = cfg.architecture().lower()
 
         enc_dim = cfg.encoder_dims()
@@ -326,5 +326,5 @@ if __name__ == "__main__":
     # print(dir(list(p.modules())[-1]))
     # print(list(p.modules())[-1].out_channels)
     #
-    out = p(i)
-    print([[k.shape for k in j] for j in out])
+    out_ = p(i)
+    print([[k.shape for k in j] for j in out_])
