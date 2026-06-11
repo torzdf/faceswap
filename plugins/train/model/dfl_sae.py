@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlockLegacy, UpscaleSubpixel
+from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -163,7 +163,7 @@ class InterLIAE(nn.Module):
         return x
 
 
-class Decoder(nn.Module):
+class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
     """The original DeepFaceLab SAE Decoder Network.
 
     Parameters
@@ -188,24 +188,24 @@ class Decoder(nn.Module):
         self._multiscale_count = multiscale_count
         self._learn_mask = learn_mask
 
-        self.upscale1 = UpscaleSubpixel(in_channels, dims * 8)  # TODO size
+        self.upscale1 = UpscaleSubpixel(in_channels, dims * 8)
         self.leaky1 = nn.LeakyReLU(negative_slope=0.2)
-        self.res1_1 = ResidualBlockLegacy(dims * 8, dims * 8)
-        self.res1_2 = ResidualBlockLegacy(dims * 8, dims * 8)
+        self.res1_1 = ResidualBlock(dims * 8, dims * 8, padding=1)
+        self.res1_2 = ResidualBlock(dims * 8, dims * 8, padding=1)
         if multiscale_count >= 3:
             self.conv_out1 = nn.Conv2d(dims * 8, 3, 5, stride=1, padding=2)
 
         self.upscale2 = UpscaleSubpixel(dims * 8, dims * 4)
         self.leaky2 = nn.LeakyReLU(negative_slope=0.2)
-        self.res2_1 = ResidualBlockLegacy(dims * 4, dims * 4)
-        self.res2_2 = ResidualBlockLegacy(dims * 4, dims * 4)
+        self.res2_1 = ResidualBlock(dims * 4, dims * 4, padding=1)
+        self.res2_2 = ResidualBlock(dims * 4, dims * 4, padding=1)
         if multiscale_count >= 3:
             self.conv_out2 = nn.Conv2d(dims * 4, 3, 5, stride=1, padding=2)
 
         self.upscale3 = UpscaleSubpixel(dims * 4, dims * 2)
         self.leaky3 = nn.LeakyReLU(negative_slope=0.2)
-        self.res3_1 = ResidualBlockLegacy(dims * 2, dims * 2)
-        self.res3_2 = ResidualBlockLegacy(dims * 2, dims * 2)
+        self.res3_1 = ResidualBlock(dims * 2, dims * 2, padding=1)
+        self.res3_2 = ResidualBlock(dims * 2, dims * 2, padding=1)
 
         self.conv_out = nn.Conv2d(dims * 2, 3, 5, stride=1, padding=2)
 

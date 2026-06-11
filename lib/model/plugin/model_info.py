@@ -78,6 +78,8 @@ class Layer:  # pylint:disable=too-many-instance-attributes
         The output tensors from the layer, in output layout (eg all lists still nested)
     num_params
         The number of parameters in the layer
+    num_buffers
+        The number of (non-trainable) buffers in the layer
     requires_grad
         True if the layer requires grad
     """
@@ -88,6 +90,7 @@ class Layer:  # pylint:disable=too-many-instance-attributes
                  input_shape: tuple[int, ...] | list[tuple[int, ...]],
                  output: torch.Tensor | list[torch.Tensor],
                  num_params: int,
+                 num_buffers: int,
                  requires_grad: bool) -> None:
         self.name = name
         """The module name of the layer"""
@@ -101,7 +104,9 @@ class Layer:  # pylint:disable=too-many-instance-attributes
                                    _recurse_to_tensor(output, "shape"))
         """The output shape(s) from the layer"""
         self.num_params = num_params
-        """The number of parameters in the """
+        """The number of parameters in the layer"""
+        self.num_buffers = num_buffers
+        """The number of (non-trainable) buffers in the layer"""
         self.requires_grad = requires_grad
         """True if the layer requires grad"""
         self.call_count: int = 0
@@ -119,7 +124,7 @@ class Layer:  # pylint:disable=too-many-instance-attributes
         params = {k if k != "type" else "layer_type": self._output_repr if k == "output" else v
                   for k, v in self.__dict__.items()
                   if k in ("name", "type", "is_parent", "input_shape", "output",
-                           "num_params", "requires_grad")}
+                           "num_params", "num_buffers", "requires_grad")}
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
@@ -165,16 +170,18 @@ class _Structure:
         """
         def hook_fn(module: nn.Module, inputs: torch.Tensor, outputs: torch.Tensor) -> None:
             assert len(inputs) == 1
-            layer = summary.get(name,
-                                Layer(name=name,
-                                      layer_type=module.__class__.__name__,
-                                      is_parent=len(list(module.children())) > 0,
-                                      input_shape=T.cast(tuple[int, ...] | list[tuple[int, ...]],
-                                                         _recurse_to_tensor(inputs[0], "shape")),
-                                      output=_recurse_to_tensor(outputs),
-                                      num_params=sum(p.numel() for p in module.parameters()),
-                                      requires_grad=any(p.requires_grad
-                                                        for p in module.parameters())))
+            layer = summary.get(
+                name,
+                Layer(name=name,
+                      layer_type=module.__class__.__name__,
+                      is_parent=len(list(module.children())) > 0,
+                      input_shape=T.cast(tuple[int, ...] | list[tuple[int, ...]],
+                                         _recurse_to_tensor(inputs[0], "shape")),
+                      output=_recurse_to_tensor(outputs),
+                      num_params=sum(p.numel() for p in module.parameters()),
+                      num_buffers=sum(p.numel() for n, p in module.named_buffers()
+                                      if n != 'num_batches_tracked'),  # Exclude BN scalar tracker
+                      requires_grad=any(p.requires_grad for p in module.parameters())))
             layer.call_count += 1
             summary[name] = layer
         return hook_fn
@@ -193,7 +200,7 @@ class _Structure:
             hooks.append(module.register_forward_hook(self._add_forward_hook(retval, name)))
         inp = [torch.zeros([1, *model.input_shape], dtype=torch.float32)
                for _ in range(model.num_identities)]
-        
+
         is_training = model.training
         model.eval()
         model(inp)
@@ -374,17 +381,18 @@ class Info:
                      "\n".join(str(x[1:]) for x in _flatten_list([info.input_shape])),
                      "\n".join(str(x[1:]) for x in _flatten_list([info.output_shape])),
                      "\n".join(info.input_layers),
-                     f"{info.num_params:,}"]
+                     f"{info.num_params + info.num_buffers:,}"]
                     for layer, info in self._structure.structure.items()
                     if not info.is_parent)
         train_params = sum(v.num_params for v in self._structure.structure.values()
                            if not v.is_parent and v.requires_grad)
         non_train_params = sum(v.num_params for v in self._structure.structure.values()
                                if not v.is_parent and not v.requires_grad)
+        buffers = sum(v.num_buffers for v in self._structure.structure.values() if not v.is_parent)
         Tabulate(rows, padding=0, just=["ljust", "rjust", "rjust", "ljust", "rjust"])(print_fn)
-        print_fn(f"Total parameters: {train_params + non_train_params:,}")
+        print_fn(f"Total parameters: {train_params + non_train_params + buffers:,}")
         print_fn(f"Trainable parameters: {train_params:,}")
-        print_fn(f"Non-trainable parameters: {non_train_params:,}")
+        print_fn(f"Non-trainable parameters: {non_train_params + buffers:,}")
 
 
 __all__ = get_module_objects(__name__)

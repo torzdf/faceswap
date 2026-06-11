@@ -31,7 +31,7 @@ class ConvBlockLegacy(nn.Module):
         The number of strides. Default: 1
     padding
         The padding to use. Default: "same"
-    relu_slope
+    leaky_slope
         The value to use for LeakyReLu negative slope. Default: 0.1
     """
     def __init__(self,
@@ -40,7 +40,7 @@ class ConvBlockLegacy(nn.Module):
                  kernel_size: int,
                  stride: int = 1,
                  padding: T.Literal["same", "valid"] = "same",
-                 relu_slope: float = 0.1) -> None:
+                 leaky_slope: float = 0.1) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.pad = SamePad2d(kernel_size, stride) if padding == "same" else None
@@ -49,7 +49,7 @@ class ConvBlockLegacy(nn.Module):
                               kernel_size=kernel_size,
                               stride=stride,
                               padding=0)
-        self.leaky = nn.LeakyReLU(negative_slope=relu_slope, inplace=True)
+        self.leaky = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Faceswap Keras Convolutional Layer.
@@ -66,7 +66,8 @@ class ConvBlockLegacy(nn.Module):
         x = inputs
         if self.pad is not None:
             x = self.pad(x)
-        return self.leaky(self.conv(x))
+        x = self.conv(x)
+        return self.leaky(x)
 
 
 class UpscaleSubpixel(nn.Module):
@@ -80,19 +81,25 @@ class UpscaleSubpixel(nn.Module):
         The output channels from the upscale block
     scale_factor
         The amount to upscale by image. Default: `2`
+    leaky_slope
+        The value to use for LeakyReLu negative slope. Negative values remove activation
+        altogether. Default: 0.1.
     """
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
-                 scale_factor: int = 2) -> None:
+                 scale_factor: int = 2,
+                 leaky_slope: float = 0.1) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+        self.activate = leaky_slope >= 0.0
         self.conv = nn.Conv2d(in_channels,
                               out_channels * scale_factor * scale_factor,
                               3,
                               stride=1,
                               padding=1)
-        self.leaky = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        if self.activate:
+            self.leaky = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
         self.pixel_shuffle = nn.PixelShuffle(scale_factor)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -107,10 +114,13 @@ class UpscaleSubpixel(nn.Module):
         -------
         The output tensor from the Upscale Subpixel Layer
         """
-        return self.pixel_shuffle(self.leaky(self.conv(inputs)))
+        x = self.conv(inputs)
+        if self.activate:
+            x = self.leaky(x)
+        return self.pixel_shuffle(x)
 
 
-class ResidualBlockLegacy(nn.Module):  # TODO this does not need to be legacy if no models call with stride > 1
+class ResidualBlock(nn.Module):
     """Residual block adapted from dfaker, using legacy keras padding
 
     Parameters
@@ -126,26 +136,31 @@ class ResidualBlockLegacy(nn.Module):  # TODO this does not need to be legacy if
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
     padding
-        The padding to use. Default: `"same"`
+        The padding to use "same", "valid" or int value. Default: 0
+    bias
+        ``True`` to add learnable bias to the output. Default: ``True``
     """
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
                  kernel_size: int = 3,
-                 padding: T.Literal["same", "valid"] = "same") -> None:
+                 padding: T.Literal["same", "valid"] | int = 0,
+                 bias: bool = True) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.conv1 = ConvBlockLegacy(in_channels,
-                                     out_channels,
-                                     kernel_size,
-                                     padding=padding,
-                                     relu_slope=0.2)
+        self.conv1 = nn.Conv2d(in_channels,
+                               out_channels,
+                               kernel_size,
+                               padding=padding,
+                               bias=bias)
+        self.leaky1 = nn.LeakyReLU(negative_slope=0.2, inplace=True)
         self.conv2 = nn.Conv2d(out_channels,
                                out_channels,
                                kernel_size,
-                               padding=padding)
+                               padding=padding,
+                               bias=bias)
         nn.init.xavier_uniform_(self.conv2.weight, gain=0.2)
-        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.leaky2 = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Residual Block
@@ -160,9 +175,10 @@ class ResidualBlockLegacy(nn.Module):  # TODO this does not need to be legacy if
         The output tensor from the Residual Layer
         """
         x = self.conv1(inputs)
+        x = self.leaky1(x)
         x = self.conv2(inputs)
         x = x + inputs
-        return self.leaky_relu(x)
+        return self.leaky2(x)
 
 
 __all__ = get_module_objects(__name__)

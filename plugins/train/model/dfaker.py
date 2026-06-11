@@ -12,7 +12,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import UpscaleSubpixel, ResidualBlockLegacy
+from lib.model.nn_blocks import UpscaleSubpixel, ResidualBlock
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -44,7 +44,7 @@ class Decoder(nn.Module):
         self.upscale = nn.Sequential(
             *(nn.Sequential(OrderedDict({"up": UpscaleSubpixel(i, o),
                                          "act": nn.LeakyReLU(negative_slope=0.2),
-                                         "res": ResidualBlockLegacy(o, o)}))
+                                         "res": ResidualBlock(o, o, padding=1)}))
               for i, o in zip(ins, outs))
         )
         self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)

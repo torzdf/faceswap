@@ -344,7 +344,7 @@ class TrainHandler:
             optimizer is already attached to this object it will be replaced with the given
             optimizer.
         """
-        logger.info("[TrainHandler] Loading state_dict: %s", self._model)
+        logger.debug("[TrainHandler] Loading state_dict: %s", self._model)
         state_dict = self._io.load(model=self._model)
         self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
         if optimizer is not None:

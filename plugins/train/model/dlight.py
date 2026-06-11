@@ -7,216 +7,515 @@
     kvrooman for numerous insights and invaluable aid
     DeepHomage for lots of testing
     """
+from __future__ import annotations
+
 import logging
+import typing as T
+from collections import OrderedDict
 
-from keras import layers, Input, Model as KModel
+import torch
+from torch import nn
 
-from lib.model.nn_blocks_legacy import (Conv2DOutput, Conv2DBlock, ResidualBlock, UpscaleBlock,
-                                 Upscale2xBlock)
-from lib.utils import FaceswapError
+from lib.logger import parse_class_init
+from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
-
-from ._base import ModelBase
+from .base import ModelPlugin
 from . import dlight_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
 
 
-class Model(ModelBase):
-    """ DLight Autoencoder Model """
+class Upscale2xBlock(nn.Module):
+    """Custom hybrid upscale layer for sub-pixel up-scaling.
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.input_shape = (128, 128, 3)
+    Most of up-scaling is approximating lighting gradients which can be accurately achieved
+    using linear fitting. This layer attempts to improve memory consumption by splitting
+    with bilinear and convolutional layers so that the sub-pixel update will get details
+    whilst the bilinear filter will get lighting.
 
-        self.features = {"lowmem": 0, "fair": 1, "best": 2}[cfg.features()]
-        self.encoder_filters = 64 if self.features > 0 else 48
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
 
-        bonum_fortunam = 128
-        self.encoder_dim = {0: 512 + bonum_fortunam,
-                            1: 1024 + bonum_fortunam,
-                            2: 1536 + bonum_fortunam}[self.features]
-        self.details = {"fast": 0, "good": 1}[cfg.details()]
-        try:
-            self.upscale_ratio = {128: 2,
-                                  256: 4,
-                                  384: 6}[cfg.output_size()]
-        except KeyError as err:
-            logger.error("Config error: output_size must be one of: 128, 256, or 384.")
-            raise FaceswapError("Config error: output_size must be one of: "
-                                "128, 256, or 384.") from err
+    Parameters
+    ----------
+    in_channels
+        The input channels to the upscale block
+    out_channels
+        The output channels from the upscale block
+    scale_factor
+        The amount to upscale by image. Default: `2`
+    sr_ratio
+        The proportion of super resolution (pixel shuffler) filters to use. Non-fast mode only.
+        Default: `0.5`
+    fast
+        Use a faster up-scaling method that may appear more rugged. Default: ``False``
+    activation
+        ``True`` to enable leaky_relu activation in pixel shuffler layer. Default: ``True``
+    """
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 scale_factor: int = 2,
+                 sr_ratio: float = 0.5,
+                 fast: bool = False,
+                 activation: bool = True) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.fast = fast
+        self.out_channels = (out_channels if fast
+                             else out_channels - int(out_channels * sr_ratio))
 
-        logger.debug("output_size: %s, features: %s, encoder_filters: %s, encoder_dim: %s, "
-                     " details: %s, upscale_ratio: %s", cfg.output_size(), self.features,
-                     self.encoder_filters, self.encoder_dim, self.details, self.upscale_ratio)
+        self.upscale = UpscaleSubpixel(in_channels,
+                                       self.out_channels,
+                                       scale_factor=scale_factor,
+                                       leaky_slope=0.1 if activation else -1.0)
+        if self.fast or (not self.fast and self.out_channels > 0):
+            self.conv = nn.Conv2d(in_channels, self.out_channels, 3, padding=1)
+            self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
 
-    def build_model(self, inputs):
-        """ Build the Dlight Model. """
-        encoder = self.encoder()
-        encoder_a = encoder(inputs[0])
-        encoder_b = encoder(inputs[1])
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Call the Upscale Subpixel Layer.
 
-        decoder_b = self.decoder_b if self.details > 0 else self.decoder_b_fast
+        Parameters
+        ----------
+        inputs
+            The input to the Upscale Subpixel layer
 
-        outputs = self.decoder_a()(encoder_a) + decoder_b()(encoder_b)
+        Returns
+        -------
+        The output tensor from the Upscale Subpixel Layer
+        """
+        x = inputs
+        if self.fast:
+            x = self.conv(x)
+            x = self.upsample(x)
+            x1 = self.upscale(x)
+            x = x1 + x
+        else:
+            x_sr = self.upscale(x)
+            if self.out_channels > 0:
+                x = self.conv(x)
+                x = self.upsample(x)
+                x = torch.concat([x_sr, x], dim=1)
+            else:
+                x = x_sr
+        return x
 
-        autoencoder = KModel(inputs, outputs, name=self.model_name)
-        return autoencoder
 
-    def encoder(self):
-        """ DeLight Encoder Network """
-        input_ = Input(shape=self.input_shape)
-        var_x = input_
+class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Dlight Encoder
 
-        var_x1 = Conv2DBlock(self.encoder_filters // 2, activation="leakyrelu")(var_x)
-        var_x2 = layers.AveragePooling2D(pool_size=(2, 2))(var_x)
-        var_x2 = layers.LeakyReLU(0.1)(var_x2)
-        var_x = layers.Concatenate()([var_x1, var_x2])
+    Parameters
+    ----------
+    encoder_filters
+        The base filters to use for each convolution
+    encoder_dim
+        The bottleneck size
+    """
+    def __init__(self, encoder_filters: int, encoder_dim: int) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
 
-        var_x1 = Conv2DBlock(self.encoder_filters, activation="leakyrelu")(var_x)
-        var_x2 = layers.AveragePooling2D(pool_size=(2, 2))(var_x)
-        var_x2 = layers.LeakyReLU(0.1)(var_x2)
-        var_x = layers.Concatenate()([var_x1, var_x2])
+        in_chan = 3
+        out_chan = encoder_filters // 2
+        self.conv1 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        self.pool1 = nn.AvgPool2d((2, 2))
+        self.leaky1 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
-        var_x1 = Conv2DBlock(self.encoder_filters * 2, activation="leakyrelu")(var_x)
-        var_x2 = layers.AveragePooling2D(pool_size=(2, 2))(var_x)
-        var_x2 = layers.LeakyReLU(0.1)(var_x2)
-        var_x = layers.Concatenate()([var_x1, var_x2])
+        in_chan += out_chan
+        out_chan *= 2
+        self.conv2 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        self.pool2 = nn.AvgPool2d((2, 2))
+        self.leaky2 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
-        var_x1 = Conv2DBlock(self.encoder_filters * 4, activation="leakyrelu")(var_x)
-        var_x2 = layers.AveragePooling2D(pool_size=(2, 2))(var_x)
-        var_x2 = layers.LeakyReLU(0.1)(var_x2)
-        var_x = layers.Concatenate()([var_x1, var_x2])
+        in_chan += out_chan
+        out_chan *= 2
+        self.conv3 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        self.pool3 = nn.AvgPool2d((2, 2))
+        self.leaky3 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
-        var_x1 = Conv2DBlock(self.encoder_filters * 8, activation="leakyrelu")(var_x)
-        var_x2 = layers.AveragePooling2D(pool_size=(2, 2))(var_x)
-        var_x2 = layers.LeakyReLU(0.1)(var_x2)
-        var_x = layers.Concatenate()([var_x1, var_x2])
+        in_chan += out_chan
+        out_chan *= 2
+        self.conv4 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        self.pool4 = nn.AvgPool2d((2, 2))
+        self.leaky4 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
-        var_x = layers.Dense(self.encoder_dim)(layers.Flatten()(var_x))
-        var_x = layers.Dropout(0.05)(var_x)
-        var_x = layers.Dense(4 * 4 * 1024)(var_x)
-        var_x = layers.Dropout(0.05)(var_x)
-        var_x = layers.Reshape((4, 4, 1024))(var_x)
+        in_chan += out_chan
+        out_chan *= 2
+        self.conv5 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        self.pool5 = nn.AvgPool2d((2, 2))
+        self.leaky5 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
-        return KModel(input_, var_x, name="encoder")
+        in_chan += out_chan
+        self.flatten = nn.Flatten(start_dim=1)
+        self.dense1 = nn.Linear(in_chan * 4 * 4, encoder_dim)
+        self.drop1 = nn.Dropout(p=0.05)
+        self.dense2 = nn.Linear(encoder_dim, 1024 * 4 * 4)
+        self.drop2 = nn.Dropout(p=0.05)
 
-    def decoder_a(self):
-        """ DeLight Decoder A(old face) Network """
-        input_ = Input(shape=(4, 4, 1024))
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the Dlight encoder
+
+        Parameters
+        ----------
+        inputs
+            The input to the encoder
+
+        Returns
+        -------
+        The output from the encoder
+        """
+        x1 = self.conv1(inputs)
+        x2 = self.pool1(inputs)
+        x2 = self.leaky1(x2)
+        x = torch.concat((x1, x2), dim=1)
+
+        x1 = self.conv2(x)
+        x2 = self.pool2(x)
+        x2 = self.leaky2(x2)
+        x = torch.concat((x1, x2), dim=1)
+
+        x1 = self.conv3(x)
+        x2 = self.pool3(x)
+        x2 = self.leaky3(x2)
+        x = torch.concat((x1, x2), dim=1)
+
+        x1 = self.conv4(x)
+        x2 = self.pool4(x)
+        x2 = self.leaky4(x2)
+        x = torch.concat((x1, x2), dim=1)
+
+        x1 = self.conv5(x)
+        x2 = self.pool5(x)
+        x2 = self.leaky5(x2)
+        x = torch.concat((x1, x2), dim=1)
+
+        x = self.drop1(self.dense1(self.flatten(x)))
+        x = T.cast(torch.Tensor, self.drop2(self.dense2(x)))
+        return x.view(x.shape[0], 1024, 4, 4)
+
+
+class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Dlight Faceswap Decoder A Network.
+
+    Parameters
+    ----------
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    upscale_ratio
+        The amount to upscale the input to the layer
+    """
+    def __init__(self, learn_mask: bool, upscale_ratio: int) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.learn_mask = learn_mask
+
         dec_a_complexity = 256
         mask_complexity = 128
 
-        var_xy = input_
-        var_xy = layers.UpSampling2D(self.upscale_ratio, interpolation='bilinear')(var_xy)
+        self.upscale1 = nn.UpsamplingBilinear2d(scale_factor=upscale_ratio)
+        self.upscale2 = Upscale2xBlock(1024, dec_a_complexity, fast=False)
+        self.upscale3 = Upscale2xBlock(dec_a_complexity, dec_a_complexity // 2, fast=False)
+        self.upscale4 = Upscale2xBlock(dec_a_complexity // 2, dec_a_complexity // 4, fast=False)
+        self.upscale5 = Upscale2xBlock(dec_a_complexity // 4, dec_a_complexity // 8, fast=False)
+        self.conv = nn.Conv2d(dec_a_complexity // 8, 3, 5, stride=1, padding=2)
 
-        var_x = var_xy
-        var_x = Upscale2xBlock(dec_a_complexity, activation="leakyrelu", fast=False)(var_x)
-        var_x = Upscale2xBlock(dec_a_complexity // 2, activation="leakyrelu", fast=False)(var_x)
-        var_x = Upscale2xBlock(dec_a_complexity // 4, activation="leakyrelu", fast=False)(var_x)
-        var_x = Upscale2xBlock(dec_a_complexity // 8, activation="leakyrelu", fast=False)(var_x)
+        if self.learn_mask:
+            self.upscale_mask1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.upscale_mask2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.upscale_mask3 = Upscale2xBlock(mask_complexity // 2,
+                                                mask_complexity // 4,
+                                                fast=False)
+            self.upscale_mask4 = Upscale2xBlock(mask_complexity // 4,
+                                                mask_complexity // 8,
+                                                fast=False)
+            self.conv_mask = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
-        var_x = Conv2DOutput(3, 5, name="face_out")(var_x)
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Forward pass through the Dlight decoder A
 
-        outputs = [var_x]
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
 
-        if cfg_loss.learn_mask():
-            var_y = var_xy  # mask decoder
-            var_y = Upscale2xBlock(mask_complexity, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 2, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 4, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 8, activation="leakyrelu", fast=False)(var_y)
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.upscale1(inputs)
+        xy = x
+        x = self.upscale2(x)
+        x = self.upscale3(x)
+        x = self.upscale4(x)
+        x = self.upscale5(x)
+        x = torch.sigmoid(self.conv(x))
 
-            var_y = Conv2DOutput(1, 5, name="mask_out")(var_y)
+        if not self.learn_mask:
+            return (x, )
 
-            outputs.append(var_y)
+        mask = self.upscale_mask1(xy)
+        mask = self.upscale_mask2(mask)
+        mask = self.upscale_mask3(mask)
+        mask = self.upscale_mask4(mask)
+        mask = torch.sigmoid(self.conv_mask(mask))
+        return (x, mask)
 
-        return KModel([input_], outputs=outputs, name="decoder_a")
 
-    def decoder_b_fast(self):
-        """ DeLight Fast Decoder B(new face) Network  """
-        input_ = Input(shape=(4, 4, 1024))
+class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Dlight Faceswap Decoder B Network.
+
+    Parameters
+    ----------
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    upscale_ratio
+        The amount to upscale the input to the layer
+    """
+    def __init__(self, learn_mask: bool, upscale_ratio: int) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.learn_mask = learn_mask
 
         dec_b_complexity = 512
         mask_complexity = 128
 
-        var_xy = input_
+        self.upscale1 = nn.Sequential(OrderedDict({
+            "up": Upscale2xBlock(1024,
+                                 dec_b_complexity,
+                                 scale_factor=upscale_ratio,
+                                 fast=False,
+                                 activation=False),
+            "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            "res1": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=True),
+            "res2": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False),
+            "res3": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False)
+        }))
 
-        var_xy = UpscaleBlock(512, scale_factor=self.upscale_ratio, activation="leakyrelu")(var_xy)
-        var_x = var_xy
+        self.upscale2 = nn.Sequential(OrderedDict({
+            "up": Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=False, activation=False),
+            "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            "res1": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=True),
+            "res2": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False),
+            "bn": nn.BatchNorm2d(dec_b_complexity, eps=0.001, momentum=0.01)
+        }))
 
-        var_x = Upscale2xBlock(dec_b_complexity, activation="leakyrelu", fast=True)(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity // 2, activation="leakyrelu", fast=True)(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity // 4, activation="leakyrelu", fast=True)(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity // 8, activation="leakyrelu", fast=True)(var_x)
+        self.upscale3 = nn.Sequential(OrderedDict({
+            "up": Upscale2xBlock(dec_b_complexity,
+                                 dec_b_complexity // 2,
+                                 fast=False,
+                                 activation=False),
+            "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            "res": ResidualBlock(dec_b_complexity // 2,
+                                 dec_b_complexity // 2,
+                                 padding=1,
+                                 bias=True)
+        }))
 
-        var_x = Conv2DOutput(3, 5, name="face_out")(var_x)
+        self.upscale4 = nn.Sequential(OrderedDict({
+            "up": Upscale2xBlock(dec_b_complexity // 2,
+                                 dec_b_complexity // 4,
+                                 fast=False,
+                                 activation=False),
+            "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            "res": ResidualBlock(dec_b_complexity // 4,
+                                 dec_b_complexity // 4,
+                                 padding=1,
+                                 bias=False),
+            "bn": nn.BatchNorm2d(dec_b_complexity // 4, eps=0.001, momentum=0.01)
+        }))
 
-        outputs = [var_x]
+        self.upscale5 = Upscale2xBlock(dec_b_complexity // 4,
+                                       dec_b_complexity // 8,
+                                       fast=False,
+                                       activation=True)
+        self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
-        if cfg_loss.learn_mask():
-            var_y = var_xy  # mask decoder
+        if self.learn_mask:
+            self.upscale_mask1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.upscale_mask2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.upscale_mask3 = Upscale2xBlock(mask_complexity // 2,
+                                                mask_complexity // 4,
+                                                fast=False)
+            self.upscale_mask4 = Upscale2xBlock(mask_complexity // 4,
+                                                mask_complexity // 8,
+                                                fast=False)
+            self.conv_mask = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
-            var_y = Upscale2xBlock(mask_complexity, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 2, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 4, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 8, activation="leakyrelu", fast=False)(var_y)
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Forward pass through the Dlight decoder B
 
-            var_y = Conv2DOutput(1, 5, name="mask_out")(var_y)
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
 
-            outputs.append(var_y)
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.upscale1(inputs)
+        xy = x
 
-        return KModel([input_], outputs=outputs, name="decoder_b_fast")
+        x = self.upscale2(x)
+        x = self.upscale3(x)
+        x = self.upscale4(x)
+        x = self.upscale5(x)
+        x = torch.sigmoid(self.conv(x))
 
-    def decoder_b(self):
-        """ DeLight Decoder B(new face) Network  """
-        input_ = Input(shape=(4, 4, 1024))
+        if not self.learn_mask:
+            return (x, )
+
+        mask = self.upscale_mask1(xy)
+        mask = self.upscale_mask2(mask)
+        mask = self.upscale_mask3(mask)
+        mask = self.upscale_mask4(mask)
+        mask = torch.sigmoid(self.conv_mask(mask))
+        return (x, mask)
+
+
+class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Dlight Faceswap Decoder B Fast Network.
+
+    Parameters
+    ----------
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    upscale_ratio
+        The amount to upscale the input to the layer
+    """
+    def __init__(self, learn_mask: bool, upscale_ratio: int) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.learn_mask = learn_mask
 
         dec_b_complexity = 512
         mask_complexity = 128
 
-        var_xy = input_
+        self.upscale1 = UpscaleSubpixel(1024, dec_b_complexity, scale_factor=upscale_ratio)
+        self.upscale2 = Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=True)
+        self.upscale3 = Upscale2xBlock(dec_b_complexity, dec_b_complexity // 2, fast=True)
+        self.upscale4 = Upscale2xBlock(dec_b_complexity // 2, dec_b_complexity // 4, fast=True)
+        self.upscale5 = Upscale2xBlock(dec_b_complexity // 4, dec_b_complexity // 8, fast=True)
 
-        var_xy = Upscale2xBlock(512,
-                                scale_factor=self.upscale_ratio,
-                                activation=None,
-                                fast=False)(var_xy)
-        var_x = var_xy
+        self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(512, use_bias=True)(var_x)
-        var_x = ResidualBlock(512, use_bias=False)(var_x)
-        var_x = ResidualBlock(512, use_bias=False)(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity, activation=None, fast=False)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(dec_b_complexity, use_bias=True)(var_x)
-        var_x = ResidualBlock(dec_b_complexity, use_bias=False)(var_x)
-        var_x = layers.BatchNormalization()(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity // 2, activation=None, fast=False)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(dec_b_complexity // 2, use_bias=True)(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity // 4, activation=None, fast=False)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(dec_b_complexity // 4, use_bias=False)(var_x)
-        var_x = layers.BatchNormalization()(var_x)
-        var_x = Upscale2xBlock(dec_b_complexity // 8, activation="leakyrelu", fast=False)(var_x)
+        if self.learn_mask:
+            self.upscale_mask1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.upscale_mask2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.upscale_mask3 = Upscale2xBlock(mask_complexity // 2,
+                                                mask_complexity // 4,
+                                                fast=False)
+            self.upscale_mask4 = Upscale2xBlock(mask_complexity // 4,
+                                                mask_complexity // 8,
+                                                fast=False)
+            self.conv_mask = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
-        var_x = Conv2DOutput(3, 5, name="face_out")(var_x)
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Forward pass through the Dlight B Fast decoder
 
-        outputs = [var_x]
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
 
-        if cfg_loss.learn_mask():
-            var_y = var_xy  # mask decoder
-            var_y = layers.LeakyReLU(negative_slope=0.1)(var_y)
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.upscale1(inputs)
+        xy = x
+        x = self.upscale2(x)
+        x = self.upscale3(x)
+        x = self.upscale4(x)
+        x = self.upscale5(x)
+        x = torch.sigmoid(self.conv(x))
 
-            var_y = Upscale2xBlock(mask_complexity, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 2, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 4, activation="leakyrelu", fast=False)(var_y)
-            var_y = Upscale2xBlock(mask_complexity // 8, activation="leakyrelu", fast=False)(var_y)
+        if not self.learn_mask:
+            return (x, )
 
-            var_y = Conv2DOutput(1, 5, name="mask_out")(var_y)
+        mask = self.upscale_mask1(xy)
+        mask = self.upscale_mask2(mask)
+        mask = self.upscale_mask3(mask)
+        mask = self.upscale_mask4(mask)
+        mask = torch.sigmoid(self.conv_mask(mask))
+        return (x, mask)
 
-            outputs.append(var_y)
 
-        return KModel([input_], outputs=outputs, name="decoder_b")
+class Dlight(ModelPlugin):
+    """ Dlight Faceswap Model.
+
+    Parameters
+    ----------
+    num_identities
+        The number of identities that the model is to be trained on. Default: 2
+    """
+    def __init__(self, num_identities: int = 2) -> None:
+        logger.debug(parse_class_init(locals()))
+        if num_identities != 2:
+            raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
+                                "the number of identities or choose a different model")
+        super().__init__(num_identities, input_size=128)
+
+        learn_mask = cfg_loss.learn_mask()
+        features = {"lowmem": 0, "fair": 1, "best": 2}[cfg.features()]
+        details = {"fast": 0, "good": 1}[cfg.details()]
+
+        up_ratios = {128: 2, 256: 4, 384: 64}
+        out_size = cfg.output_size()
+        if out_size not in up_ratios:
+            raise FaceswapError("Config error: output_size must be one of: 128, 256, or 384.")
+        upscale_ratio = up_ratios[out_size]
+
+        encoder_filters = 64 if features > 0 else 48
+        bonum_fortunam = 128
+        encoder_dim = {0: 512 + bonum_fortunam,
+                       1: 1024 + bonum_fortunam,
+                       2: 1536 + bonum_fortunam}[features]
+
+        dec_b = DecoderB if details > 0 else DecoderBFast
+        self.encoder = Encoder(encoder_filters, encoder_dim)
+        self.decoders = nn.ModuleList((DecoderA(learn_mask, upscale_ratio),
+                                       dec_b(learn_mask, upscale_ratio)))
+
+    def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
+        """Forward pass through the original model
+
+        Parameters
+        ----------
+        inputs: list
+            A list of input tensors for the model. This will be of length num_identities with each
+            tensor of shape (N, C, H, W)
+
+        Returns
+        -------
+        The output for each identity training through the model
+        """
+        encoded = [self.encoder(x) for x in inputs]
+        decoded = tuple(dec(x) for dec, x in zip(self.decoders, encoded))
+        return decoded
+
+
+__all__ = get_module_objects(__name__)
+
+if __name__ == "__main__":
+    size = 128
+    # TODO remove after validation
+    i = [torch.rand((1, 3, size, size)), torch.rand((1, 3, size, size))]
+    # e = Encoder(256, 512)
+    # out = e(i[0])
+
+    # print(out.shape)
+    # exit()
+    p = Dlight(2)
+    print(p)
+    # print(dir(list(p.modules())[-1]))
+    # print(list(p.modules())[-1].out_channels)
+    #
+    out_ = p(i)
+    print([[k.shape for k in j] for j in out_])
