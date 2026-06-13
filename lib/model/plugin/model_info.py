@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import typing as T
 
 import torch
@@ -70,6 +71,8 @@ class Layer:  # pylint:disable=too-many-instance-attributes
         The module name of the layer
     layer_type: str
         The type (ClassName) of the layer
+    is_plugin: bool
+        ``True`` if the layer originates from plugins.train.model
     is_parent
         ``True`` if this module contains sub-modules
     input_shape: list[torch.Size]
@@ -80,23 +83,32 @@ class Layer:  # pylint:disable=too-many-instance-attributes
         The number of parameters in the layer
     num_buffers
         The number of (non-trainable) buffers in the layer
+    param_bytes
+        The number of bytes for the parameters
+    buffer_bytes
+        The number of bytes for the buffers
     requires_grad
         True if the layer requires grad
     """
-    def __init__(self,
+    def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
                  name: str,
                  layer_type: str,
+                 is_plugin: bool,
                  is_parent: bool,
                  input_shape: tuple[int, ...] | list[tuple[int, ...]],
                  output: torch.Tensor | list[torch.Tensor],
                  num_params: int,
                  num_buffers: int,
+                 param_bytes: int,
+                 buffer_bytes: int,
                  requires_grad: bool) -> None:
         self.name = name
         """The module name of the layer"""
         self.type = layer_type
         """The type (ClassName) of the layer"""
-        self.is_parent: bool = is_parent
+        self.is_plugin = is_plugin
+        """``True`` if the layer originates from plugins.train.model"""
+        self.is_parent = is_parent
         """``True`` if this module contains sub-modules"""
         self.input_shape = input_shape
         """The tensor information for the layer inputs"""
@@ -107,6 +119,10 @@ class Layer:  # pylint:disable=too-many-instance-attributes
         """The number of parameters in the layer"""
         self.num_buffers = num_buffers
         """The number of (non-trainable) buffers in the layer"""
+        self.param_bytes = param_bytes
+        """The number of bytes for the parameters"""
+        self.buffer_bytes = buffer_bytes
+        """The number of bytes for the buffers"""
         self.requires_grad = requires_grad
         """True if the layer requires grad"""
         self.call_count: int = 0
@@ -123,8 +139,8 @@ class Layer:  # pylint:disable=too-many-instance-attributes
     def __repr__(self) -> str:
         params = {k if k != "type" else "layer_type": self._output_repr if k == "output" else v
                   for k, v in self.__dict__.items()
-                  if k in ("name", "type", "is_parent", "input_shape", "output",
-                           "num_params", "num_buffers", "requires_grad")}
+                  if k not in ("call_count", "input_layers", "grad_fn")
+                  and not k.startswith("_")}
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
@@ -148,6 +164,8 @@ class _Structure:
     def __init__(self, model: ModelPlugin) -> None:
         logger.debug(parse_class_init(locals()))
         self._structure = self._get_structure(model)
+        self.num_inputs = model.num_identities
+        """The number of identities the model is configured for"""
 
     @property
     def structure(self) -> dict[str, Layer]:
@@ -174,13 +192,15 @@ class _Structure:
                 name,
                 Layer(name=name,
                       layer_type=module.__class__.__name__,
+                      is_plugin=module.__module__.startswith("plugins.train.model."),
                       is_parent=len(list(module.children())) > 0,
                       input_shape=T.cast(tuple[int, ...] | list[tuple[int, ...]],
                                          _recurse_to_tensor(inputs[0], "shape")),
                       output=_recurse_to_tensor(outputs),
                       num_params=sum(p.numel() for p in module.parameters()),
-                      num_buffers=sum(p.numel() for n, p in module.named_buffers()
-                                      if n != 'num_batches_tracked'),  # Exclude BN scalar tracker
+                      num_buffers=sum(p.numel() for p in module.buffers()),
+                      param_bytes=sum(p.numel() * p.element_size() for p in module.parameters()),
+                      buffer_bytes=sum(p.numel() * p.element_size() for p in module.buffers()),
                       requires_grad=any(p.requires_grad for p in module.parameters())))
             layer.call_count += 1
             summary[name] = layer
@@ -294,6 +314,257 @@ class _Structure:
         return layers
 
 
+class _Summary:
+    """Generates model summary information from a collected structure
+
+    Parameters
+    ----------
+    name
+        The name of the model to summarize
+    structure
+        The traced structure of the model
+    """
+    def __init__(self, name: str, structure: _Structure) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._name = name
+        self._structure = structure
+        self._header = [["Layer (type)", "Input Shape", "Output Shape", "Connected To", "Params"]]
+
+    def _get_parents(self) -> dict[str, list[str]]:
+        """Obtain the top-level module names and the number of instances of the module that exists
+        within the model
+
+        Returns
+        -------
+        The name of the parent module to list of names of modules that are of identical type for
+        that module, in the order they appear within the model structure
+        """
+        plugin_modules = [x.name  # Modules defined within faceswap plugins
+                          for x in self._structure.structure.values()
+                          if x.is_plugin and x.is_parent and x.name != self._name]
+        plugin_map = {}
+        for name in plugin_modules:
+            if not any(name.startswith(p + ".")  # Filter custom modules that are not top-level
+                       for p in plugin_modules
+                       if name != p):
+                plugin_map.setdefault(self._structure.structure[name].type, []).append(name)
+        retval = {v[0] if len(v) == 1 else os.path.commonprefix(v).rstrip("."): v
+                  for v in plugin_map.values()}
+        logger.debug("[_Summary] Parents: %s", retval)
+        return retval
+
+    def _generate_row(self,
+                      name: str,
+                      layer_type: str,
+                      input_shapes: tuple[int, ...] | list[tuple[int, ...]],
+                      output_shapes: tuple[int, ...] | list[tuple[int, ...]],
+                      input_layers: list[str],
+                      total_params: int,
+                      instances: int) -> list[str]:
+        """Generate a row of summary data for tabulation from the given information
+
+        Parameters
+        ----------
+        name
+            The name of the layer
+        layer_type
+            The type (class name) of the layer
+        input_shapes
+            The input shapes to the layer, can be nested
+        output_shapes
+            The output shapes to the layer, can be nested
+        input_layers
+            The layer names that feed this layer
+        total_params
+            The total number of parameters for the layer
+        instances
+            The number of times that this module appears in its parent module
+
+        Returns
+        -------
+        The given data formatted for summary tabulation
+        """
+        return [
+            f"{name}\n({layer_type})" if len(name) > 20 else f"{name} ({layer_type})",
+            "\n".join(str(x[1:]) for x in _flatten_list([input_shapes])),
+            "\n".join(str(x[1:]) for x in _flatten_list([output_shapes])),
+            "\n".join(input_layers),
+            (f"{total_params:,}" if instances == 1 or total_params == 0
+             else "\n".join((f"Inst: {total_params:,}", f"Tot: {total_params * instances:,}")))
+            ]
+
+    def _sub_module_builder(self, module: str, instances: int) -> list[list[str]]:
+        """Generate the rows for the model layers to be output to the summary table
+
+        Parameters
+        ----------
+        module
+            The parent module to build the row summary for
+        instances
+            The number of times that this module appears in its parent module
+
+        Returns
+        -------
+        The rows of data to be output to the summary table
+        """
+        retval: list[list[str]] = []
+        logger.debug("[_Summary] Building rows. module: '%s', instances: %s", module, instances)
+        for name, info in self._structure.structure.items():
+            if info.is_parent or "." not in name or not name.startswith(module):
+                # Skip parents, top-levels and layers not belonging to given module
+                logger.debug("[_Summary] '%s' Skipping layer: '%s'", module, name)
+                continue
+            input_layers = [tail if sep and head.isdigit() else head + sep + tail
+                            for x in (x.split(".", maxsplit=1)[1]
+                                      if x.startswith(f"{module}.") else x
+                                      for x in info.input_layers)
+                            for head, sep, tail in [x.partition(".")]]
+            retval.append(self._generate_row(name[len(module) + 1:],  # strip parent + "."
+                                             info.type,
+                                             info.input_shape,
+                                             info.output_shape,
+                                             input_layers,
+                                             info.num_params + info.num_buffers,
+                                             instances))
+        return retval
+
+    def _top_level_builder(self, parents: list[str]) -> list[list[str]]:
+        """Generate the rows for the top-level summary
+
+        Parameters
+        ----------
+        parents
+            The list of top-level module names to summarize for
+
+        Returns
+        -------
+        The top-level rows of data to be output to the summary table
+        """
+        retval: list[list[str]] = []
+        logger.debug("[_Summary] Building top-level rows")
+        # TODO the input layers is very wrong for top-level
+        for name, info in self._structure.structure.items():
+            if name not in parents:
+                continue
+            retval.append(self._generate_row(name,
+                                             info.type,
+                                             info.input_shape,
+                                             info.output_shape,
+                                             info.input_layers,
+                                             info.num_params + info.num_buffers,
+                                             1))
+        return retval
+
+    def _get_param_info(self, module: str) -> tuple[int, int, float, float]:
+        """Obtain the count and size in megabytes of trainable and non-trainable parameters for
+        the given module
+
+        Parameters
+        ----------
+        module
+            The module to obtain the parameter summary for
+
+        Returns
+        -------
+        trainable_parameters
+            The total number of trainable parameters in the module
+        non_trainable_parameters
+            The total number of non-trainable parameters in the module
+        trainable_megabytes
+            The total size in megabytes of trainable parameters in the module
+        non_trainable_megabytes
+            The total size in megabytes of non trainable parameters in the module
+        """
+        retval = [0, 0, 0.0, 0.0]
+        for name, info in self._structure.structure.items():
+            if info.is_parent or "." not in name or not name.startswith(module):
+                # Skip parents, top-levels and layers not belonging to given module
+                logger.debug("[_Summary] '%s' Skipping layer: '%s'", module, name)
+                continue
+            idx = 0 if info.requires_grad else 1
+            retval[idx] += info.num_params
+            retval[1] += info.num_buffers
+            retval[idx + 2] += info.param_bytes / (1024 ** 2)
+            retval[3] += info.buffer_bytes / (1024 ** 2)
+        logger.debug("[_Summary] Parameter information for '%s': %s", module, retval)
+        return retval[0], retval[1], retval[2], retval[3]
+
+    def _summarize_parameters(self,  # pylint:disable=too-many-locals
+                              parameters: tuple[int, int, float, float],
+                              instances: int,
+                              print_fn: T.Callable[[str], T.Any]) -> None:
+        """Generate the parameter count and memory summaries and output to print_fn
+
+        Parameters
+        ----------
+        parameters
+            the (trainable_params, non_trainable_params, trainable_bytes, non_trainable_bytes) to
+            summarize
+        instances
+            The number of times that this module appears in model
+        print_fn
+            The function to print the parameter summary to
+        """
+        trainable, non_trainable, trainable_mb, non_trainable_mb = parameters
+        total = trainable + non_trainable
+        total_mb = trainable_mb + non_trainable_mb
+        data: dict[str, list[list[str]]] = {}
+        for title, info in zip(("Total", "Trainable", "Non-trainable"),
+                               ((total, total_mb),
+                                (trainable, trainable_mb),
+                                (non_trainable, non_trainable_mb))):
+            key = f" {title} parameters:"
+            data[key] = [[f"{info[0]:,}"], [f"({info[1]:,.2f} MB)"]]
+            if instances > 1:
+                data[key][0] += [f"{int(info[0] * instances):,}"]
+                data[key][1] += [f"({info[1] * instances:,.2f} MB)"]
+
+        key_width = max(len(x) for x in data)
+        col_widths = [max(max(map(len, col)) for col in entry) for entry in zip(*data.values())]
+        for key, val in data.items():
+            if len(val[0]) == 1:
+                print_fn(f"{key.ljust(key_width)} "
+                         f"{val[0][0].rjust(col_widths[0])} "
+                         f"{val[1][0].rjust(col_widths[1])}")
+                continue
+            print_fn(
+                f"{key.ljust(key_width)} "
+                f"instance: {val[0][0].rjust(col_widths[0])} {val[1][0].rjust(col_widths[1])}, "
+                f"total: {val[0][1].rjust(col_widths[1])}  {val[1][1].rjust(col_widths[1])}")
+
+    def __call__(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
+        """Generate the preview
+
+        Parameters
+        ----------
+        print_fn
+            The function to print the summary to. Default: ``None`` (print to console)
+        """
+        print_fn = print if print_fn is None else print_fn
+        parents = self._get_parents()
+        all_params: dict[str, tuple[int, int, float, float]] = {}
+        for name, modules in parents.items():
+            count = len(modules)
+            lookup = modules[0]
+            rows = self._header + self._sub_module_builder(lookup, count)
+            call_count = self._structure.structure[lookup].call_count
+            print_fn(f"Model: {self._name}.{name} (Instances: {count}, "
+                     f"Calls per instance: {call_count})")
+            Tabulate(rows, padding=1, just=["ljust", "rjust", "rjust", "ljust", "rjust"])(print_fn)
+            params = self._get_param_info(lookup)
+            self._summarize_parameters(params, count, print_fn)
+            all_params[name] = T.cast(tuple[int, int, float, float],
+                                      tuple(x * count for x in params))
+
+        parent_list = [y for x in parents.values() for y in x]
+        rows = rows = self._header + self._top_level_builder(parent_list)
+        sum_params = T.cast(tuple[int, int, float, float],
+                            tuple(map(sum, zip(*all_params.values()))))
+        print_fn(f"Model: {self._name} (Inputs: {self._structure.num_inputs})")
+        Tabulate(rows, padding=1, just=["ljust", "rjust", "rjust", "ljust", "rjust"])(print_fn)
+        self._summarize_parameters(sum_params, 1, print_fn)
+
+
 class Info:
     """Obtain summary information about a Faceswap Model.
 
@@ -305,6 +576,7 @@ class Info:
         """The (name, repr) of the model"""
         self._device = next(model.named_parameters())[1].device
         self._structure = _Structure(model)
+        self._summary = _Summary(model.__class__.__name__, self._structure)
         self._output_shapes = []
         self._input_shapes = []
         self._input_size: int = 0
@@ -373,26 +645,7 @@ class Info:
         print_fn
             The function to print the summary to. Default: ``None`` (print to console)
         """
-        # TODO Breakdowns by is_parent
-        print_fn = print if print_fn is None else print_fn
-        print_fn(f"Model: {self._model_info[0]}")
-        rows = [["Layer (type)", "Input Shape", "Output Shape", "Connected To", "Params"]]
-        rows.extend([f"{layer}\n({info.type})" if len(layer) > 20 else f"{layer} ({info.type})",
-                     "\n".join(str(x[1:]) for x in _flatten_list([info.input_shape])),
-                     "\n".join(str(x[1:]) for x in _flatten_list([info.output_shape])),
-                     "\n".join(info.input_layers),
-                     f"{info.num_params + info.num_buffers:,}"]
-                    for layer, info in self._structure.structure.items()
-                    if not info.is_parent)
-        train_params = sum(v.num_params for v in self._structure.structure.values()
-                           if not v.is_parent and v.requires_grad)
-        non_train_params = sum(v.num_params for v in self._structure.structure.values()
-                               if not v.is_parent and not v.requires_grad)
-        buffers = sum(v.num_buffers for v in self._structure.structure.values() if not v.is_parent)
-        Tabulate(rows, padding=0, just=["ljust", "rjust", "rjust", "ljust", "rjust"])(print_fn)
-        print_fn(f"Total parameters: {train_params + non_train_params + buffers:,}")
-        print_fn(f"Trainable parameters: {train_params:,}")
-        print_fn(f"Non-trainable parameters: {non_train_params + buffers:,}")
+        self._summary(print_fn)
 
 
 __all__ = get_module_objects(__name__)

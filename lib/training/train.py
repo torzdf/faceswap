@@ -355,7 +355,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
 
         self._model_handler.load_state_dict(self._optimizer)  # Load saved model config
         model_info = Info(self._model_handler.model)
-        model_info.summary(logger.info if summary else logger.verbose)  # type:ignore[attr-defined]
+        model_info.summary(print if summary else logger.verbose)  # type:ignore[attr-defined]
         if summary:
             return
 
