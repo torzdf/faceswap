@@ -328,7 +328,7 @@ class _Summary:
         logger.debug(parse_class_init(locals()))
         self._name = name
         self._structure = structure
-        self._header = [["Layer (type)", "Input Shape", "Output Shape", "Connected To", "Params"]]
+        self._header = [["Layer (type)", "Input Shape", "Output Shape", "Params", "Connected To"]]
 
     def _get_parents(self) -> dict[str, list[str]]:
         """Obtain the top-level module names and the number of instances of the module that exists
@@ -388,9 +388,9 @@ class _Summary:
             f"{name}\n({layer_type})" if len(name) > 20 else f"{name} ({layer_type})",
             "\n".join(str(x[1:]) for x in _flatten_list([input_shapes])),
             "\n".join(str(x[1:]) for x in _flatten_list([output_shapes])),
-            "\n".join(input_layers),
             (f"{total_params:,}" if instances == 1 or total_params == 0
-             else "\n".join((f"Inst: {total_params:,}", f"Tot: {total_params * instances:,}")))
+             else "\n".join((f"Inst: {total_params:,}", f"Tot: {total_params * instances:,}"))),
+            "\n".join(input_layers)
             ]
 
     def _sub_module_builder(self, module: str, instances: int) -> list[list[str]]:
@@ -513,24 +513,27 @@ class _Summary:
                                ((total, total_mb),
                                 (trainable, trainable_mb),
                                 (non_trainable, non_trainable_mb))):
-            key = f" {title} parameters:"
+            key = f"  {title} parameters:"
             data[key] = [[f"{info[0]:,}"], [f"({info[1]:,.2f} MB)"]]
             if instances > 1:
                 data[key][0] += [f"{int(info[0] * instances):,}"]
                 data[key][1] += [f"({info[1] * instances:,.2f} MB)"]
 
         key_width = max(len(x) for x in data)
-        col_widths = [max(max(map(len, col)) for col in entry) for entry in zip(*data.values())]
+        col_widths = [[max(map(len, col)) for col in zip(*entry)]
+                      for entry in zip(*data.values())]
         for key, val in data.items():
             if len(val[0]) == 1:
                 print_fn(f"{key.ljust(key_width)} "
-                         f"{val[0][0].rjust(col_widths[0])} "
-                         f"{val[1][0].rjust(col_widths[1])}")
+                         f"{val[0][0].rjust(col_widths[0][0])} "
+                         f"{val[1][0].rjust(col_widths[1][0])}")
                 continue
             print_fn(
                 f"{key.ljust(key_width)} "
-                f"instance: {val[0][0].rjust(col_widths[0])} {val[1][0].rjust(col_widths[1])}, "
-                f"total: {val[0][1].rjust(col_widths[1])}  {val[1][1].rjust(col_widths[1])}")
+                f"instance: {val[0][0].rjust(col_widths[0][0])} "
+                f"{val[1][0].rjust(col_widths[1][0])}, "
+                f"total: {val[0][1].rjust(col_widths[0][1])}  "
+                f"{val[1][1].rjust(col_widths[1][1])}")
 
     def __call__(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
         """Generate the preview

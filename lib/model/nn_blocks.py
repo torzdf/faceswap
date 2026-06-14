@@ -144,7 +144,7 @@ class ResidualBlock(nn.Module):
                  in_channels: int,
                  out_channels: int,
                  kernel_size: int = 3,
-                 padding: T.Literal["same", "valid"] | int = 0,
+                 padding: T.Literal["same", "valid"] | int = 1,
                  bias: bool = True) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
