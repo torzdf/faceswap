@@ -115,7 +115,6 @@ class _Config:
         state_dict
             The _Config state_dict for the running Faceswap model
         """
-        # TODO move old legacy code in _base.state to migration
         for key, opt in self._config.items():
             val = opt()
 
@@ -247,7 +246,7 @@ class State:
         if not self._step_called:
             assert self._batch_size is not None, "batch_size must be provided when training"
             config = self._config.session_config
-            if self.learning_rate_from_finder:  # TODO check this
+            if self.learning_rate_from_finder:
                 logger.debug("[State] Storing learning rate from finder: %s", self.lr_finder)
                 config["learning_rate"] = self.lr_finder
             self._sessions[self.session_id + 1] = Session(self._batch_size, config)

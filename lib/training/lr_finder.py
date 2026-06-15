@@ -317,7 +317,8 @@ class LearningRateFinder:  # pylint:disable=too-many-instance-attributes
         plt.legend()
 
         now = datetime.now().strftime("%Y-%m-%d_%H.%M.%S")
-        output = os.path.join(self._model_handler.model_folder, f"learning_rate_finder_{now}.png")
+        output = os.path.join(self._model_handler.model_folder,
+                              f"{self._model_handler.name}_lr_finder_{now}.png")
         logger.info("Saving Learning Rate Finder graph to: '%s'", output)
         plt.savefig(output)
 

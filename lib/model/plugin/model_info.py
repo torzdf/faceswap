@@ -37,7 +37,6 @@ def _recurse_to_tensor(obj: list[torch.Tensor] | torch.Tensor,
     The nested or final tensor(s)/tensor(s) attribute
     """
     if isinstance(obj, (tuple, list)):
-        # TODO assert list/list[t]
         retval: list[T.Any] | list[torch.Tensor] = [
             _recurse_to_tensor(x, return_attr) for x in obj if x is not None]
         return retval

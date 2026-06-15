@@ -2,6 +2,7 @@
 """ The Command Line Argument options for training with faceswap.py """
 import gettext
 import typing as T
+from argparse import SUPPRESS
 
 from lib.utils import get_module_objects
 from plugins.plugin_loader import PluginLoader
@@ -182,7 +183,7 @@ class TrainArgs(FaceSwapArgs):
             "default": False,
             "backend": ("nvidia", "rocm"),
             "group": _("training"),
-            "help": _("Use distibuted training on multi-gpu setups.")})
+            "help": _("Use distributed training on multi-gpu setups.")})
         argument_list.append({
             "opts": ("-n", "--no-logs"),
             "action": "store_true",
@@ -234,10 +235,9 @@ class TrainArgs(FaceSwapArgs):
             "group": _("timelapse"),
             "help": _(
                 "Optional for creating a timelapse. Timelapse will save an image of your selected "
-                "faces into the timelapse-output folder at every save iteration. This should be "
-                "the input folder of 'A' faces that you would like to use for creating the "
-                "timelapse. You must also supply a --timelapse-output and a --timelapse-input-B "
-                "parameter.")})
+                "faces into your model folder at every save iteration. This should be the input "
+                "folder of 'A' faces that you would like to use for creating the timelapse. You "
+                "must also supply a --timelapse-input-B parameter.")})
         argument_list.append({
             "opts": ("-y", "--timelapse-input-B"),
             "action": DirFullPaths,
@@ -246,21 +246,9 @@ class TrainArgs(FaceSwapArgs):
             "group": _("timelapse"),
             "help": _(
                 "Optional for creating a timelapse. Timelapse will save an image of your selected "
-                "faces into the timelapse-output folder at every save iteration. This should be "
-                "the input folder of 'B' faces that you would like to use for creating the "
-                "timelapse. You must also supply a --timelapse-output and a --timelapse-input-A "
-                "parameter.")})
-        argument_list.append({
-            "opts": ("-z", "--timelapse-output"),
-            "action": DirFullPaths,
-            "dest": "timelapse_output",
-            "default": None,
-            "group": _("timelapse"),
-            "help": _(
-                "Optional for creating a timelapse. Timelapse will save an image of your selected "
-                "faces into the timelapse-output folder at every save iteration. If the input "
-                "folders are supplied but no output folder, it will default to your model folder/"
-                "timelapse/")})
+                "faces into your model folder at every save iteration. This should be the input "
+                "folder of 'B' faces that you would like to use for creating the timelapse. You "
+                "must also supply a --timelapse-input-A parameter.")})
         argument_list.append({
             "opts": ("-p", "--preview"),
             "action": "store_true",
@@ -318,6 +306,14 @@ class TrainArgs(FaceSwapArgs):
                 "enabled towards the very end of training to try to bring out more detail. Think "
                 "of it as 'fine-tuning'. Enabling this option from the beginning is likely to "
                 "kill a model and lead to terrible results.")})
+        # Deprecated
+        argument_list.append({
+            "opts": ("-z", "--timelapse-output"),
+            "type": str.lower,
+            "dest": "depr_removed_z_timelapse-output",
+            "required": False,
+            "help": _(SUPPRESS)})
+
         return argument_list
 
 

@@ -321,8 +321,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         ``True`` to generate previews
     timelapse_folders
         The input folders to create timelapse images from. Default: ``None`` (no timelapse)
-    timelapse_output
-        The folder to output timelapse images. Default: "" (no timelapse)
     summary
         ``True`` to just output a summary of the model and exit. ``False`` to train.
         Default: ``False``
@@ -340,7 +338,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                  no_logs: bool,
                  preview: bool,
                  timelapse_folders: list[str] | None = None,
-                 timelapse_output: str = "",  # TODO remove and always save to model dir
                  summary: bool = False,
                  lr_finder: bool = False,
                  config_file: str | None = None) -> None:
@@ -366,13 +363,15 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                                                     self._model_handler.batch_size,
                                                     data_folders,
                                                     augment_opts)
+        tl_output = "" if not timelapse_folders else os.path.join(
+            model_handler.model_folder, f"{model_handler.name}_timelapse")
         self._tester = Tester(trainer_plugin=self._trainer,
                               input_size=model_info.input_size,
                               output_size=model_info.output_size,
                               device=self._device,
                               preview_folders=data_folders if preview else None,
                               timelapse_folders=timelapse_folders,
-                              timelapse_output=timelapse_output)
+                              timelapse_output=tl_output)
 
         self._lr_finder = LearningRateFinder(
             enabled=lr_finder,
@@ -492,7 +491,7 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         """Toggle the mask overlay on or off based on user input."""
         self._tester.toggle_mask()
 
-    def step(self, gen_preview: bool, timelapse_enabled: bool) -> TrainerReturn:
+    def step(self, gen_preview: bool) -> TrainerReturn:
         """Running training on a batch of images for each side.
 
         Triggered from the training cycle in :class:`scripts.train.Train`.
@@ -518,8 +517,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         ----------
         gen_preview
             ``True`` to force run inference to generate preview images
-        timelapse_enabled
-            ``True`` if timelapse generation is enabled
 
         Returns
         -------
@@ -548,8 +545,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                 return retval
         update_preview = self._model_handler.step(self._loss_handler, self._lr_finder.is_enabled)
 
-        if update_preview and timelapse_enabled:  # TODO no TL on LRF
-            self._tester(True)
+        if (update_preview and iteration > 0) or iteration == 1:
+            self._tester(True, iteration=iteration)  # Time-lapse
         if update_preview or gen_preview:
             out = self._tester(False)
             assert out is not None and len(out) == 2
@@ -715,13 +712,16 @@ class Tester:
         return retval
 
     def __call__(self,  # pylint:disable=too-many-locals
-                 do_timelapse: bool) -> tuple[npt.NDArray[np.uint8], str] | None:
+                 do_timelapse: bool,
+                 iteration: int = 0) -> tuple[npt.NDArray[np.uint8], str] | None:
         """Update the preview viewer and timelapse output
 
         Parameters
         ----------
         do_timelapse
             ``True`` to generate a timelapse preview image, ``False`` to return a preview image
+        iteration
+            The current training iteration. Used for timelapse image naming. Default: 0
 
         Returns
         -------
@@ -735,10 +735,12 @@ class Tester:
         if self._preview_loader is None and not do_timelapse:
             return None
 
+        if self._timelapse_loader is None and do_timelapse:
+            return None
+
         if do_timelapse:
             logger.debug("[Tester] Generating timelapse")
-            assert self._timelapse_loader is not None
-            loader = self._timelapse_loader
+            loader = T.cast(PreviewLoader, self._timelapse_loader)
         else:
             logger.debug("[Tester] Generating preview")
             assert self._preview_loader is not None
@@ -773,7 +775,10 @@ class Tester:
         samples = self._samples.get_preview(predictions, targets)
 
         if do_timelapse:
-            filename = os.path.join(self._timelapse_output, str(int(time.time())) + ".jpg")
+            if not os.path.exists(self._timelapse_output):
+                logger.debug("[Tester] Creating time-lapse folder: '%s'", self._timelapse_output)
+                os.makedirs(self._timelapse_output)
+            filename = os.path.join(self._timelapse_output, f"{iteration:08d}.jpg")
             cv2.imwrite(filename, samples)
             logger.debug("[Tester] Created time-lapse: '%s'", filename)
             return None

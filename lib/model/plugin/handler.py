@@ -169,7 +169,7 @@ class TrainConfigure:
         # TODO prevent running on ImageNet weights load
         conv_aware = ConvolutionAware()
         icnr_conv = [x.name for v in self._info.structure.values()
-                     if v.type == "PixelShuffle"  # TODO all upscales?
+                     if v.type == "PixelShuffle"
                      for x in self._get_prev_conv(v)] if self._init["icnr"] else []
         for k, v in model.named_modules():
             if k in icnr_conv and isinstance(v, nn.Conv2d):

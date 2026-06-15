@@ -22,8 +22,8 @@ from lib.training import Preview, PreviewBuffer, TriggerType
 from lib.training.data import AugmentOptions, get_label
 from lib.model.plugin.handler import TrainHandler
 from lib.training.train import Trainer
-from lib.utils import (get_folder, get_image_paths, get_module_objects, handle_deprecated_cli_opts,
-                       FaceswapError)
+from lib.utils import (FaceswapError, get_image_paths, get_module_objects,
+                       handle_deprecated_cli_opts)
 
 
 if T.TYPE_CHECKING:
@@ -153,19 +153,13 @@ class Train():
         -------
         ``True`` if timelapse is enabled and valid otherwise ``False``
         """
-        if (not self._args.timelapse_input_a and
-                not self._args.timelapse_input_b and
-                not self._args.timelapse_output):
+        if not self._args.timelapse_input_a and not self._args.timelapse_input_b:
             return False
-        if (not self._args.timelapse_input_a or
-                not self._args.timelapse_input_b or
-                not self._args.timelapse_output):
-            raise FaceswapError("To enable the timelapse, you have to supply all the parameters "
-                                "(--timelapse-input-A, --timelapse-input-B and "
-                                "--timelapse-output).")
+        if not self._args.timelapse_input_a or not self._args.timelapse_input_b:
+            raise FaceswapError("To enable the timelapse, you have to supply both the parameters "
+                                "--timelapse-input-A and --timelapse-input-B.")
 
         timelapse_folders = [self._args.timelapse_input_a, self._args.timelapse_input_b]
-        get_folder(self._args.timelapse_output)
 
         for idx, folder in enumerate(timelapse_folders):
             side = "a" if idx == 0 else "b"
@@ -214,6 +208,8 @@ class Train():
                                model_folder=self._args.model_dir,
                                save_interval=self._args.save_interval,
                                snapshot_interval=self._args.snapshot_interval)
+        tl_folders = [self._args.timelapse_input_a,
+                      self._args.timelapse_input_b] if self._timelapse else None
         retval = Trainer(trainer_name=trainer,
                          data_folders=self._images,
                          model_handler=handler,
@@ -223,9 +219,7 @@ class Train():
                          preview=(self._args.preview or
                                   self._args.write_image or
                                   self._args.redirect_gui),
-                         timelapse_folders=[self._args.timelapse_input_a,
-                                            self._args.timelapse_input_b],
-                         timelapse_output=self._args.timelapse_output,
+                         timelapse_folders=tl_folders,
                          summary=self._args.summary,
                          lr_finder=self._args.use_lr_finder,
                          config_file=self._args.config_file)
@@ -332,7 +326,7 @@ class Train():
             if self._preview.should_refresh or gui_triggers["refresh"]:
                 update_preview_images = preview_enabled
 
-            train_ret = trainer.step(update_preview_images, self._timelapse)
+            train_ret = trainer.step(update_preview_images)
             if train_ret.exit:
                 logger.debug("[Train] Exit received from trainer. Terminating")
                 break
