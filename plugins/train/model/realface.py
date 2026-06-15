@@ -23,6 +23,7 @@ from . import realface_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
+# pylint:disable=duplicate-code
 
 
 class Encoder(nn.Module):
@@ -101,7 +102,6 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
-        self.learn_mask = learn_mask
         self.out_channels = out_channels
         self.upscale_width = upscale_width
 
@@ -154,14 +154,14 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         x = self.leaky(x)
         x = self.res(x)
         x = self.up(x)
-        x = self.conv(x)
+        x = torch.sigmoid(self.conv(x))
 
         if not self.learn_mask:
             return (x, )
 
         mask = self.leaky_mask(mask)
         mask = self.mask_up(mask)
-        mask = self.mask_conv(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 
@@ -264,7 +264,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class RealFace(ModelPlugin):
-    """ Original Faceswap Model.
+    """ RealFace Faceswap Model.
 
     Parameters
     ----------

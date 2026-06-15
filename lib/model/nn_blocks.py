@@ -79,25 +79,32 @@ class UpscaleSubpixel(nn.Module):
         The input channels to the upscale block
     out_channels
         The output channels from the upscale block
+    kernel_size
+        The kernel size to the convolution layer
     scale_factor
         The amount to upscale by image. Default: `2`
     leaky_slope
         The value to use for LeakyReLu negative slope. Negative values remove activation
         altogether. Default: 0.1.
+    is_legacy
+        Used to correctly pad legacy models with kernel size > 3. Should not be used for new
+        models. Default: ``False``
     """
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
+                 kernel_size: int = 3,
                  scale_factor: int = 2,
                  leaky_slope: float = 0.1) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.activate = leaky_slope >= 0.0
+        padding = kernel_size // 2
         self.conv = nn.Conv2d(in_channels,
                               out_channels * scale_factor * scale_factor,
-                              3,
+                              kernel_size,
                               stride=1,
-                              padding=1)
+                              padding=padding)
         if self.activate:
             self.leaky = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
         self.pixel_shuffle = nn.PixelShuffle(scale_factor)

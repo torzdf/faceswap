@@ -2,136 +2,275 @@
 """ Unbalanced Model
     Based on the original https://www.reddit.com/r/deepfakes/
         code sample + contributions """
+from __future__ import annotations
 
-from keras import initializers, Input, layers, Model as KModel
+import logging
 
-from lib.model.nn_blocks_legacy import Conv2DOutput, Conv2DBlock, ResidualBlock, UpscaleBlock
+import torch
+from torch import nn
+
+from lib.logger import parse_class_init
+from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
-
-from ._base import ModelBase
+from .base import ModelPlugin
 from . import unbalanced_defaults as cfg
+
+
+logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Model(ModelBase):
-    """ Unbalanced Faceswap Model """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.input_shape = (cfg.input_size(), cfg.input_size(), 3)
-        self.low_mem = cfg.lowmem()
-        self.encoder_dim = 512 if self.low_mem else cfg.nodes()
-        self.kernel_initializer = initializers.RandomNormal(0, 0.02)
+class Encoder(nn.Module):
+    """The Unbalanced Encoder
 
-    def build_model(self, inputs):
-        """ build the Unbalanced Model. """
-        encoder = self.encoder()
-        encoder_a = encoder(inputs[0])
-        encoder_b = encoder(inputs[1])
+    Parameters
+    ----------
+    complexity
+        Encoder Convolution Layer Complexity
+    bottleneck
+        The number of nodes in the bottleneck
+    dense_dim
+        The dimensions to reshape the bottleneck
+    input_size
+        The pixel input dimension to the encoder
+    """
+    def __init__(self, complexity: int, bottleneck: int, dense_dim: int, input_size: int) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.dense_dim = dense_dim
+        self.dense_width = input_size // 16
+        half_width = self.dense_width // 2
 
-        outputs = self.decoder_a()(encoder_a) + self.decoder_b()(encoder_b)
+        self.down1 = ConvBlockLegacy(3, complexity, 5, stride=2)
+        self.down2 = ConvBlockLegacy(complexity, complexity * 2, 5, stride=2)
+        self.down3 = ConvBlockLegacy(complexity * 2, complexity * 4, 5, stride=2)
+        self.down4 = ConvBlockLegacy(complexity * 4, complexity * 6, 5, stride=2)
+        self.down5 = ConvBlockLegacy(complexity * 6, complexity * 8, 5, stride=2)
+        self.flatten = nn.Flatten(start_dim=1)
+        self.dense1 = nn.Linear(complexity * 8 * half_width * half_width, bottleneck)
+        self.dense2 = nn.Linear(bottleneck, self.dense_dim * self.dense_width * self.dense_width)
 
-        autoencoder = KModel(inputs, outputs, name=self.model_name)
-        return autoencoder
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the Original encoder
 
-    def encoder(self):
-        """ Unbalanced Encoder """
-        kwargs = {"kernel_initializer": self.kernel_initializer}
-        encoder_complexity = 128 if self.low_mem else cfg.complexity_encoder()
-        dense_dim = 384 if self.low_mem else 512
-        dense_shape = self.input_shape[0] // 16
-        input_ = Input(shape=self.input_shape)
+        Parameters
+        ----------
+        inputs
+            The input to the encoder
 
-        var_x = input_
-        var_x = Conv2DBlock(encoder_complexity,
-                            normalization="instance",
-                            activation="leakyrelu",
-                            **kwargs)(var_x)
-        var_x = Conv2DBlock(encoder_complexity * 2,
-                            normalization="instance",
-                            activation="leakyrelu",
-                            **kwargs)(var_x)
-        var_x = Conv2DBlock(encoder_complexity * 4, **kwargs, activation="leakyrelu")(var_x)
-        var_x = Conv2DBlock(encoder_complexity * 6, **kwargs, activation="leakyrelu")(var_x)
-        var_x = Conv2DBlock(encoder_complexity * 8, **kwargs, activation="leakyrelu")(var_x)
-        var_x = layers.Dense(self.encoder_dim,
-                             kernel_initializer=self.kernel_initializer)(layers.Flatten()(var_x))
-        var_x = layers.Dense(dense_shape * dense_shape * dense_dim,
-                             kernel_initializer=self.kernel_initializer)(var_x)
-        var_x = layers.Reshape((dense_shape, dense_shape, dense_dim))(var_x)
-        return KModel(input_, var_x, name="encoder")
+        Returns
+        -------
+        The output from the encoder
+        """
+        x = self.down1(inputs)
+        x = self.down2(x)
+        x = self.down3(x)
+        x = self.down4(x)
+        x = self.down5(x)
+        x = self.flatten(x)
+        x = self.dense1(x)
+        x: torch.Tensor = self.dense2(x)
+        return x.view(x.shape[0], self.dense_dim, self.dense_width, self.dense_width)
 
-    def decoder_a(self):
-        """ Decoder for side A """
-        kwargs = {"kernel_size": 5, "kernel_initializer": self.kernel_initializer}
-        decoder_complexity = 320 if self.low_mem else cfg.complexity_decoder_a()
-        dense_dim = 384 if self.low_mem else 512
-        decoder_shape = self.input_shape[0] // 16
-        input_ = Input(shape=(decoder_shape, decoder_shape, dense_dim))
 
-        var_x = input_
+class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Faceswap Unbalanced Decoder A Network.
 
-        var_x = UpscaleBlock(decoder_complexity, activation="leakyrelu", **kwargs)(var_x)
-        var_x = layers.SpatialDropout2D(0.25)(var_x)
-        var_x = UpscaleBlock(decoder_complexity, activation="leakyrelu", **kwargs)(var_x)
-        if self.low_mem:
-            var_x = layers.SpatialDropout2D(0.15)(var_x)
+    Parameters
+    ----------
+    in_channels
+        The number of input channels to the first upscale
+    complexity
+        Decoder A Convolution Layer Complexity
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    """
+    def __init__(self,
+                 in_channels: int,
+                 complexity: int,
+                 learn_mask: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.learn_mask = learn_mask
+
+        self.up1 = nn.Sequential(UpscaleSubpixel(in_channels, complexity, kernel_size=5),
+                                 nn.Dropout(0.25))
+        self.up2 = nn.Sequential(UpscaleSubpixel(complexity, complexity, kernel_size=5),
+                                 nn.Dropout(0.15 if in_channels < 512 else 0.25))
+        self.up3 = UpscaleSubpixel(complexity, complexity // 2, kernel_size=5)
+        self.up4 = UpscaleSubpixel(complexity // 2, complexity // 4, kernel_size=5)
+        self.conv = nn.Conv2d(complexity // 4, 3, 5, stride=1, padding=2)
+        self.act = nn.Sigmoid()
+
+        if self.learn_mask:
+            self.mask_up1 = UpscaleSubpixel(in_channels, complexity)
+            self.mask_up2 = UpscaleSubpixel(complexity, complexity)
+            self.mask_up3 = UpscaleSubpixel(complexity, complexity // 2)
+            self.mask_up4 = UpscaleSubpixel(complexity // 2, complexity // 4)
+            self.mask_conv = nn.Conv2d(complexity // 4, 1, 5, stride=1, padding=2)
+            self.mask_act = nn.Sigmoid()
+
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Forward pass through the RealFace A decoder
+
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
+
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.up1(inputs)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        x = self.conv(x)
+        x = self.act(x)
+        if not self.learn_mask:
+            return (x, )
+
+        mask = self.mask_up1(inputs)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = self.mask_up4(mask)
+        mask = self.mask_conv(mask)
+        mask = self.mask_act(mask)
+        return (x, mask)
+
+
+class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Faceswap Unbalanced Decoder B Network.
+
+    Parameters
+    ----------
+    in_channels
+        The number of input channels to the first upscale
+    complexity
+        Encoder Convolution Layer Complexity
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    """
+    def __init__(self,
+                 in_channels: int,
+                 complexity: int,
+                 learn_mask: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.learn_mask = learn_mask
+        low_mem = in_channels < 512
+
+        if low_mem:
+            channels = [complexity, complexity // 2, complexity // 4, complexity // 8]
+            slope = 0.1
         else:
-            var_x = layers.SpatialDropout2D(0.25)(var_x)
-        var_x = UpscaleBlock(decoder_complexity // 2, activation="leakyrelu", **kwargs)(var_x)
-        var_x = UpscaleBlock(decoder_complexity // 4, activation="leakyrelu", **kwargs)(var_x)
-        var_x = Conv2DOutput(3, 5, name="face_out_a")(var_x)
-        outputs = [var_x]
+            channels = [complexity, complexity, complexity // 2, complexity // 4]
+            slope = 0.2
 
-        if cfg_loss.learn_mask():
-            var_y = input_
-            var_y = UpscaleBlock(decoder_complexity, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(decoder_complexity, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(decoder_complexity // 2, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(decoder_complexity // 4, activation="leakyrelu")(var_y)
-            var_y = Conv2DOutput(1, 5, name="mask_out_a")(var_y)
-            outputs.append(var_y)
-        return KModel(input_, outputs=outputs, name="decoder_a")
+        self.up1 = UpscaleSubpixel(in_channels, channels[0], kernel_size=5, leaky_slope=slope)
+        self.up2 = UpscaleSubpixel(channels[0], channels[1], kernel_size=5, leaky_slope=slope)
+        self.up3 = UpscaleSubpixel(channels[1], channels[2], kernel_size=5, leaky_slope=slope)
+        self.up4 = UpscaleSubpixel(channels[2], channels[3], kernel_size=5, leaky_slope=slope)
 
-    def decoder_b(self):
-        """ Decoder for side B """
-        kwargs = {"kernel_size": 5, "kernel_initializer": self.kernel_initializer}
-        decoder_complexity = 384 if self.low_mem else cfg.complexity_decoder_b()
-        dense_dim = 384 if self.low_mem else 512
-        decoder_shape = self.input_shape[0] // 16
-        input_ = Input(shape=(decoder_shape, decoder_shape, dense_dim))
+        if not low_mem:
+            self.up1 = nn.Sequential(self.up1, ResidualBlock(channels[0], channels[0]))
+            self.up2 = nn.Sequential(self.up2, ResidualBlock(channels[1], channels[1]))
+            self.up3 = nn.Sequential(self.up3, ResidualBlock(channels[2], channels[2]))
+        self.conv = nn.Conv2d(channels[3], 3, 5, stride=1, padding=2)
+        self.act = nn.Sigmoid()
 
-        var_x = input_
-        if self.low_mem:
-            var_x = UpscaleBlock(decoder_complexity, activation="leakyrelu", **kwargs)(var_x)
-            var_x = UpscaleBlock(decoder_complexity // 2, activation="leakyrelu", **kwargs)(var_x)
-            var_x = UpscaleBlock(decoder_complexity // 4, activation="leakyrelu", **kwargs)(var_x)
-            var_x = UpscaleBlock(decoder_complexity // 8, activation="leakyrelu", **kwargs)(var_x)
-        else:
-            var_x = UpscaleBlock(decoder_complexity, activation=None, **kwargs)(var_x)
-            var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-            var_x = ResidualBlock(decoder_complexity,
-                                  kernel_initializer=self.kernel_initializer)(var_x)
-            var_x = UpscaleBlock(decoder_complexity, activation=None, **kwargs)(var_x)
-            var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-            var_x = ResidualBlock(decoder_complexity,
-                                  kernel_initializer=self.kernel_initializer)(var_x)
-            var_x = UpscaleBlock(decoder_complexity // 2, activation=None, **kwargs)(var_x)
-            var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-            var_x = ResidualBlock(decoder_complexity // 2,
-                                  kernel_initializer=self.kernel_initializer)(var_x)
-            var_x = UpscaleBlock(decoder_complexity // 4, activation="leakyrelu", **kwargs)(var_x)
-        var_x = Conv2DOutput(3, 5, name="face_out_b")(var_x)
-        outputs = [var_x]
+        if self.learn_mask:
+            self.mask_up1 = UpscaleSubpixel(in_channels, channels[0])
+            self.mask_up2 = UpscaleSubpixel(channels[0], channels[1])
+            self.mask_up3 = UpscaleSubpixel(channels[1], channels[2])
+            self.mask_up4 = UpscaleSubpixel(channels[2], channels[3])
+            self.mask_conv = nn.Conv2d(channels[3], 1, 5, stride=1, padding=2)
+            self.mask_act = nn.Sigmoid()
 
-        if cfg_loss.learn_mask():
-            var_y = input_
-            var_y = UpscaleBlock(decoder_complexity, activation="leakyrelu")(var_y)
-            if not self.low_mem:
-                var_y = UpscaleBlock(decoder_complexity, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(decoder_complexity // 2, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(decoder_complexity // 4, activation="leakyrelu")(var_y)
-            if self.low_mem:
-                var_y = UpscaleBlock(decoder_complexity // 8, activation="leakyrelu")(var_y)
-            var_y = Conv2DOutput(1, 5, name="mask_out_b")(var_y)
-            outputs.append(var_y)
-        return KModel(input_, outputs=outputs, name="decoder_b")
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Forward pass through the RealFace A decoder
+
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
+
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.up1(inputs)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        x = self.conv(x)
+        x = self.act(x)
+        if not self.learn_mask:
+            return (x, )
+
+        mask = self.mask_up1(inputs)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = self.mask_up4(mask)
+        mask = self.mask_conv(mask)
+        mask = self.mask_act(mask)
+        return (x, mask)
+
+
+class Unbalanced(ModelPlugin):
+    """ Unbalanced Faceswap Model.
+
+    Parameters
+    ----------
+    num_identities
+        The number of identities that the model is to be trained on. Default: 2
+    """
+    def __init__(self, num_identities: int = 2) -> None:
+        logger.debug(parse_class_init(locals()))
+        if num_identities != 2:
+            raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
+                                "the number of identities or choose a different model")
+        super().__init__(num_identities, input_size=cfg.input_size())
+
+        dense_dim = 384 if cfg.lowmem() else 512
+        self.encoder = Encoder(128 if cfg.lowmem() else cfg.complexity_encoder(),
+                               512 if cfg.lowmem() else cfg.nodes(),
+                               dense_dim,
+                               self.input_shape[-1])
+        self.decoder_a = DecoderA(dense_dim,
+                                  320 if cfg.lowmem() else cfg.complexity_decoder_a(),
+                                  cfg_loss.learn_mask())
+        self.decoder_b = DecoderB(dense_dim,
+                                  384 if cfg.lowmem() else cfg.complexity_decoder_b(),
+                                  cfg_loss.learn_mask())
+
+    def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
+        """Forward pass through the original model
+
+        Parameters
+        ----------
+        inputs: list
+            A list of input tensors for the model. This will be of length num_identities with each
+            tensor of shape (N, C, H, W)
+
+        Returns
+        -------
+        The output for each identity training through the model
+        """
+        encoded = [self.encoder(x) for x in inputs]
+        decoded = tuple(dec(x) for dec, x in zip((self.decoder_a, self.decoder_b), encoded))
+        return decoded
+
+
+__all__ = get_module_objects(__name__)
+
+
+if __name__ == "__main__":
+    p = Unbalanced(2)
+    i = [torch.rand((1, 3, 128, 128)), torch.rand((1, 3, 128, 128))]
+    out = p(i)
+    print([[k.shape for k in j] for j in out])

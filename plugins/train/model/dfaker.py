@@ -9,7 +9,6 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from lib.logger import parse_class_init
 from lib.model.nn_blocks import UpscaleSubpixel, ResidualBlock
@@ -68,13 +67,13 @@ class Decoder(nn.Module):
             The image output and optionally mask from the decoder
         """
         x = self.upscale(inputs)
-        x = F.sigmoid(self.conv(x))
+        x = torch.sigmoid(self.conv(x))
 
         if self.upscale_mask is None:
             return (x, )
 
         mask = self.upscale_mask(inputs)
-        mask = F.sigmoid(self.conv_mask(mask))
+        mask = torch.sigmoid(self.conv_mask(mask))
         return (x, mask)
 
 

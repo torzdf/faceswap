@@ -16,6 +16,7 @@ from . import dfl_sae_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
+# pylint:disable=duplicate-code
 
 
 class EncoderDF(nn.Module):

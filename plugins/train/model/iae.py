@@ -7,7 +7,6 @@ import typing as T
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from lib.logger import parse_class_init
 from lib.model.nn_blocks import ConvBlockLegacy, UpscaleSubpixel
@@ -117,7 +116,7 @@ class Decoder(nn.Module):
         x = self.upscale2(x)
         x = self.upscale3(x)
         x = self.upscale4(x)
-        x = F.sigmoid(self.conv(x))
+        x = torch.sigmoid(self.conv(x))
 
         if self.upscale_mask1 is None:
             return (x, )
@@ -130,7 +129,7 @@ class Decoder(nn.Module):
         mask = self.upscale_mask2(mask)
         mask = self.upscale_mask3(mask)
         mask = self.upscale_mask4(mask)
-        mask = F.sigmoid(self.conv_mask(mask))
+        mask = torch.sigmoid(self.conv_mask(mask))
         return (x, mask)
 
 

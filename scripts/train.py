@@ -54,6 +54,7 @@ class Train():
 
         if self._args.summary:
             # If just outputting summary we don't need to initialize anything
+            self._timelapse = False
             self._images = [self._args.input_a, self._args.input_b]  # Just need count for summary
             return
 

@@ -21,6 +21,7 @@ from . import original_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
+# pylint:disable=duplicate-code
 
 
 class Encoder(nn.Module):
