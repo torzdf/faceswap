@@ -40,7 +40,7 @@ class Encoder(nn.Module):
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(1024 * 8 * 8, self.feats)
         self.dense2 = nn.Linear(self.feats, self.feats * 8 * 8)
-        self.upscale = UpscaleSubpixel(self.feats, 512)
+        self.up = UpscaleSubpixel(self.feats, 512)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Forward pass through the DFL-H128 encoder
@@ -63,7 +63,7 @@ class Encoder(nn.Module):
         x = self.dense1(x)
         x = self.dense2(x)
         x = x.view(x.shape[0], self.feats, 8, 8)
-        return self.upscale(x)
+        return self.up(x)
 
 
 class Decoder(nn.Module):
@@ -79,17 +79,17 @@ class Decoder(nn.Module):
     def __init__(self, encoder_dim: int, learn_mask: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.upscale1 = UpscaleSubpixel(encoder_dim, encoder_dim)
-        self.upscale2 = UpscaleSubpixel(encoder_dim, encoder_dim // 2)
-        self.upscale3 = UpscaleSubpixel(encoder_dim // 2, encoder_dim // 4)
+        self.up1 = UpscaleSubpixel(encoder_dim, encoder_dim)
+        self.up2 = UpscaleSubpixel(encoder_dim, encoder_dim // 2)
+        self.up3 = UpscaleSubpixel(encoder_dim // 2, encoder_dim // 4)
         self.conv = nn.Conv2d(encoder_dim // 4, 3, 5, stride=1, padding=2)
 
-        self.upscale_mask1 = None
+        self.mask_up1 = None
         if learn_mask:
-            self.upscale_mask1 = UpscaleSubpixel(encoder_dim, encoder_dim)
-            self.upscale_mask2 = UpscaleSubpixel(encoder_dim, encoder_dim // 2)
-            self.upscale_mask3 = UpscaleSubpixel(encoder_dim // 2, encoder_dim // 4)
-            self.conv_mask = nn.Conv2d(encoder_dim // 4, 1, 5, stride=1, padding=2)
+            self.mask_up1 = UpscaleSubpixel(encoder_dim, encoder_dim)
+            self.mask_up2 = UpscaleSubpixel(encoder_dim, encoder_dim // 2)
+            self.mask_up3 = UpscaleSubpixel(encoder_dim // 2, encoder_dim // 4)
+            self.mask_conv = nn.Conv2d(encoder_dim // 4, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the DFL-H128 decoder
@@ -104,18 +104,18 @@ class Decoder(nn.Module):
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale1(inputs)
-        x = self.upscale2(x)
-        x = self.upscale3(x)
+        x = self.up1(inputs)
+        x = self.up2(x)
+        x = self.up3(x)
         x = torch.sigmoid(self.conv(x))
 
-        if self.upscale_mask1 is None:
+        if self.mask_up1 is None:
             return (x, )
 
-        mask = self.upscale_mask1(inputs)
-        mask = self.upscale_mask2(mask)
-        mask = self.upscale_mask3(mask)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        mask = self.mask_up1(inputs)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 

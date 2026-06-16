@@ -85,19 +85,19 @@ class Decoder(nn.Module):
     def __init__(self, learn_mask: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.upscale1 = UpscaleSubpixel(1024, 512)
-        self.upscale2 = UpscaleSubpixel(512, 256)
-        self.upscale3 = UpscaleSubpixel(256, 128)
-        self.upscale4 = UpscaleSubpixel(128, 64)
+        self.up1 = UpscaleSubpixel(1024, 512)
+        self.up2 = UpscaleSubpixel(512, 256)
+        self.up3 = UpscaleSubpixel(256, 128)
+        self.up4 = UpscaleSubpixel(128, 64)
         self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)
 
-        self.upscale_mask1 = self.upscale_mask2 = self.upscale_mask3 = None
+        self.mask_up1 = self.mask_up2 = self.mask_up3 = None
         if learn_mask:
-            self.upscale_mask1 = UpscaleSubpixel(1024, 512)
-            self.upscale_mask2 = UpscaleSubpixel(512, 256)
-            self.upscale_mask3 = UpscaleSubpixel(256, 128)
-            self.upscale_mask4 = UpscaleSubpixel(128, 64)
-            self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
+            self.mask_up1 = UpscaleSubpixel(1024, 512)
+            self.mask_up2 = UpscaleSubpixel(512, 256)
+            self.mask_up3 = UpscaleSubpixel(256, 128)
+            self.mask_up4 = UpscaleSubpixel(128, 64)
+            self.mask_conv = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Faceswap decoder
@@ -112,24 +112,24 @@ class Decoder(nn.Module):
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale1(inputs)
-        x = self.upscale2(x)
-        x = self.upscale3(x)
-        x = self.upscale4(x)
+        x = self.up1(inputs)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
         x = torch.sigmoid(self.conv(x))
 
-        if self.upscale_mask1 is None:
+        if self.mask_up1 is None:
             return (x, )
 
-        assert (self.upscale_mask1 is not None and
-                self.upscale_mask2 is not None and
-                self.upscale_mask3 is not None and
-                self.upscale_mask4 is not None)
-        mask = self.upscale_mask1(inputs)
-        mask = self.upscale_mask2(mask)
-        mask = self.upscale_mask3(mask)
-        mask = self.upscale_mask4(mask)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        assert (self.mask_up1 is not None and
+                self.mask_up2 is not None and
+                self.mask_up3 is not None and
+                self.mask_up4 is not None)
+        mask = self.mask_up1(inputs)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = self.mask_up4(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 

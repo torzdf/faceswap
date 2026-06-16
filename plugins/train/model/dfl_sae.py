@@ -51,7 +51,7 @@ class EncoderDF(nn.Module):
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(dims * 8 * self._lowest_res * self._lowest_res, self._ae_dims)
         self.dense2 = nn.Linear(self._ae_dims, self._ae_dims * self._lowest_res * self._lowest_res)
-        self.upscale = UpscaleSubpixel(self._ae_dims, self._ae_dims)  # TODO check
+        self.up = UpscaleSubpixel(self._ae_dims, self._ae_dims)  # TODO check
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Forward pass through the DeepFaceLab SAE-DF encoder
@@ -74,7 +74,7 @@ class EncoderDF(nn.Module):
         x = self.dense1(x)
         x = self.dense2(x)
         x = x.view(x.shape[0], self._ae_dims, self._lowest_res, self._lowest_res)
-        return self.upscale(x)
+        return self.up(x)
 
 
 class EncoderLIAE(nn.Module):
@@ -143,7 +143,7 @@ class InterLIAE(nn.Module):
                                 self._ae_dims)
         self.dense2 = nn.Linear(self._ae_dims,
                                 self._ae_dims * 2 * self._input_size[1] * self._input_size[1])
-        self.upscale = UpscaleSubpixel(self._ae_dims * 2, self._ae_dims * 2)  # TODO check
+        self.up = UpscaleSubpixel(self._ae_dims * 2, self._ae_dims * 2)  # TODO check
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Forward pass through the DeepFaceLab SAE-LIAE Intermediate layer
@@ -160,7 +160,7 @@ class InterLIAE(nn.Module):
         x: torch.Tensor = self.dense1(inputs)
         x = self.dense2(x)
         x = x.view(x.shape[0], self._ae_dims * 2, self._input_size[1], self._input_size[1])
-        x = self.upscale(x)
+        x = self.up(x)
         return x
 
 
@@ -189,21 +189,21 @@ class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         self._multiscale_count = multiscale_count
         self._learn_mask = learn_mask
 
-        self.upscale1 = UpscaleSubpixel(in_channels, dims * 8)
+        self.up1 = UpscaleSubpixel(in_channels, dims * 8)
         self.leaky1 = nn.LeakyReLU(negative_slope=0.2)
         self.res1_1 = ResidualBlock(dims * 8, dims * 8, padding=1)
         self.res1_2 = ResidualBlock(dims * 8, dims * 8, padding=1)
         if multiscale_count >= 3:
             self.conv_out1 = nn.Conv2d(dims * 8, 3, 5, stride=1, padding=2)
 
-        self.upscale2 = UpscaleSubpixel(dims * 8, dims * 4)
+        self.up2 = UpscaleSubpixel(dims * 8, dims * 4)
         self.leaky2 = nn.LeakyReLU(negative_slope=0.2)
         self.res2_1 = ResidualBlock(dims * 4, dims * 4, padding=1)
         self.res2_2 = ResidualBlock(dims * 4, dims * 4, padding=1)
         if multiscale_count >= 3:
             self.conv_out2 = nn.Conv2d(dims * 4, 3, 5, stride=1, padding=2)
 
-        self.upscale3 = UpscaleSubpixel(dims * 4, dims * 2)
+        self.up3 = UpscaleSubpixel(dims * 4, dims * 2)
         self.leaky3 = nn.LeakyReLU(negative_slope=0.2)
         self.res3_1 = ResidualBlock(dims * 2, dims * 2, padding=1)
         self.res3_2 = ResidualBlock(dims * 2, dims * 2, padding=1)
@@ -211,10 +211,10 @@ class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.conv_out = nn.Conv2d(dims * 2, 3, 5, stride=1, padding=2)
 
         if learn_mask:
-            self.upscale_mask1 = UpscaleSubpixel(in_channels, decoder_dim * 8)
-            self.upscale_mask2 = UpscaleSubpixel(decoder_dim * 8, decoder_dim * 4)
-            self.upscale_mask3 = UpscaleSubpixel(decoder_dim * 4, decoder_dim * 2)
-            self.conv_mask = nn.Conv2d(decoder_dim * 2, 1, 5, stride=1, padding=2)
+            self.mask_up1 = UpscaleSubpixel(in_channels, decoder_dim * 8)
+            self.mask_up2 = UpscaleSubpixel(decoder_dim * 8, decoder_dim * 4)
+            self.mask_up3 = UpscaleSubpixel(decoder_dim * 4, decoder_dim * 2)
+            self.mask_conv = nn.Conv2d(decoder_dim * 2, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the DeepFaceLab SAE decoder
@@ -231,21 +231,21 @@ class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
             mask from the decoder
         """
         out = []
-        x = self.res1_2(self.res1_1(self.leaky1(self.upscale1(inputs))))
+        x = self.res1_2(self.res1_1(self.leaky1(self.up1(inputs))))
         if self._multiscale_count >= 3:
             out.append(torch.sigmoid(self.conv_out1(x)))
 
-        x = self.res2_2(self.res2_1(self.leaky2(self.upscale2(x))))
+        x = self.res2_2(self.res2_1(self.leaky2(self.up2(x))))
         if self._multiscale_count >= 2:
             out.append(torch.sigmoid(self.conv_out2(x)))
 
-        x = self.res3_2(self.res3_1(self.leaky3(self.upscale3(x))))
+        x = self.res3_2(self.res3_1(self.leaky3(self.up3(x))))
         out.append(torch.sigmoid(self.conv_out(x)))
         if self._learn_mask:
-            mask = self.upscale_mask1(inputs)
-            mask = self.upscale_mask2(mask)
-            mask = self.upscale_mask3(mask)
-            out.append(torch.sigmoid(self.conv_mask(mask)))
+            mask = self.mask_up1(inputs)
+            mask = self.mask_up2(mask)
+            mask = self.mask_up3(mask)
+            out.append(torch.sigmoid(self.mask_conv(mask)))
 
         return tuple(out)
 

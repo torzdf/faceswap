@@ -33,7 +33,7 @@ class Encoder(nn.Module):
         self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
         self.dense1 = nn.Linear(512 * 8 * 8, 512)
         self.dense2 = nn.Linear(512, 512 * 4 * 4)
-        self.upscale = UpscaleSubpixel(512, 256)
+        self.up = UpscaleSubpixel(512, 256)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Lightweight encoder
@@ -53,7 +53,7 @@ class Encoder(nn.Module):
         x = self.dense1(x.flatten(start_dim=1))
         x = T.cast(torch.Tensor, self.dense2(x))
         x = x.view(x.shape[0], 512, 4, 4)
-        return self.upscale(x)
+        return self.up(x)
 
 
 class Decoder(nn.Module):
@@ -67,17 +67,17 @@ class Decoder(nn.Module):
     def __init__(self, learn_mask: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.upscale1 = UpscaleSubpixel(256, 512)
-        self.upscale2 = UpscaleSubpixel(512, 256)
-        self.upscale3 = UpscaleSubpixel(256, 128)
+        self.up1 = UpscaleSubpixel(256, 512)
+        self.up2 = UpscaleSubpixel(512, 256)
+        self.up3 = UpscaleSubpixel(256, 128)
         self.conv = nn.Conv2d(128, 3, 5, stride=1, padding=2)
 
-        self.upscale_mask1 = self.upscale_mask2 = self.upscale_mask3 = None
+        self.mask_up1 = self.mask_up2 = self.mask_up3 = None
         if learn_mask:
-            self.upscale_mask1 = UpscaleSubpixel(256, 512)
-            self.upscale_mask2 = UpscaleSubpixel(512, 256)
-            self.upscale_mask3 = UpscaleSubpixel(256, 128)
-            self.conv_mask = nn.Conv2d(128, 1, 5, stride=1, padding=2)
+            self.mask_up1 = UpscaleSubpixel(256, 512)
+            self.mask_up2 = UpscaleSubpixel(512, 256)
+            self.mask_up3 = UpscaleSubpixel(256, 128)
+            self.mask_conv = nn.Conv2d(128, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Faceswap decoder
@@ -92,21 +92,21 @@ class Decoder(nn.Module):
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale1(inputs)
-        x = self.upscale2(x)
-        x = self.upscale3(x)
+        x = self.up1(inputs)
+        x = self.up2(x)
+        x = self.up3(x)
         x = torch.sigmoid(self.conv(x))
 
-        if self.upscale_mask1 is None:
+        if self.up_mask1 is None:
             return (x, )
 
-        assert (self.upscale_mask1 is not None and
-                self.upscale_mask2 is not None and
-                self.upscale_mask3 is not None)
-        mask = self.upscale_mask1(inputs)
-        mask = self.upscale_mask2(mask)
-        mask = self.upscale_mask3(mask)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        assert (self.mask_up1 is not None and
+                self.mask_up2 is not None and
+                self.mask_up3 is not None)
+        mask = self.mask_up1(inputs)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 

@@ -40,7 +40,7 @@ class Decoder(nn.Module):
         if output_size == 128:
             ins = ins[1:]
             outs = outs[1:]
-        self.upscale = nn.Sequential(
+        self.up = nn.Sequential(
             *(nn.Sequential(OrderedDict({"up": UpscaleSubpixel(i, o),
                                          "act": nn.LeakyReLU(negative_slope=0.2),
                                          "res": ResidualBlock(o, o, padding=1)}))
@@ -48,10 +48,10 @@ class Decoder(nn.Module):
         )
         self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)
 
-        self.upscale_mask = None
+        self.mask_up = None
         if learn_mask:
-            self.upscale_mask = nn.Sequential(*(UpscaleSubpixel(i, o) for i, o in zip(ins, outs)))
-            self.conv_mask = nn.Conv2d(64, 1, 5, stride=1, padding=2)
+            self.mask_up = nn.Sequential(*(UpscaleSubpixel(i, o) for i, o in zip(ins, outs)))
+            self.mask_conv = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the DFaker decoder
@@ -66,14 +66,14 @@ class Decoder(nn.Module):
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale(inputs)
+        x = self.up(inputs)
         x = torch.sigmoid(self.conv(x))
 
-        if self.upscale_mask is None:
+        if self.mask_up is None:
             return (x, )
 
-        mask = self.upscale_mask(inputs)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        mask = self.mask_up(inputs)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 

@@ -108,7 +108,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(in_channels * upscale_width * upscale_width, bottleneck_size)
         self.dense2 = nn.Linear(bottleneck_size, out_channels * upscale_width * upscale_width)
-        self.upscale = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
+        self.up = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
         self.leaky = nn.LeakyReLU(0.2)
         self.res = ResidualBlock(out_channels, out_channels, bias=False)
 
@@ -147,7 +147,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         x = self.dense1(x)
         x: torch.Tensor = self.dense2(x)
         x = x.view(x.shape[0], self.out_channels, self.upscale_width, self.upscale_width)
-        x = self.upscale(x)
+        x = self.up(x)
 
         mask = x
 
@@ -202,7 +202,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(in_channels * upscale_width * upscale_width, bottleneck_size)
         self.dense2 = nn.Linear(bottleneck_size, out_channels * upscale_width * upscale_width)
-        self.upscale = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
+        self.up = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
         self.leaky = nn.LeakyReLU(0.2)
         self.res = ResidualBlock(out_channels, out_channels, bias=False)
 
@@ -245,7 +245,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         x = self.dense1(x)
         x: torch.Tensor = self.dense2(x)
         x = x.view(x.shape[0], self.out_channels, self.upscale_width, self.upscale_width)
-        x = self.upscale(x)
+        x = self.up(x)
 
         mask = x
 

@@ -2,87 +2,189 @@
 """ Original - VillainGuy model
     Based on the original https://www.reddit.com/r/deepfakes/ code sample + contributions
     Adapted from a model by VillainGuy (https://github.com/VillainGuy) """
+from __future__ import annotations
 
-from keras import initializers, Input, layers, Model as KModel
+import logging
 
-from lib.model.layers import PixelShuffler
-from lib.model.nn_blocks_legacy import (Conv2DOutput, Conv2DBlock, ResidualBlock, SeparableConv2DBlock,
-                                 UpscaleBlock)
+import torch
+from torch import nn
+
+from lib.logger import parse_class_init
+from lib.model.layers import SeparableConv2d
+from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
+from .base import ModelPlugin
+from . import original_defaults as cfg
 
-from .original import Model as OriginalModel
-from . import villain_defaults as cfg
+
+logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Model(OriginalModel):
-    """ Villain Faceswap Model """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.input_shape = (128, 128, 3)
-        self.encoder_dim = 512 if self.low_mem else 1024
-        self.kernel_initializer = initializers.RandomNormal(0, 0.02)
+class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
+    """The Villain Encoder
 
-    def encoder(self):
-        """ Encoder Network """
-        kwargs = {"kernel_initializer": self.kernel_initializer}
-        input_ = Input(shape=self.input_shape)
-        in_conv_filters = self.input_shape[0]
-        if self.input_shape[0] > 128:
-            in_conv_filters = 128 + (self.input_shape[0] - 128) // 4
-        dense_shape = self.input_shape[0] // 16
+    Parameters
+    ----------
+    low_mem
+        ``True`` for low memory version
+    """
+    def __init__(self, low_mem: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.feats = 512 if low_mem else 1024
 
-        var_x = Conv2DBlock(in_conv_filters, activation=None, **kwargs)(input_)
-        tmp_x = var_x
+        self.down1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same", leaky_slope=-1.)
+        self.leaky1 = nn.LeakyReLU(0.2)
+        self.res = nn.Sequential(*(ResidualBlock(128, 128) for _ in range(8 if low_mem else 16)))
+        self.leaky2 = nn.LeakyReLU(0.1)
+        self.down2 = nn.Sequential(ConvBlockLegacy(128, 128, 5, stride=2, padding="same"),
+                                   nn.PixelShuffle(2))
+        self.down3 = nn.Sequential(ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
+                                   nn.PixelShuffle(2))
+        self.down4 = nn.Sequential(
+            ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
+            SeparableConv2d(128, 256, 5, stride=2, padding=2, is_legacy=True)
+            )
 
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        res_cycles = 8 if cfg.lowmem() else 16
-        for _ in range(res_cycles):
-            nn_x = ResidualBlock(in_conv_filters, **kwargs)(var_x)
-            var_x = nn_x
-        # consider adding scale before this layer to scale the residual chain
-        tmp_x = layers.LeakyReLU(negative_slope=0.1)(tmp_x)
-        var_x = layers.add([var_x, tmp_x])
-        var_x = Conv2DBlock(128, activation="leakyrelu", **kwargs)(var_x)
-        var_x = PixelShuffler()(var_x)
-        var_x = Conv2DBlock(128, activation="leakyrelu", **kwargs)(var_x)
-        var_x = PixelShuffler()(var_x)
-        var_x = Conv2DBlock(128, activation="leakyrelu", **kwargs)(var_x)
-        var_x = SeparableConv2DBlock(256, **kwargs)(var_x)
-        var_x = Conv2DBlock(512, activation="leakyrelu", **kwargs)(var_x)
-        if not cfg.lowmem():
-            var_x = SeparableConv2DBlock(1024, **kwargs)(var_x)
+        self.down5 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
+        if not low_mem:
+            self.down5 = nn.Sequential(
+                self.down5,
+                SeparableConv2d(512, 1024, 5, stride=2, padding=2, is_legacy=True)
+            )
 
-        var_x = layers.Dense(self.encoder_dim, **kwargs)(layers.Flatten()(var_x))
-        var_x = layers.Dense(dense_shape * dense_shape * 1024, **kwargs)(var_x)
-        var_x = layers.Reshape((dense_shape, dense_shape, 1024))(var_x)
-        var_x = UpscaleBlock(512, activation="leakyrelu", **kwargs)(var_x)
-        return KModel(input_, var_x, name="encoder")
+        self.flatten = nn.Flatten(start_dim=1)
+        self.dense1 = nn.Linear(self.feats * 4 * 4, self.feats)
+        self.dense2 = nn.Linear(self.feats, 1024 * 8 * 8)
+        self.up = UpscaleSubpixel(1024, 512)
 
-    def decoder(self, side):
-        """ Decoder Network """
-        kwargs = {"kernel_initializer": self.kernel_initializer}
-        decoder_shape = self.input_shape[0] // 8
-        input_ = Input(shape=(decoder_shape, decoder_shape, 512))
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the Villain encoder
 
-        var_x = input_
-        var_x = UpscaleBlock(512, activation=None, **kwargs)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(512, **kwargs)(var_x)
-        var_x = UpscaleBlock(256, activation=None, **kwargs)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(256, **kwargs)(var_x)
-        var_x = UpscaleBlock(self.input_shape[0], activation=None, **kwargs)(var_x)
-        var_x = layers.LeakyReLU(negative_slope=0.2)(var_x)
-        var_x = ResidualBlock(self.input_shape[0], **kwargs)(var_x)
-        var_x = Conv2DOutput(3, 5, name=f"face_out_{side}")(var_x)
-        outputs = [var_x]
+        Parameters
+        ----------
+        inputs
+            The input to the encoder
 
-        if cfg_loss.learn_mask():
-            var_y = input_
-            var_y = UpscaleBlock(512, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(256, activation="leakyrelu")(var_y)
-            var_y = UpscaleBlock(self.input_shape[0], activation="leakyrelu")(var_y)
-            var_y = Conv2DOutput(1, 5, name=f"mask_out_{side}")(var_y)
-            outputs.append(var_y)
-        return KModel(input_, outputs=outputs, name=f"decoder_{side}")
+        Returns
+        -------
+        The output from the encoder
+        """
+        x = self.down1(inputs)
+        tmp_x = x
+
+        x = self.leaky1(x)
+        x = self.res(x)
+
+        tmp_x = self.leaky2(tmp_x)
+        x = x + tmp_x
+
+        x = self.down2(x)
+        x = self.down3(x)
+        x = self.down4(x)
+        x = self.down5(x)
+
+        x = self.flatten(x)
+        x = self.dense1(x)
+        x: torch.Tensor = self.dense2(x)
+        x = x.view(x.shape[0], 1024, 8, 8)
+        return self.up(x)
+
+
+class Decoder(nn.Module):
+    """The Villain Faceswap Decoder Network.
+
+    Parameters
+    ----------
+    learn_mask
+        ``True`` to set a secondary task to learn a mask
+    """
+    def __init__(self, learn_mask: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.learn_mask = learn_mask
+        self.up1 = nn.Sequential(UpscaleSubpixel(512, 512, leaky_slope=0.2),
+                                 ResidualBlock(512, 512))
+        self.up2 = nn.Sequential(UpscaleSubpixel(512, 256, leaky_slope=0.2),
+                                 ResidualBlock(256, 256))
+        self.up3 = nn.Sequential(UpscaleSubpixel(256, 128, leaky_slope=0.2),
+                                 ResidualBlock(128, 128))
+        self.conv = nn.Conv2d(128, 3, 5, stride=1, padding=2)
+
+        if learn_mask:
+            self.mask_up1 = UpscaleSubpixel(512, 512)
+            self.mask_up2 = UpscaleSubpixel(512, 256)
+            self.mask_up3 = UpscaleSubpixel(256, 128)
+            self.mask_conv = nn.Conv2d(128, 1, 5, stride=1, padding=2)
+
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Forward pass through the Villain Faceswap decoder
+
+        Parameters
+        ----------
+        inputs
+            The input to the Decoder
+
+        Returns
+        -------
+        outputs
+            The image output and optionally mask from the decoder
+        """
+        x = self.up1(inputs)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = torch.sigmoid(self.conv(x))
+
+        if not self.learn_mask:
+            return (x, )
+
+        mask = self.mask_up1(inputs)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
+        return (x, mask)
+
+
+class Villain(ModelPlugin):
+    """ Villain Faceswap Model.
+
+    Parameters
+    ----------
+    num_identities
+        The number of identities that the model is to be trained on. Default: 2
+    """
+    def __init__(self, num_identities: int = 2) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__(num_identities, input_size=128)
+        self.encoder = Encoder(cfg.lowmem())
+        self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask())
+                                      for _ in range(num_identities))
+
+    def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
+        """Forward pass through the original model
+
+        Parameters
+        ----------
+        inputs: list
+            A list of input tensors for the model. This will be of length num_identities with each
+            tensor of shape (N, C, H, W)
+
+        Returns
+        -------
+        The output for each identity training through the model
+        """
+        encoded = [self.encoder(x) for x in inputs]
+        decoded = tuple(dec(x) for dec, x in zip(self.decoders, encoded))
+        return decoded
+
+
+__all__ = get_module_objects(__name__)
+
+
+if __name__ == "__main__":
+    p = Villain(2)
+    i = [torch.rand((1, 3, 128, 128)), torch.rand((1, 3, 128, 128))]
+    out = p(i)
+    print([[k.shape for k in j] for j in out])

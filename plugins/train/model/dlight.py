@@ -215,23 +215,23 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         dec_a_complexity = 256
         mask_complexity = 128
 
-        self.upscale1 = nn.UpsamplingBilinear2d(scale_factor=upscale_ratio)
-        self.upscale2 = Upscale2xBlock(1024, dec_a_complexity, fast=False)
-        self.upscale3 = Upscale2xBlock(dec_a_complexity, dec_a_complexity // 2, fast=False)
-        self.upscale4 = Upscale2xBlock(dec_a_complexity // 2, dec_a_complexity // 4, fast=False)
-        self.upscale5 = Upscale2xBlock(dec_a_complexity // 4, dec_a_complexity // 8, fast=False)
+        self.up1 = nn.UpsamplingBilinear2d(scale_factor=upscale_ratio)
+        self.up2 = Upscale2xBlock(1024, dec_a_complexity, fast=False)
+        self.up3 = Upscale2xBlock(dec_a_complexity, dec_a_complexity // 2, fast=False)
+        self.up4 = Upscale2xBlock(dec_a_complexity // 2, dec_a_complexity // 4, fast=False)
+        self.up5 = Upscale2xBlock(dec_a_complexity // 4, dec_a_complexity // 8, fast=False)
         self.conv = nn.Conv2d(dec_a_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.upscale_mask1 = Upscale2xBlock(1024, mask_complexity, fast=False)
-            self.upscale_mask2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
-            self.upscale_mask3 = Upscale2xBlock(mask_complexity // 2,
-                                                mask_complexity // 4,
-                                                fast=False)
-            self.upscale_mask4 = Upscale2xBlock(mask_complexity // 4,
-                                                mask_complexity // 8,
-                                                fast=False)
-            self.conv_mask = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
+            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
+                                           mask_complexity // 4,
+                                           fast=False)
+            self.mask_up4 = Upscale2xBlock(mask_complexity // 4,
+                                           mask_complexity // 8,
+                                           fast=False)
+            self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Dlight decoder A
@@ -246,22 +246,22 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale1(inputs)
+        x = self.up1(inputs)
         xy = x
-        x = self.upscale2(x)
-        x = self.upscale3(x)
-        x = self.upscale4(x)
-        x = self.upscale5(x)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        x = self.up5(x)
         x = torch.sigmoid(self.conv(x))
 
         if not self.learn_mask:
             return (x, )
 
-        mask = self.upscale_mask1(xy)
-        mask = self.upscale_mask2(mask)
-        mask = self.upscale_mask3(mask)
-        mask = self.upscale_mask4(mask)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        mask = self.mask_up1(xy)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = self.mask_up4(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 
@@ -283,7 +283,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         dec_b_complexity = 512
         mask_complexity = 128
 
-        self.upscale1 = nn.Sequential(OrderedDict({
+        self.up1 = nn.Sequential(OrderedDict({
             "up": Upscale2xBlock(1024,
                                  dec_b_complexity,
                                  scale_factor=upscale_ratio,
@@ -295,7 +295,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             "res3": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False)
         }))
 
-        self.upscale2 = nn.Sequential(OrderedDict({
+        self.up2 = nn.Sequential(OrderedDict({
             "up": Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=False, activation=False),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
             "res1": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=True),
@@ -303,7 +303,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             "bn": nn.BatchNorm2d(dec_b_complexity, eps=0.001, momentum=0.01)
         }))
 
-        self.upscale3 = nn.Sequential(OrderedDict({
+        self.up3 = nn.Sequential(OrderedDict({
             "up": Upscale2xBlock(dec_b_complexity,
                                  dec_b_complexity // 2,
                                  fast=False,
@@ -315,7 +315,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
                                  bias=True)
         }))
 
-        self.upscale4 = nn.Sequential(OrderedDict({
+        self.up4 = nn.Sequential(OrderedDict({
             "up": Upscale2xBlock(dec_b_complexity // 2,
                                  dec_b_complexity // 4,
                                  fast=False,
@@ -328,22 +328,22 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             "bn": nn.BatchNorm2d(dec_b_complexity // 4, eps=0.001, momentum=0.01)
         }))
 
-        self.upscale5 = Upscale2xBlock(dec_b_complexity // 4,
-                                       dec_b_complexity // 8,
-                                       fast=False,
-                                       activation=True)
+        self.up5 = Upscale2xBlock(dec_b_complexity // 4,
+                                  dec_b_complexity // 8,
+                                  fast=False,
+                                  activation=True)
         self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.upscale_mask1 = Upscale2xBlock(1024, mask_complexity, fast=False)
-            self.upscale_mask2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
-            self.upscale_mask3 = Upscale2xBlock(mask_complexity // 2,
-                                                mask_complexity // 4,
-                                                fast=False)
-            self.upscale_mask4 = Upscale2xBlock(mask_complexity // 4,
-                                                mask_complexity // 8,
-                                                fast=False)
-            self.conv_mask = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
+            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
+                                           mask_complexity // 4,
+                                           fast=False)
+            self.mask_up4 = Upscale2xBlock(mask_complexity // 4,
+                                           mask_complexity // 8,
+                                           fast=False)
+            self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Dlight decoder B
@@ -358,23 +358,23 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale1(inputs)
+        x = self.up1(inputs)
         xy = x
 
-        x = self.upscale2(x)
-        x = self.upscale3(x)
-        x = self.upscale4(x)
-        x = self.upscale5(x)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        x = self.up5(x)
         x = torch.sigmoid(self.conv(x))
 
         if not self.learn_mask:
             return (x, )
 
-        mask = self.upscale_mask1(xy)
-        mask = self.upscale_mask2(mask)
-        mask = self.upscale_mask3(mask)
-        mask = self.upscale_mask4(mask)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        mask = self.mask_up1(xy)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = self.mask_up4(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 
@@ -396,24 +396,24 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
         dec_b_complexity = 512
         mask_complexity = 128
 
-        self.upscale1 = UpscaleSubpixel(1024, dec_b_complexity, scale_factor=upscale_ratio)
-        self.upscale2 = Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=True)
-        self.upscale3 = Upscale2xBlock(dec_b_complexity, dec_b_complexity // 2, fast=True)
-        self.upscale4 = Upscale2xBlock(dec_b_complexity // 2, dec_b_complexity // 4, fast=True)
-        self.upscale5 = Upscale2xBlock(dec_b_complexity // 4, dec_b_complexity // 8, fast=True)
+        self.up1 = UpscaleSubpixel(1024, dec_b_complexity, scale_factor=upscale_ratio)
+        self.up2 = Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=True)
+        self.up3 = Upscale2xBlock(dec_b_complexity, dec_b_complexity // 2, fast=True)
+        self.up4 = Upscale2xBlock(dec_b_complexity // 2, dec_b_complexity // 4, fast=True)
+        self.up5 = Upscale2xBlock(dec_b_complexity // 4, dec_b_complexity // 8, fast=True)
 
         self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.upscale_mask1 = Upscale2xBlock(1024, mask_complexity, fast=False)
-            self.upscale_mask2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
-            self.upscale_mask3 = Upscale2xBlock(mask_complexity // 2,
-                                                mask_complexity // 4,
-                                                fast=False)
-            self.upscale_mask4 = Upscale2xBlock(mask_complexity // 4,
-                                                mask_complexity // 8,
-                                                fast=False)
-            self.conv_mask = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
+            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
+                                           mask_complexity // 4,
+                                           fast=False)
+            self.mask_up4 = Upscale2xBlock(mask_complexity // 4,
+                                           mask_complexity // 8,
+                                           fast=False)
+            self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass through the Dlight B Fast decoder
@@ -428,22 +428,22 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
         outputs
             The image output and optionally mask from the decoder
         """
-        x = self.upscale1(inputs)
+        x = self.up1(inputs)
         xy = x
-        x = self.upscale2(x)
-        x = self.upscale3(x)
-        x = self.upscale4(x)
-        x = self.upscale5(x)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        x = self.up5(x)
         x = torch.sigmoid(self.conv(x))
 
         if not self.learn_mask:
             return (x, )
 
-        mask = self.upscale_mask1(xy)
-        mask = self.upscale_mask2(mask)
-        mask = self.upscale_mask3(mask)
-        mask = self.upscale_mask4(mask)
-        mask = torch.sigmoid(self.conv_mask(mask))
+        mask = self.mask_up1(xy)
+        mask = self.mask_up2(mask)
+        mask = self.mask_up3(mask)
+        mask = self.mask_up4(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 
