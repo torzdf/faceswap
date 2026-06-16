@@ -26,7 +26,6 @@ from plugins.train.trainer import trainer_config as trn_cfg
 from .data import AugmentOptions, get_label, PreviewLoader, TrainLoader
 from .loss import LossCollator
 from .lr_finder import LearningRateFinder
-from .optimizer import Optimizer
 from .preview import Samples
 
 
@@ -36,6 +35,7 @@ if T.TYPE_CHECKING:
     from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerBase
     from .loss import BatchLoss
+    from .optimizer import Optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -345,17 +345,15 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         mod_cfg.load_config(config_file=config_file)  # Set global config
 
         self._model_handler = model_handler
-        self._optimizer = None if summary else Optimizer(self._model_handler.model,
-                                                         mod_cfg.Optimizer,
-                                                         mod_cfg.mixed_precision(),
-                                                         warmup_steps)
-
-        self._model_handler.load_state_dict(self._optimizer)  # Load saved model config
+        self._model_handler.load_state_dict(cache_optimizer_state=True)  # Load saved model config
         model_info = Info(self._model_handler.model)
         model_info.summary(print if summary else logger.verbose)  # type:ignore[attr-defined]
         if summary:
             return
 
+        self._optimizer = self._model_handler.load_optimizer(mod_cfg.Optimizer,
+                                                             mod_cfg.mixed_precision(),
+                                                             warmup_steps)
         self._device = get_device()
         self._loss_fn, self._trainer = self._configure_model(trainer_name, model_info)
         self._train_loader = self._get_train_loader(model_info.input_size,

@@ -12,6 +12,7 @@ from torch import nn
 from lib.logger import parse_class_init
 from lib.model.initializers import icnr, ConvolutionAware
 from lib.model.layers import SamePad2d
+from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
 from plugins.plugin_loader import PluginLoader
@@ -21,9 +22,9 @@ from .saving import ModelIO
 from .train_state import State
 
 if T.TYPE_CHECKING:
-    from lib.training.optimizer import Optimizer
     from lib.training.train import LossHandler
     from plugins.train.model.base import ModelPlugin
+    from plugins.train.train_config import Optimizer as OptConfig
     from plugins.train.trainer.base import TrainerBase
     from .model_info import Layer
 
@@ -294,6 +295,10 @@ class TrainHandler:
         self._io = ModelIO(self._model.name, model_folder)
         self._lrf_steps = 0
 
+        self._opt_state: dict[T.Literal["version", "optimizer", "scaler", "lrf_scheduler"],
+                              float | dict[str, T.Any]] | None = None
+        """Temporary cache of the optimizer state_dict for holding between loading model weights
+        and loading optimizer weights to prevent needing to load from disk twice"""
         self._optimizer: Optimizer
 
     @property
@@ -333,30 +338,62 @@ class TrainHandler:
         """The configured optimizer in use"""
         return self._optimizer
 
-    def load_state_dict(self, optimizer: Optimizer | None) -> None:
+    def load_state_dict(self, cache_optimizer_state: bool = False) -> None:
         """Load the state from disk and set to the Model and State objects. Also loads Optimizer
-        weights if one is attached to this object or provided here.
+        weights if one is attached to this object.
 
         Parameters
         ----------
-        optimizer
-            The configured Faceswap optimizer to additionally be loaded or ``None``. If an
-            optimizer is already attached to this object it will be replaced with the given
-            optimizer.
+        cache_optimizer_state
+            ``True`` to cache the optimizer state for later loading. Default: ``False``
         """
         logger.debug("[TrainHandler] Loading state_dict: %s", self._model)
         state_dict = self._io.load(model=self._model)
+        if not state_dict:
+            logger.debug("[TrainHandler] No state_dict to load")
+            return
+
         self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
-        if optimizer is not None:
-            logger.debug("[TrainHandler] adding Optimizer: %s", optimizer)
-            self._optimizer = optimizer
+        if "optimizer" not in state_dict:
+            return
+
+        opt_state = T.cast(dict[T.Literal["version", "optimizer", "scaler", "lrf_scheduler"],
+                                float | dict[str, T.Any]], state_dict["optimizer"])
         if hasattr(self, "_optimizer"):
             logger.debug("[TrainHandler] Loading optimizer state_dict: %s", self._optimizer)
-            self._optimizer.load_state_dict(
-                T.cast(dict[T.Literal["version", "optimizer", "scaler", "lrf_scheduler"],
-                       float | dict[str, T.Any]],
-                       state_dict.get("optimizer", {}))
-            )
+            self._optimizer.load_state_dict(opt_state)
+
+        if cache_optimizer_state:
+            logger.debug("[TrainHandler] Caching optimizer state: %s", list(opt_state))
+            self._opt_state = opt_state
+
+    def load_optimizer(self, config: type[OptConfig], mixed_precision: bool, warmup_steps: int
+                       ) -> Optimizer:
+        """Create the optimizer and load its weights if they exist
+
+        Parameters
+        ----------
+        config
+            The optimizer user configuration options
+        mixed_precision
+            ``True`` to train using mixed precision.
+        warmup_steps
+            The number of steps to warmup the learning rate for.
+
+        Returns
+        -------
+        The loaded optimizer
+        """
+        self._optimizer = Optimizer(self.model, config, mixed_precision, warmup_steps)
+        if self._opt_state is None:
+            logger.debug("[TrainHandler] No optimizer state_dict to load:")
+        else:
+            logger.debug("[TrainHandler] Loading optimizer state_dict: %s", list(self._opt_state))
+            self._optimizer.load_state_dict(self._opt_state)
+            del self._opt_state
+            self._opt_state = None
+        logger.debug("[TrainHandler] Loaded optimizer: %s", self._optimizer)
+        return self._optimizer
 
     def configure_model(self,
                         trainer_name: str,
@@ -402,7 +439,7 @@ class TrainHandler:
                                                         self.batch_size,
                                                         mixed_precision,
                                                         str(device))
-        if mixed_precision:  # TODO resume issues
+        if mixed_precision:
             logger.info("Enabled Auto Mixed Precision")
 
         logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
@@ -458,7 +495,6 @@ class TrainHandler:
         backing_file
             The file that stores the initial weights prior to the learning rate finder being run
         """
-        # TODO Currently an issue with resuming MP. May not be LRF specific
         self.optimizer.disable_learning_rate_finder()
         self._model.state.lr_finder = learning_rate
         logger.debug("[TrainHandler] Restoring model weights from: '%s'", backing_file)
