@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import tkinter as tk
 import typing as T
@@ -14,7 +15,6 @@ import zipfile
 
 from importlib import import_module
 from multiprocessing import current_process
-from re import finditer
 from socket import timeout as socket_timeout, error as socket_error
 from threading import get_ident
 from time import time
@@ -525,10 +525,27 @@ def camel_case_split(identifier: str) -> list[str]:
     >>> camel_case_split('camelCaseExample')
     ['camel', 'Case', 'Example']
     """
-    matches = finditer(
+    matches = re.finditer(
         ".+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)",
         identifier)
     return [m.group(0) for m in matches]
+
+
+def camel_to_snake_case(text: str) -> str:
+    """Convert CamelCase to snake_case
+
+    Parameters
+    ----------
+    text
+        The camel case text to convert
+
+    Returns
+    -------
+    The text converted to snake case
+    """
+    s1 = re.sub(r'(.)([A-Z][a-z0-9]+)', r'\1_\2', text)
+    s2 = re.sub(r'([a-z])([A-Z])', r'\1_\2', s1)
+    return s2.lower()
 
 
 def safe_shutdown(got_error: bool = False) -> None:

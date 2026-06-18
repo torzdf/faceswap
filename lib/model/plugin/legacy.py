@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects
+from lib.utils import camel_to_snake_case, get_module_objects
 
 if T.TYPE_CHECKING:
     from .handler import FaceswapModel
@@ -35,12 +35,58 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         self._model_path = model_path
         self.state = self._load_state_file()
         """The keras model's state file"""
-        self._config: dict[str, T.Any] = {}
+        self.layers: list[str] = []
+        """Flattened list of standardized layer names within the model in creation order as
+        derived from the model's config.json, standardized to h5 file weights labels format"""
         self.weights = {}
         """The stored layer name to numpy array for the loaded keras model"""
         self._optimizer: dict[T.Literal["version", "optimizer", "scale"], T.Any] = {}
 
         self._load_keras_model()
+
+    def _flatten_config(self,
+                        config: dict[str, T.Any],
+                        name: str | None = None,
+                        counters: dict[str, int] | None = None) -> list[str]:
+        """Recurse through the config.json file flattening to a matching format to the h5 weights
+
+        Parameters
+        ----------
+        config
+            A keras config dictionary
+        collected
+            Data collected so far. Default: ``None`` (first iteration)
+        counters
+            Tracker of standardized layer names that have been visited.
+            Default: ``None`` (first iteration)
+
+        Returns
+        -------
+        list of standardized layer names in model creation order
+        """
+        counters = {} if counters is None else counters
+
+        cls_name = config["class_name"]
+        if cls_name == "InputLayer":
+            return []
+
+        if name is None:
+            label = "layers"
+        else:
+            base = f"{name}.{camel_to_snake_case(cls_name)}"
+            cls_count = counters.get(base, 0)
+            suffix = "" if cls_count == 0 else f"_{cls_count}"
+            label = f"{base}{suffix}"
+            counters[base] = cls_count + 1
+
+        if "layers" in config["config"]:
+            child_parent = label if name is None else f"{label}.layers"
+            retval = []
+            for layer in config["config"]["layers"]:
+                retval += self._flatten_config(layer, child_parent, counters)
+            return retval
+
+        return [label]
 
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
@@ -90,7 +136,6 @@ class KerasModel:  # pylint:disable=too-few-public-methods
 
     def _load_keras_model(self):
         """Load the objects we require out of the keras model file"""
-
         with zipfile.ZipFile(self._model_path, "r") as z_file:
             name_list = z_file.namelist()
             logger.debug("[KerasModel] zip file contents: %s", name_list)
@@ -99,8 +144,8 @@ class KerasModel:  # pylint:disable=too-few-public-methods
                     raise ValueError(f"Could not find key '{fname}' in "
                                      f"model file: {self._model_path}")
 
-            self._config = json.loads(z_file.read("config.json"))
-            logger.debug("[KerasModel] Loaded config: %s", self._config)
+            self.layers = self._flatten_config(json.loads(z_file.read("config.json")))
+            logger.debug("[KerasModel] Standardized model layer names: %s", self.layers)
 
             weights = h5py.File(io.BytesIO(z_file.read("model.weights.h5")), "r")
             self.weights = self._get_weights(T.cast(h5py.Group, weights["layers"]))
@@ -133,7 +178,37 @@ class KerasToTorch:
 
         self._state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
                                float | dict[str, T.Any]] = {}
+        self._pixel_shuffler_convs = self._get_pixel_shuffler_convs(self._keras.layers)
         self._state = self._get_state()
+
+    @classmethod
+    def _get_pixel_shuffler_convs(cls, layers: list[str]) -> list[str]:
+        """Obtain a list of convolutions that lead into pixel shuffler layers
+
+        Parameters
+        ----------
+        layers
+            The list of standardized layer names within the keras model in creation order
+
+        Returns
+        -------
+        list of convolution names that lead into pixel shuffler layers
+        """
+        retval = []
+        pixel = ""
+        for layer in reversed(layers):
+            name = layer.rsplit(".", maxsplit=1)[-1]
+            if name.startswith("pixel_shuffler"):
+                pixel = layer
+            if pixel and name.startswith("conv2d"):
+                logger.debug("[KerasToTorch] Collected conv '%s' for pixel shuffler '%s'",
+                             layer, pixel)
+                retval.append(layer)
+                pixel = ""
+
+        retval = list(reversed(retval))
+        logger.debug("[KerasToTorch] Pixel Shuffler convs: %s", retval)
+        return retval
 
     def _get_state(self) -> dict[str, T.Any]:
         """Obtain the legacy state dict removing any keys that may break downstream dataclasses and
@@ -157,7 +232,7 @@ class KerasToTorch:
             "mask_loss_function": "mse",
             "optimizer": "adam"
         }
-        for key, val in legacy_defaults:
+        for key, val in legacy_defaults.items():
             retval[key] = retval.get(key, val)
 
         if isinstance(retval.get("lowest_avg_loss"), dict):  # Loss used to be stored per side
@@ -213,7 +288,7 @@ class KerasToTorch:
                              weights: dict[str, ArrayT],
                              reshape_to_torch: bool
                              ) -> dict[str, dict[T.Literal["weight", "bias"], ArrayT]]:
-        """Group the list of layer weights and biases by layer
+        """Group the list of layer weights and biases by layer and remove trailing 'vars' label
 
         Parameters
         ----------
@@ -224,12 +299,14 @@ class KerasToTorch:
 
         Returns
         -------
-        Each layer of the model with a dictionary containing it's weights and biases
+        Each layer of the model from the .h5 file with a dictionary containing it's weights and
+        biases
         """
         retval = {}
         for lbl, weight in weights.items():
             name, w_type = lbl.rsplit(".", maxsplit=1)
             if reshape_to_torch:
+                name = name.rsplit(".", maxsplit=1)[0]  # Strip .vars from the end
                 w_type = "weight" if w_type == "0" else "bias"  # keras indexing to torch name
                 assert isinstance(weight, np.ndarray)
                 if weight.ndim == 4:
@@ -269,18 +346,18 @@ class KerasToTorch:
             shape = (dim, dim, out, out)  # ch_last
             trans = (2, 0, 1, 3)  # ch_first
 
-        logger.info("[KerasToTorch] Converting Dense weights for '%s'. Dense shape: %s, "
-                    "Reshape: %s, Transpose: %s",
-                    "Depth to Space" if d2s else "Space to Depth",
-                    weights["weight"].shape,
-                    shape,
-                    trans)
+        logger.debug("[KerasToTorch] Converting Dense weights for '%s'. Dense shape: %s, "
+                     "Reshape: %s, Transpose: %s",
+                     "Depth to Space" if d2s else "Space to Depth",
+                     weights["weight"].shape,
+                     shape,
+                     trans)
 
         weights["weight"] = weights["weight"].reshape(shape).transpose(trans).reshape(in_, out)
         if d2s and weights.get("bias") is not None:
-            logger.info("[KerasToTorch] Converting Dense bias for output. Bias shape: %s, "
-                        "Reshape: %s, Transpose: %s",
-                        weights["bias"].shape, shape[:-1], trans[:-1])
+            logger.debug("[KerasToTorch] Converting Dense bias for output. Bias shape: %s, "
+                         "Reshape: %s, Transpose: %s",
+                         weights["bias"].shape, shape[:-1], trans[:-1])
             weights["bias"] = weights["bias"].reshape(
                 shape[:-1]).transpose(trans[:-1]).reshape(in_)
 
@@ -296,7 +373,7 @@ class KerasToTorch:
             The weights and bias for a conv layer being imported from Keras
         """
         scale = 2
-        out_channels = weights["weight"].shape[1] // scale
+        out_channels = weights["weight"].shape[0] // (scale * scale)
         trans = []
         for k_prime in range(scale * scale * out_channels):
             c = k_prime // (scale * scale)
@@ -304,12 +381,12 @@ class KerasToTorch:
             dw = k_prime % scale
             k = dh * scale * out_channels + dw * out_channels + c
             trans.append(k)
-        logger.info("[KerasToTorch] Permuting pixel-shuffler input weights of shape %s with index "
-                    "of length %s", weights["weight"].shape, len(trans))
+        logger.debug("[KerasToTorch] Permuting pixel-shuffler input weights of shape %s with "
+                     "index of length %s", weights["weight"].shape, len(trans))
         weights["weight"] = weights["weight"][trans]
         if weights.get("bias") is not None:
-            logger.info("[KerasToTorch] Permuting pixel-shuffler input bias of shape %s with "
-                        "index of length %s", weights["bias"].shape, len(trans))
+            logger.debug("[KerasToTorch] Permuting pixel-shuffler input bias of shape %s with "
+                         "index of length %s", weights["bias"].shape, len(trans))
             weights["bias"] = weights["bias"][trans]
 
     def _map_weights(self,
@@ -323,6 +400,22 @@ class KerasToTorch:
         The imported keras weights for importing into a torch plugin
         """
         # TODO Test this for all models as topological unlikely to always work
+        # TODO remove this debug code
+        # print("TCH", len(torch_weights), "KER", len(keras_weights))
+        # for t_mod, k_mod in zip(("encoder", "decoders.0", "decoders.1"),
+        #                         ("layers.functional.", "layers.functional_1", "layers.functional_2")):
+        #     print(t_mod, k_mod, len([l for l in torch_weights if l.startswith(t_mod)]),
+        #           len([l for l in keras_weights if l.startswith(k_mod)]))
+
+        # for k, v in torch_weights.items():
+        #     if k.startswith("decoders.0"):
+        #         print(k, v.shape)
+        # print()
+        # for k, v in keras_weights.items():
+        #     if k.startswith("layers.functional_1"):
+        #         print(k, v.shape)
+        # exit()
+
         if len(keras_weights) != len(torch_weights):
             raise RuntimeError(f"Keras weight count ({len(keras_weights)}) does not match Torch "
                                f"weight count ({len(torch_weights)})")
@@ -342,9 +435,9 @@ class KerasToTorch:
             key = next(k for k, v in keras_grouped.items()
                        if v["weight"].shape == weights["weight"].shape)
             val = keras_grouped.pop(key)
-            if "dense" in lbl and val["weight"].ndim == 2:
+            if key.rsplit(".", maxsplit=1)[-1].startswith("dense") and val["weight"].ndim == 2:
                 self._dense_reorder(val)
-            if "upscale" in lbl and lbl.endswith(".conv") and val["weight"].ndim == 4:  # TODO more robust capture?
+            if key in self._pixel_shuffler_convs:
                 self._pixel_shuffle_reorder(val)
 
             logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
