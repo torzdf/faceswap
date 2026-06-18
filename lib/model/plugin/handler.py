@@ -49,7 +49,7 @@ class FaceswapModel:
         logger.debug(parse_class_init(locals()))
         self._name = f"[{self.__class__.__name__}.{name}]"
 
-        self.name = name
+        self.name = name.replace("-", "_")
         """The plugin name of the model to load"""
         self._num_identities = num_identities
 
@@ -90,7 +90,7 @@ class FaceswapModel:
 
         if "state" in state_dict:
             self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
-            logger.info("%s Reloading plugin", self._name)
+            logger.debug("%s Reloading plugin", self._name)
             old = self._plugin
             self._plugin = old.__class__(self._num_identities)
             del old

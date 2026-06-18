@@ -35,9 +35,10 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         self._model_path = model_path
         self.state = self._load_state_file()
         """The keras model's state file"""
-        self.layers: list[str] = []
-        """Flattened list of standardized layer names within the model in creation order as
-        derived from the model's config.json, standardized to h5 file weights labels format"""
+        self.layers: dict[str, list[list[int]]] = {}
+        """Flattened dict of standardized layer names within the model in creation order as
+        derived from the model's config.json, standardized to h5 file weights labels format mapped
+        to layer input shapes"""
         self.weights = {}
         """The stored layer name to numpy array for the loaded keras model"""
         self._optimizer: dict[T.Literal["version", "optimizer", "scale"], T.Any] = {}
@@ -47,7 +48,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
     def _flatten_config(self,
                         config: dict[str, T.Any],
                         name: str | None = None,
-                        counters: dict[str, int] | None = None) -> list[str]:
+                        counters: dict[str, int] | None = None) -> dict[str, list[list[int]]]:
         """Recurse through the config.json file flattening to a matching format to the h5 weights
 
         Parameters
@@ -62,13 +63,13 @@ class KerasModel:  # pylint:disable=too-few-public-methods
 
         Returns
         -------
-        list of standardized layer names in model creation order
+        dict of standardized layer names in model creation order mapped to their input shape
         """
         counters = {} if counters is None else counters
 
         cls_name = config["class_name"]
         if cls_name == "InputLayer":
-            return []
+            return {}
 
         if name is None:
             label = "layers"
@@ -81,12 +82,13 @@ class KerasModel:  # pylint:disable=too-few-public-methods
 
         if "layers" in config["config"]:
             child_parent = label if name is None else f"{label}.layers"
-            retval = []
+            retval = {}
             for layer in config["config"]["layers"]:
-                retval += self._flatten_config(layer, child_parent, counters)
+                retval |= self._flatten_config(layer, child_parent, counters)
             return retval
 
-        return [label]
+        return {label: [a["config"]["shape"][1:]
+                        for i in config["inbound_nodes"] for a in i["args"]]}
 
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
@@ -178,7 +180,8 @@ class KerasToTorch:
 
         self._state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
                                float | dict[str, T.Any]] = {}
-        self._pixel_shuffler_convs = self._get_pixel_shuffler_convs(self._keras.layers)
+        self._pixel_shuffler_convs = self._get_pixel_shuffler_convs(list(self._keras.layers))
+        self._dense_reshapes = self._get_dense_reshapes(self._keras.layers)
         self._state = self._get_state()
 
     @classmethod
@@ -208,6 +211,51 @@ class KerasToTorch:
 
         retval = list(reversed(retval))
         logger.debug("[KerasToTorch] Pixel Shuffler convs: %s", retval)
+        return retval
+
+    @classmethod
+    def _get_dense_reshapes(cls, layers: dict[str, list[list[int]]]
+                            ) -> dict[str, tuple[bool, tuple[int, int, int]]]:
+        """Dense layers that either follow a flatten or precede a reshape require their
+        weights reshaped for channel first ordering
+
+        Parameters
+        ----------
+        layers
+            The standardized layer names with their input shapes
+
+        Returns
+        -------
+        dict of dense layer names to tuple of (``True`` to reshape in_channels, ``False`` to
+        reshape out_channels, (shape of input/output tensor))
+        """
+        retval: dict[str, tuple[bool, tuple[int, int, int]]] = {}
+        for idx, names in enumerate([layers, reversed(layers)]):
+            last_layer: tuple[str, str, list[list[int]]] | None = None
+            key = "flatten" if idx == 0 else "reshape"
+            for name in names:
+                shapes = layers[name]
+                lbl = name.rsplit(".", maxsplit=1)[-1]
+                if lbl.startswith("dropout"):
+                    logger.debug("[KerasToTorch] Skipping dropout '%s'", name)  # TODO confirm
+                    continue
+
+                if (lbl.startswith("dense") and
+                        last_layer is not None and
+                        last_layer[0].startswith(key)):
+                    if idx == 0:
+                        last_shapes = last_layer[2]
+                    else:
+                        last_shapes = layers[(list(layers)[list(layers).index(last_layer[1]) + 1])]
+                    assert len(last_shapes) == 1  # We don't handle multiple inputs!
+                    shape = last_shapes[0]
+                    assert len(shape) == 3  # Must be H, W, C
+                    retval[name] = (idx == 0, (shape[0], shape[1], shape[2]))
+                    logger.info("[KerasToTensor] Collected %s channel reshape for '%s': %s",
+                                "in" if idx == 0 else "out", name, tuple(shape))
+                last_layer = (lbl, name, shapes)
+
+        logger.debug("[KerasToTensor] Dense reshape weights: %s", retval)
         return retval
 
     def _get_state(self) -> dict[str, T.Any]:
@@ -321,8 +369,8 @@ class KerasToTorch:
             retval[name] = retval.get(name, {}) | {w_type: weight}
         return retval
 
-    @classmethod
-    def _dense_reorder(cls,
+    def _dense_reorder(self,
+                       name: str,
                        weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
         """Shuffle the order that weights are stored for either the in-channels or out-channels for
         Dense operations from channels last to channels first in place.
@@ -331,35 +379,39 @@ class KerasToTorch:
 
         Parameters
         ----------
+        name
+            The standardized name of the dense layer
         weights
             The weights and bias for a Dense layer being imported from Keras
         """
-        in_, out = weights["weight"].shape
-        if in_ < out:  # Space to depth on input channel
-            d2s = False
-            dim = int((out // in_) ** 0.5)
-            shape = (in_, dim, dim, in_)  # ch_last
-            trans = (0, 3, 1, 2)  # ch_first
-        else:  # Depth to space on output channel
-            d2s = True
-            dim = int((in_ // out) ** 0.5)
-            shape = (dim, dim, out, out)  # ch_last
+        if name not in self._dense_reshapes:  # TODO confirm
+            logger.info("[KerasToTorch] Skipping unmapped Dense layer '%s'", name)
+            return
+
+        reshape_in, (height, width, channels) = self._dense_reshapes[name]
+        out, in_ = weights["weight"].shape
+
+        if reshape_in:  # Space to depth on input channel
+            shape = (height, width, channels, out)
             trans = (2, 0, 1, 3)  # ch_first
+        else:  # Depth to space on output channel
+            shape = (in_, height, width, channels)
+            trans = (0, 3, 1, 2)  # ch_first
 
         logger.debug("[KerasToTorch] Converting Dense weights for '%s'. Dense shape: %s, "
                      "Reshape: %s, Transpose: %s",
-                     "Depth to Space" if d2s else "Space to Depth",
+                     "Space to Depth" if reshape_in else "Depth to Space",
                      weights["weight"].shape,
                      shape,
                      trans)
-
         weights["weight"] = weights["weight"].reshape(shape).transpose(trans).reshape(in_, out)
-        if d2s and weights.get("bias") is not None:
+        if not reshape_in and weights.get("bias") is not None:
+            b_shape = shape[1:]
+            b_trans = tuple(t - 1 for t in trans[1:])
             logger.debug("[KerasToTorch] Converting Dense bias for output. Bias shape: %s, "
                          "Reshape: %s, Transpose: %s",
-                         weights["bias"].shape, shape[:-1], trans[:-1])
-            weights["bias"] = weights["bias"].reshape(
-                shape[:-1]).transpose(trans[:-1]).reshape(in_)
+                         weights["bias"].shape, b_shape, b_trans)
+            weights["bias"] = weights["bias"].reshape(b_shape).transpose(b_trans).reshape(out)
 
     @classmethod
     def _pixel_shuffle_reorder(cls,
@@ -436,7 +488,7 @@ class KerasToTorch:
                        if v["weight"].shape == weights["weight"].shape)
             val = keras_grouped.pop(key)
             if key.rsplit(".", maxsplit=1)[-1].startswith("dense") and val["weight"].ndim == 2:
-                self._dense_reorder(val)
+                self._dense_reorder(key, val)
             if key in self._pixel_shuffler_convs:
                 self._pixel_shuffle_reorder(val)
 
