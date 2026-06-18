@@ -87,8 +87,14 @@ class KerasModel:  # pylint:disable=too-few-public-methods
                 retval |= self._flatten_config(layer, child_parent, counters)
             return retval
 
-        return {label: [a["config"]["shape"][1:]
-                        for i in config["inbound_nodes"] for a in i["args"]]}
+        in_shapes = []
+        for c in config["inbound_nodes"]:
+            for a in c["args"]:
+                if isinstance(a, list):  # Handle inconsistent keras arg types
+                    in_shapes.extend([x["config"]["shape"][1:] for x in a])
+                else:
+                    in_shapes.append(a["config"]["shape"][1:])
+        return {label: in_shapes}
 
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
@@ -392,11 +398,11 @@ class KerasToTorch:
         out, in_ = weights["weight"].shape
 
         if reshape_in:  # Space to depth on input channel
-            shape = (height, width, channels, out)
-            trans = (2, 0, 1, 3)  # ch_first
-        else:  # Depth to space on output channel
-            shape = (in_, height, width, channels)
+            shape = (out, height, width, channels)
             trans = (0, 3, 1, 2)  # ch_first
+        else:  # Depth to space on output channel
+            shape = (height, width, channels, in_)
+            trans = (2, 0, 1, 3)  # ch_first
 
         logger.debug("[KerasToTorch] Converting Dense weights for '%s'. Dense shape: %s, "
                      "Reshape: %s, Transpose: %s",
@@ -404,10 +410,11 @@ class KerasToTorch:
                      weights["weight"].shape,
                      shape,
                      trans)
-        weights["weight"] = weights["weight"].reshape(shape).transpose(trans).reshape(in_, out)
+        weights["weight"] = weights["weight"].reshape(shape).transpose(trans).reshape(out, in_)
+
         if not reshape_in and weights.get("bias") is not None:
-            b_shape = shape[1:]
-            b_trans = tuple(t - 1 for t in trans[1:])
+            b_shape = shape[:-1]
+            b_trans = trans[:-1]
             logger.debug("[KerasToTorch] Converting Dense bias for output. Bias shape: %s, "
                          "Reshape: %s, Transpose: %s",
                          weights["bias"].shape, b_shape, b_trans)
