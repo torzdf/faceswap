@@ -12,7 +12,7 @@ from lib.model.nn_blocks import ConvBlockLegacy, UpscaleSubpixel
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
-from . import original_defaults as cfg
+from . import dfl_h128_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class Encoder(nn.Module):
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(1024 * 8 * 8, self.feats)
         self.dense2 = nn.Linear(self.feats, self.feats * 8 * 8)
-        self.up = UpscaleSubpixel(self.feats, 512)
+        self.up = UpscaleSubpixel(self.feats, self.feats)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Forward pass through the DFL-H128 encoder
