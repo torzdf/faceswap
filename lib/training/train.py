@@ -326,8 +326,6 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
         Default: ``False``
     lr_finder
         ``True`` to use the learning rate finder. Default: ``False``
-    config_file
-        The custom location to load configuration options from or ``None`` if default location
     """
     def __init__(self,
                  trainer_name: str,
@@ -339,11 +337,8 @@ class Trainer:  # pylint:disable=too-many-instance-attributes
                  preview: bool,
                  timelapse_folders: list[str] | None = None,
                  summary: bool = False,
-                 lr_finder: bool = False,
-                 config_file: str | None = None) -> None:
+                 lr_finder: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
-        mod_cfg.load_config(config_file=config_file)  # Set global config
-
         self._model_handler = model_handler
         self._model_handler.load_state_dict(cache_optimizer_state=True)  # Load saved model config
         model_info = Info(self._model_handler.model)

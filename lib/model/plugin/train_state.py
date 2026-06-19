@@ -70,7 +70,6 @@ class _Config:
         Returns
         -------
         The currently configured model plugin options
-
         """
         mod_name = f"{self._import_path}_defaults"
         try:

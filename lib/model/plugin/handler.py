@@ -16,6 +16,7 @@ from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
 from plugins.plugin_loader import PluginLoader
+from plugins.train import train_config as mod_cfg
 
 from .model_info import Info
 from .saving import ModelIO
@@ -44,9 +45,16 @@ class FaceswapModel:
     batch_size
         The batch size that the model is to be trained at, if opening for a training session,
         otherwise ``None``. Default: ``None``
+    config_file
+        The custom location to load configuration options from or ``None`` if default location
     """
-    def __init__(self, name: str, num_identities, batch_size: int | None = None) -> None:
+    def __init__(self,
+                 name: str,
+                 num_identities: int,
+                 batch_size: int | None = None,
+                 config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
+        mod_cfg.load_config(config_file=config_file)  # Set global config
         self._name = f"[{self.__class__.__name__}.{name}]"
 
         self.name = name.replace("-", "_")
@@ -273,6 +281,8 @@ class TrainHandler:
         The number of steps between each model save
     snapshot_interval
         The number of steps between full model checkpoint snapshots
+    config_file
+        The custom location to load configuration options from
     """
     def __init__(self,
                  name: str,
@@ -280,7 +290,8 @@ class TrainHandler:
                  batch_size: int,
                  model_folder: str,
                  save_interval: int,
-                 snapshot_interval: int) -> None:
+                 snapshot_interval: int,
+                 config_file: str) -> None:
         logger.debug(parse_class_init(locals()))
 
         self.name = name
@@ -291,7 +302,10 @@ class TrainHandler:
         self._save_interval = save_interval
         self._snapshot_interval = snapshot_interval
 
-        self._model = FaceswapModel(name, num_identities, batch_size=batch_size)
+        self._model = FaceswapModel(name,
+                                    num_identities,
+                                    batch_size=batch_size,
+                                    config_file=config_file)
         self._io = ModelIO(self._model.name, model_folder)
         self._lrf_steps = 0
 

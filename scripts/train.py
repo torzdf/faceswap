@@ -208,7 +208,8 @@ class Train():
                                batch_size=self._args.batch_size,
                                model_folder=self._args.model_dir,
                                save_interval=self._args.save_interval,
-                               snapshot_interval=self._args.snapshot_interval)
+                               snapshot_interval=self._args.snapshot_interval,
+                               config_file=self._args.config_file)
         tl_folders = [self._args.timelapse_input_a,
                       self._args.timelapse_input_b] if self._timelapse else None
         retval = Trainer(trainer_name=trainer,
@@ -222,8 +223,7 @@ class Train():
                                   self._args.redirect_gui),
                          timelapse_folders=tl_folders,
                          summary=self._args.summary,
-                         lr_finder=self._args.use_lr_finder,
-                         config_file=self._args.config_file)
+                         lr_finder=self._args.use_lr_finder)
         logger.debug("[Train] Loaded Trainer")
         return retval
 
