@@ -143,16 +143,19 @@ class ResidualBlock(nn.Module):
         convolution window. Can be a single integer to specify the same value for all spatial
         dimensions. Default: 3
     padding
-        The padding to use "same", "valid" or int value. Default: 0
+        The padding to use "same", "valid" or int value. Default: "same"
     bias
         ``True`` to add learnable bias to the output. Default: ``True``
+    leaky_slope
+        The value to use for LeakyReLu negative slope. Default: 0.2
     """
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
                  kernel_size: int = 3,
-                 padding: T.Literal["same", "valid"] | int = 1,
-                 bias: bool = True) -> None:
+                 padding: T.Literal["same", "valid"] | int = "same",
+                 bias: bool = True,
+                 leaky_slope: float = 0.2) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels,
@@ -160,14 +163,13 @@ class ResidualBlock(nn.Module):
                                kernel_size,
                                padding=padding,
                                bias=bias)
-        self.leaky1 = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.leaky1 = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
         self.conv2 = nn.Conv2d(out_channels,
                                out_channels,
                                kernel_size,
                                padding=padding,
                                bias=bias)
-        nn.init.xavier_uniform_(self.conv2.weight, gain=0.2)
-        self.leaky2 = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.leaky2 = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Residual Block
@@ -183,7 +185,7 @@ class ResidualBlock(nn.Module):
         """
         x = self.conv1(inputs)
         x = self.leaky1(x)
-        x = self.conv2(inputs)
+        x = self.conv2(x)
         x = x + inputs
         return self.leaky2(x)
 
