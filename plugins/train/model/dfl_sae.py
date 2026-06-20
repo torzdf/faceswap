@@ -189,21 +189,21 @@ class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         self._multiscale_count = multiscale_count
         self._learn_mask = learn_mask
 
-        self.up1 = UpscaleSubpixel(in_channels, dims * 8)
+        self.up1 = UpscaleSubpixel(in_channels, dims * 8, leaky_slope=-1.)
         self.leaky1 = nn.LeakyReLU(negative_slope=0.2)
         self.res1_1 = ResidualBlock(dims * 8, dims * 8, padding=1)
         self.res1_2 = ResidualBlock(dims * 8, dims * 8, padding=1)
         if multiscale_count >= 3:
             self.conv_out1 = nn.Conv2d(dims * 8, 3, 5, stride=1, padding=2)
 
-        self.up2 = UpscaleSubpixel(dims * 8, dims * 4)
+        self.up2 = UpscaleSubpixel(dims * 8, dims * 4, leaky_slope=-1.)
         self.leaky2 = nn.LeakyReLU(negative_slope=0.2)
         self.res2_1 = ResidualBlock(dims * 4, dims * 4, padding=1)
         self.res2_2 = ResidualBlock(dims * 4, dims * 4, padding=1)
         if multiscale_count >= 3:
             self.conv_out2 = nn.Conv2d(dims * 4, 3, 5, stride=1, padding=2)
 
-        self.up3 = UpscaleSubpixel(dims * 4, dims * 2)
+        self.up3 = UpscaleSubpixel(dims * 4, dims * 2, leaky_slope=-1.)
         self.leaky3 = nn.LeakyReLU(negative_slope=0.2)
         self.res3_1 = ResidualBlock(dims * 2, dims * 2, padding=1)
         self.res3_2 = ResidualBlock(dims * 2, dims * 2, padding=1)
@@ -312,20 +312,3 @@ class DFLSae(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    size = 64
-    # TODO remove after validation
-    i = [torch.rand((1, 3, size, size)), torch.rand((1, 3, size, size))]
-    # e = EncoderDF((3, size, size), 42, 512)
-    # e = EncoderLIAE((3, size, size), 42)
-    # out = e(i[0])
-    # print(out.shape)
-    p = DFLSae(2)
-    print(p)
-    # print(dir(list(p.modules())[-1]))
-    # print(list(p.modules())[-1].out_channels)
-    #
-    out_ = p(i)
-    print([[k.shape for k in j] for j in out_])
