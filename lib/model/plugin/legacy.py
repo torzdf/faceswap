@@ -93,16 +93,22 @@ class KerasModel:  # pylint:disable=too-few-public-methods
                 # Ensures top-level concatenates are mapped to models:
                 mapping[config["name"]] = dst_label
                 # Ensures sub-model inputs are mapped to relevant sub-model outputs:
-                outputs[config["name"]] = config["config"]["output_layers"][0]  # TODO will fail on > 1 outputs
-                input_layers = config["config"]["input_layers"][0]  # TODO will fail on > 1 inputs
+                out_layers = config["config"]["output_layers"]
+                outputs[config["name"]] = (out_layers[0][0] if isinstance(out_layers[0], list)
+                                           else out_layers[0])  # Only 1st matters in FS models
+
+                in_layers = config["config"]["input_layers"]
+                in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
+                in_names = [i[0] for i in in_layers]
+                assert len(in_names) == 1  # TODO sub-models with multiple inputs
                 inbounds: list[str] = list(set(a["config"]["keras_history"][0]
                                                for i in config["inbound_nodes"]
                                                for a in i["args"]))
                 mapped = [mapping.get(outputs.get(x, x), x)  # Only need first for shape
                           for x in inbounds][0]
                 logger.debug("[KerasModel] Mapping '%s' to '%s' for sub-model '%s'",
-                             input_layers, mapped, config["name"])
-                mapping[input_layers] = mapped
+                             in_names[0], mapped, config["name"])
+                mapping[in_names[0]] = mapped
 
             dst_name = dst_label if dst_name is None else f"{dst_label}.layers"
             retval = {}
@@ -191,7 +197,6 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             # TODO remove
             # for k, v in self.layers.items():
             #     print(k, v)
-            # exit()
             logger.debug("[KerasModel] Standardized model layer names: %s", self.layers)
 
             weights = h5py.File(io.BytesIO(z_file.read("model.weights.h5")), "r")
@@ -403,7 +408,11 @@ class KerasToTorch:
     def _group_layer_weights(cls,
                              weights: dict[str, ArrayT],
                              reshape_to_torch: bool
-                             ) -> dict[str, dict[T.Literal["weight", "bias"], ArrayT]]:
+                             ) -> dict[str, dict[T.Literal["weight",
+                                                           "bias",
+                                                           "running_mean",
+                                                           "running_var",
+                                                           "num_batches_tracked"], ArrayT]]:
         """Group the list of layer weights and biases by layer and remove trailing 'vars' label
 
         Parameters
@@ -422,8 +431,9 @@ class KerasToTorch:
         for lbl, weight in weights.items():
             name, w_type = lbl.rsplit(".", maxsplit=1)
             if reshape_to_torch:
+                k_map = {"0": "weight", "1": "bias", "2": "running_mean", "3": "running_var"}
                 name = name.rsplit(".", maxsplit=1)[0]  # Strip .vars from the end
-                w_type = "weight" if w_type == "0" else "bias"  # keras indexing to torch name
+                w_type = k_map[w_type]  # keras indexing to torch name
                 assert isinstance(weight, np.ndarray)
                 if weight.ndim == 4:
                     weight = weight.transpose(3, 2, 0, 1)
@@ -433,7 +443,11 @@ class KerasToTorch:
                     raise RuntimeError(f"Unhandled weight shape {weight.shape} for layer: "
                                        f"'{weight}'")
 
-            assert w_type in ("weight", "bias")
+            assert w_type in ("weight",
+                              "bias",
+                              "running_mean",
+                              "running_var",
+                              "num_batches_tracked")
             retval[name] = retval.get(name, {}) | {w_type: weight}
         return retval
 
@@ -521,7 +535,13 @@ class KerasToTorch:
         The imported keras weights for importing into a torch plugin
         """
         # TODO Test this for all models as topological unlikely to always work
-        if len(keras_weights) != len(torch_weights):
+        # for k in keras_weights:
+        #     print(k)
+        # for t in torch_weights:
+        #     print(t)
+        # exit()
+        if len(keras_weights) != len({k: v for k, v in torch_weights.items()  # Exclude bn tracker
+                                      if not k.endswith("num_batches_tracked")}):
             raise RuntimeError(f"Keras weight count ({len(keras_weights)}) does not match Torch "
                                f"weight count ({len(torch_weights)})")
 
@@ -548,14 +568,19 @@ class KerasToTorch:
                        if v["weight"].shape == weights["weight"].shape)
             val = keras_grouped.pop(key)
             if key.rsplit(".", maxsplit=1)[-1].startswith("dense") and val["weight"].ndim == 2:
-                self._dense_reorder(key, val)
+                self._dense_reorder(key, T.cast(dict[T.Literal["weight", "bias"], np.ndarray], val))
             if key in self._pixel_shuffler_convs:
-                self._pixel_shuffle_reorder(val)
+                self._pixel_shuffle_reorder(T.cast(dict[T.Literal["weight", "bias"], np.ndarray],
+                                                   val))
 
             logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
                          key, lbl, val["weight"].shape)
-            for w in ("weight", "bias"):
-                retval[f"{lbl}.{w}"] = torch.from_numpy(val[w])
+            for k, v in val.items():
+                if k == "running_mean":
+                    logger.debug("[KerasToTorch] Keeping 'num_batches_tracked' for torch: '%s'",
+                                 lbl)
+                    retval[f"{lbl}.num_batches_tracked"] = weights["num_batches_tracked"]
+                retval[f"{lbl}.{k}"] = torch.from_numpy(v)
 
         logger.debug("[KerasToTorch] Mapped weights: %s", len(retval))
         return retval
