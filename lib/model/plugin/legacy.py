@@ -45,11 +45,12 @@ class KerasModel:  # pylint:disable=too-few-public-methods
 
         self._load_keras_model()
 
-    def _flatten_config(self,
+    def _flatten_config(self,  # pylint:disable=too-many-locals
                         config: dict[str, T.Any],
                         dst_name: str | None = None,
                         counters: dict[str, int] | None = None,
-                        mapping: dict[str, str] | None = None) -> dict[str, dict[str, list[int]]]:
+                        mapping: dict[str, str] | None = None,
+                        outputs: dict[str, str] | None = None) -> dict[str, dict[str, list[int]]]:
         """Recurse through the config.json file flattening to a matching format to the h5 weights
 
         Parameters
@@ -63,6 +64,9 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         mapping
             Mapping of keras layer names to standardized weight names. Default: ``None`` (first
             iteration)
+        outputs
+            Mapping of keras functional model names to their output layer names. Default: ``None``
+            (first iteration)
 
         Returns
         -------
@@ -71,6 +75,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         """
         counters = {} if counters is None else counters
         mapping = {} if mapping is None else mapping
+        outputs = {} if outputs is None else outputs
 
         cls_name = config["class_name"]
 
@@ -84,13 +89,29 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             counters[base] = cls_count + 1
 
         if "layers" in config["config"]:
+            if config.get("name"):
+                # Ensures top-level concatenates are mapped to models:
+                mapping[config["name"]] = dst_label
+                # Ensures sub-model inputs are mapped to relevant sub-model outputs:
+                outputs[config["name"]] = config["config"]["output_layers"][0]  # TODO will fail on > 1 outputs
+                input_layers = config["config"]["input_layers"][0]  # TODO will fail on > 1 inputs
+                inbounds: list[str] = list(set(a["config"]["keras_history"][0]
+                                               for i in config["inbound_nodes"]
+                                               for a in i["args"]))
+                mapped = [mapping.get(outputs.get(x, x), x)  # Only need first for shape
+                          for x in inbounds][0]
+                logger.debug("[KerasModel] Mapping '%s' to '%s' for sub-model '%s'",
+                             input_layers, mapped, config["name"])
+                mapping[input_layers] = mapped
+
             dst_name = dst_label if dst_name is None else f"{dst_label}.layers"
             retval = {}
             for layer in config["config"]["layers"]:
-                retval |= self._flatten_config(layer, dst_name, counters, mapping)
+                retval |= self._flatten_config(layer, dst_name, counters, mapping, outputs)
             return retval
 
-        mapping[config["name"]] = dst_label
+        if not config["name"].startswith("input_layer"):  # input layers mapped at model level
+            mapping[config["name"]] = dst_label
 
         in_shapes = {}
         for c in config["inbound_nodes"]:
@@ -161,7 +182,16 @@ class KerasModel:  # pylint:disable=too-few-public-methods
                     raise ValueError(f"Could not find key '{fname}' in "
                                      f"model file: {self._model_path}")
 
+            # TODO remove
+            # with open("/mnt/Data/fstest/train/conf.json", "w") as ofile:
+            #     json.dump(json.loads(z_file.read("config.json")), ofile, indent=2)
+            # exit()
+
             self.layers = self._flatten_config(json.loads(z_file.read("config.json")))
+            # TODO remove
+            # for k, v in self.layers.items():
+            #     print(k, v)
+            # exit()
             logger.debug("[KerasModel] Standardized model layer names: %s", self.layers)
 
             weights = h5py.File(io.BytesIO(z_file.read("model.weights.h5")), "r")
@@ -254,10 +284,12 @@ class KerasToTorch:
         reshape out_channels, (shape of input/output tensor))
         """
         retval: dict[str, tuple[bool, tuple[int, int, int]]] = {}
-        reshapes: dict[str, list[int]] = dict(
-            *[v for v in layers.values()
-              if any(k.rsplit(".", maxsplit=1)[-1].startswith("reshape") for k in v)]
-            )
+        reshapes: dict[str, list[int]] = {
+            key: val
+            for x in [v for v in layers.values()
+                      if any(k.rsplit(".", maxsplit=1)[-1].startswith("reshape") for k in v)]
+            for key, val in x.items()
+        }
         for layer, inbound in layers.items():
             name = layer.rsplit(".", maxsplit=1)[-1]
             if not name.startswith(("dense", "reshape")):
@@ -421,7 +453,7 @@ class KerasToTorch:
             The weights and bias for a Dense layer being imported from Keras
         """
         if name not in self._dense_reshapes:  # TODO confirm
-            logger.info("[KerasToTorch] Skipping unmapped Dense layer '%s'", name)
+            logger.debug("[KerasToTorch] Skipping unmapped Dense layer '%s'", name)
             return
 
         reshape_in, (height, width, channels) = self._dense_reshapes[name]
