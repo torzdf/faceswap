@@ -40,7 +40,8 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         derived from the model's config.json, standardized to h5 file weights labels format mapped
         to layer inbound nodes and shapes"""
         self.weights = {}
-        """The stored layer name to numpy array for the loaded keras model"""
+        """The stored layer name to numpy array for the loaded keras model in model creation
+        order"""
         self._optimizer: dict[T.Literal["version", "optimizer", "scale"], T.Any] = {}
 
         self._load_keras_model()
@@ -129,7 +130,6 @@ class KerasModel:  # pylint:disable=too-few-public-methods
                         }
                 else:
                     in_shapes[mapping[a["config"]["keras_history"][0]]] = a["config"]["shape"][1:]
-
         return {dst_label: in_shapes}
 
     def _get_weights(self,
@@ -149,7 +149,6 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         The layer path names to layer weights in topological order in keras layout
         """
         assert entry.name is not None
-
         collected = {} if collected is None else collected
         if isinstance(entry, h5py.Dataset):
             collected |= {entry.name[1:].replace("/", "."): np.array(entry)}
@@ -164,6 +163,30 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             return collected
 
         raise RuntimeError(f"Unhandled h5py file type '{entry.name}': {type(entry)}")
+
+    def _sort_weights(self, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Sort the weights into model construction order
+
+        Parameters
+        ----------
+        weights
+            The weights collected from the .h5 file
+
+        Returns
+        -------
+        The weights sorted into model creation order
+        """
+        lookup: dict[str, list[str]] = {}
+        for k in weights:
+            lookup.setdefault(k.rsplit(".", maxsplit=2)[0], []).append(k)
+        retval: dict[str, np.ndarray] = {}
+        for k in self.layers:
+            if k in lookup:
+                keys = lookup[k]
+                for key in keys:
+                    retval[key] = weights.pop(key)
+        assert len(weights) == 0, f"Not all weights mapped. Remaining: {len(weights)}"
+        return retval
 
     def _load_state_file(self) -> dict[str, T.Any]:
         """Load the legacy state file"""
@@ -196,11 +219,14 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             self.layers = self._flatten_config(json.loads(z_file.read("config.json")))
             # TODO remove
             # for k, v in self.layers.items():
-            #     print(k, v)
+            #     print(k)
+            #      #print(k, v)
+            # exit()
             logger.debug("[KerasModel] Standardized model layer names: %s", self.layers)
 
             weights = h5py.File(io.BytesIO(z_file.read("model.weights.h5")), "r")
-            self.weights = self._get_weights(T.cast(h5py.Group, weights["layers"]))
+            self.weights = self._sort_weights(self._get_weights(T.cast(h5py.Group,
+                                                                       weights["layers"])))
             logger.debug("[KerasModel] Loaded weights: %s",
                          {k: v.shape for k, v in self.weights.items()})
             if "optimizer.pt" in name_list:
@@ -235,11 +261,17 @@ class KerasToTorch:
             {k: list(v) for k, v in self._keras.layers.items()}
             )
         self._dense_reshapes = self._get_dense_reshapes(self._keras.layers)
+        self._mask_layers = self._get_mask_layers({k: list(v)
+                                                   for k, v in self._keras.layers.items()},
+                                                  {k: v.shape
+                                                   for k, v in self._keras.weights.items()
+                                                   if k.endswith(".0") and ".conv2d" in k})
         self._state = self._get_state()
 
     @classmethod
     def _get_pixel_shuffler_convs(cls, layers: dict[str, list[str]]) -> list[str]:
-        """Obtain a list of convolutions that lead into pixel shuffler layers
+        """Obtain a list of convolutions that lead into pixel shuffler layers for channel re-
+        ordering
 
         Parameters
         ----------
@@ -275,8 +307,8 @@ class KerasToTorch:
     @classmethod
     def _get_dense_reshapes(cls, layers: dict[str, dict[str, list[int]]]
                             ) -> dict[str, tuple[bool, tuple[int, int, int]]]:
-        """Dense layers that either follow a flatten or precede a reshape require their
-        weights reshaped for channel first ordering
+        """Obtain the Dense layers that either follow a flatten or precede a reshape that require
+        their weights reshaped for channel first ordering
 
         Parameters
         ----------
@@ -300,11 +332,18 @@ class KerasToTorch:
             if not name.startswith(("dense", "reshape")):
                 continue
             is_dense = name.startswith("dense")
-            assert len(inbound) == 1  # FS never has more than 2 inputs into a PS
-            in_ = list(inbound)[0]
+
+            while True:
+                assert len(inbound) == 1  # FS never has more than 2 inputs into a PS
+                in_ = list(inbound)[0]
+                if in_.rsplit(".", maxsplit=1)[-1].startswith("dropout"):  # move up from dropout
+                    logger.debug("[KerasToTorch] Getting input to '%s' for layer '%s'", in_, layer)
+                    inbound = layers[in_]
+                    continue
+                break
 
             # Reshape in
-            if is_dense and not in_.rsplit(".", maxsplit=1)[-1].startswith("flatten"):  # TODO dropout?
+            if is_dense and not in_.rsplit(".", maxsplit=1)[-1].startswith("flatten"):
                 logger.debug("[KerasToTorch] Skipping in channel dense '%s' with input '%s'",
                              layer, in_)
                 continue
@@ -319,7 +358,7 @@ class KerasToTorch:
                 continue
 
             # Reshape out
-            if not in_.rsplit(".", maxsplit=1)[-1].startswith("dense"):   # TODO dropout?
+            if not in_.rsplit(".", maxsplit=1)[-1].startswith("dense"):
                 logger.debug("[KerasToTorch] Skipping reshape '%s' with input '%s'",
                              layer, in_)
                 continue
@@ -329,6 +368,94 @@ class KerasToTorch:
             logger.debug("[KerasToTorch] Collected out channel reshape for '%s': %s",
                          in_, shape)
         logger.debug("[KerasToTorch] Dense reshape weights: %s", retval)
+        return retval
+
+    def _recurse_from_layer(self,
+                            layers: dict[str, list[str]],
+                            current: list[str],
+                            sub_model: str,
+                            seen: set[str] | None = None) -> list[str]:
+        """From the given layers recurse backwards through all layers to the beginning of the sub-
+        model
+
+        Parameters
+        ----------
+        layers
+            The full dict of standardized layer names with their inbound nodes
+        current
+            The list of layers to recurse backwards from
+        sub-model
+            The keras sub-model to collect the layers from
+        seen
+            layers that have already been collected. Default: ``None`` (first iteration)
+
+        Returns
+        -------
+        list of unique layers that feed into the given layers
+        """
+        seen = set() if seen is None else seen
+        retval: list[str] = []
+        for lyr in current:
+            if ".".join(lyr.split(".", maxsplit=2)[:2]) != sub_model:
+                logger.debug("[KerasToTorch] Exited sub-model '%s' at layer '%s'",
+                             sub_model, lyr)
+                continue
+            if lyr in seen:
+                continue
+            seen.add(lyr)
+            retval.append(lyr)
+            retval += self._recurse_from_layer(layers, layers[lyr], sub_model, seen)
+
+        return retval
+
+    def _get_mask_layers(self,
+                         layers: dict[str, list[str]],
+                         weights: dict[str, tuple[int, ...]]) -> list[str]:
+        """Identify keras layer names that are part of the mask output chain.
+
+        Keras interleaves creation of upscales between main image and mask when learn_mask is
+        enabled, whilst Torch creates image upscales first then mask. This can cause shape clash
+        when selecting weights to port.
+
+        Parameters
+        ----------
+        layers
+            The standardized layer names with their inbound nodes
+        weights
+            The standardized layer names to weight shapes for any conv layers in the model
+
+        Returns
+        -------
+        list of layer names that are part of the mask output chain, if any
+        """
+        if list(weights.values())[-1][-1] != 1:  # Mask will always be last output in FS
+            logger.debug("[KerasToTorch] No mask output. Returning empty list")
+            return []
+
+        mod_msk_out = {".".join(k.split(".", maxsplit=2)[:2]): v  # Overwrites outputs at mod level
+                       for k, v in weights.items() if v[-1] == 1}
+        msk_outputs = [k.rsplit(".", maxsplit=2)[0] for k, v in weights.items()
+
+                       if mod_msk_out.get(".".join(k.split(".", maxsplit=2)[:2])) == v]
+        mod_img_out = {mod: v  # Overwrites outputs at model level
+                       for k, v in weights.items() if v[-1] == 3
+                       if (mod := ".".join(k.split(".", maxsplit=2)[:2])) in mod_msk_out}
+        img_outputs = [k.rsplit(".", maxsplit=2)[0] for k, v in weights.items()
+                       if mod_img_out.get(".".join(k.split(".", maxsplit=2)[:2])) == v]
+        logger.debug("[KerasToTorch] Selecting image output layers %s, mask output layers %s",
+                     img_outputs, msk_outputs)
+
+        img_layers = [y for x in img_outputs
+                      for y in self._recurse_from_layer(layers,
+                                                        [x],
+                                                        ".".join(x.split(".", maxsplit=2)[:2]))]
+        msk_layers = [y for x in msk_outputs
+                      for y in self._recurse_from_layer(layers,
+                                                        [x],
+                                                        ".".join(x.split(".", maxsplit=2)[:2]))]
+
+        retval = [x for x in msk_layers if x not in img_layers]
+        logger.debug("[KerasToTorch] Collected mask path layers: %s", retval)
         return retval
 
     def _get_state(self) -> dict[str, T.Any]:
@@ -540,8 +667,9 @@ class KerasToTorch:
         # for t in torch_weights:
         #     print(t)
         # exit()
+        bn_track = "num_batches_tracked"
         if len(keras_weights) != len({k: v for k, v in torch_weights.items()  # Exclude bn tracker
-                                      if not k.endswith("num_batches_tracked")}):
+                                      if not k.endswith(bn_track)}):
             raise RuntimeError(f"Keras weight count ({len(keras_weights)}) does not match Torch "
                                f"weight count ({len(torch_weights)})")
 
@@ -550,7 +678,6 @@ class KerasToTorch:
         if len(keras_grouped) != len(torch_grouped):
             raise RuntimeError(f"Keras weight count ({len(keras_grouped)}) does not match Torch "
                                f"weight count ({len(torch_grouped)})")
-
         #  TODO remove this debug code
         # for (kn, kw), (tn, tw) in zip(*(keras_grouped.items(), torch_grouped.items())):
         #     k_shape = kw["weight"].shape
@@ -560,15 +687,20 @@ class KerasToTorch:
 
         # This logic goes through the loaded torch state_dict and searches forwards through the
         # keras model for where the first weight matches and pops it. This should be reasonably
-        # robust as some tensors can drift a little, but not too far
+        # robust as some tensors can drift a little, but not too far. Mask layer ordering is the
+        # biggest barrier, so the search is filtered if learn_mask is enabled.
         # This will fail if match is not found.
         retval: dict[str, torch.Tensor] = {}
         for lbl, weights in torch_grouped.items():
             key = next(k for k, v in keras_grouped.items()
-                       if v["weight"].shape == weights["weight"].shape)
+                       if ("mask" in lbl and k in self._mask_layers or
+                           "mask" not in lbl and k not in self._mask_layers)
+                       and v["weight"].shape == weights["weight"].shape
+                       and list(v) == [k for k in weights if k != bn_track])
             val = keras_grouped.pop(key)
             if key.rsplit(".", maxsplit=1)[-1].startswith("dense") and val["weight"].ndim == 2:
-                self._dense_reorder(key, T.cast(dict[T.Literal["weight", "bias"], np.ndarray], val))
+                self._dense_reorder(key,
+                                    T.cast(dict[T.Literal["weight", "bias"], np.ndarray], val))
             if key in self._pixel_shuffler_convs:
                 self._pixel_shuffle_reorder(T.cast(dict[T.Literal["weight", "bias"], np.ndarray],
                                                    val))
@@ -579,7 +711,7 @@ class KerasToTorch:
                 if k == "running_mean":
                     logger.debug("[KerasToTorch] Keeping 'num_batches_tracked' for torch: '%s'",
                                  lbl)
-                    retval[f"{lbl}.num_batches_tracked"] = weights["num_batches_tracked"]
+                    retval[f"{lbl}.num_batches_tracked"] = weights[bn_track]
                 retval[f"{lbl}.{k}"] = torch.from_numpy(v)
 
         logger.debug("[KerasToTorch] Mapped weights: %s", len(retval))
