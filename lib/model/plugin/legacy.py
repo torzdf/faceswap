@@ -22,6 +22,175 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class KerasConfigParser:
+    """Parses a nested keras config dictionary to a flattened dictionary of standardized layer
+    names as stored within the hdf weights file, mapped to: {inbound_node: input_shape}"""
+
+    @classmethod
+    def _next_label(cls, cls_name: str, dst_name: str | None, counters: dict[str, int]) -> str:
+        """Compute the standardized (hdf-style) label for a single config node.
+
+        Parameters
+        ----------
+        cls_name
+            The Keras class name of the layer
+        dst_name
+            The currently building standardized layer name or ``None`` if this is the first
+            iteration
+        counters
+            Count of how many times each standardized layer name has been seen.
+
+        Returns
+        -------
+        The next available standardized name for the given layer
+        """
+        if dst_name is None:
+            return "layers"  # Parent model always starts with "layers"
+
+        base = f"{dst_name}.{camel_to_snake_case(cls_name)}"
+        count = counters.get(base, 0)
+        counters[base] = count + 1
+        return base if count == 0 else f"{base}_{count}"
+
+    @classmethod
+    def _sub_model_output_name(cls, config: dict[str, T.Any]) -> str:
+        """Get the Keras name of a sub-model's output layer to ensure sub-model inputs are mapped
+        to the relevant sub-model output layer. For Faceswap sub-models with multiple outputs,
+        only the first output name is required"""
+        out_layers = config["config"]["output_layers"]
+        return out_layers[0][0] if isinstance(out_layers[0], list) else out_layers[0]
+
+    @classmethod
+    def _map_sub_model_input(cls,
+                             config: dict[str, T.Any],
+                             mapping: dict[str, str],
+                             outputs: dict[str, str]) -> None:
+        """Map a sub-model's internal input layer name to whatever produces its input from the
+        outer graph."""
+        in_layers = config["config"]["input_layers"]
+        in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
+        in_names = [i[0] for i in in_layers]
+        assert len(in_names) == 1  # TODO sub-models with multiple inputs
+        inbounds: list[str] = list({arg["config"]["keras_history"][0]
+                                    for node in config["inbound_nodes"]
+                                    for arg in node["args"]})
+        # Resolve a keras inbound node name to its standardized label, redirecting through the sub-
+        # model's recorded output if 'name' is itself a sub-model.  We only need first input if
+        # multi for our purposes
+        mapped = next(mapping.get(outputs.get(name, name), name) for name in inbounds)
+        logger.debug("[KerasConfigParser] Mapping '%s' to '%s' for sub-model '%s'",
+                     in_names[0], mapped, config["name"])
+        mapping[in_names[0]] = mapped
+
+    @classmethod
+    def _flatten_sub_model(cls,
+                           config: dict[str, T.Any],
+                           dst_label: str,
+                           counters: dict[str, int],
+                           mapping: dict[str, str],
+                           outputs: dict[str, str]) -> dict[str, dict[str, list[int]]]:
+        """Flatten a nested Functional/Model layer, registering its input/output name mappings via
+        recursing into its children.
+
+        Parameters
+        ----------
+        config
+            A keras config dictionary
+        dst_label
+            The currently building standardized layer name
+        counters
+            Count of how many times each standardized layer name has been seen
+        mapping
+            Mapping of keras layer names to standardized weight names
+        outputs
+            Mapping of keras functional sub-model names to their output layer names
+
+        Returns
+        -------
+        dict of standardized layer names in model creation order mapped to
+        {inbound_node: input_shape} for the sub-model
+        """
+        name = config.get("name")
+        if name:
+            # Fallback (eg top-level concatenates referencing this model by name. Corrected to
+            # real output layer name when known at the end of the function):
+            mapping[config["name"]] = dst_label
+            outputs[name] = cls._sub_model_output_name(config)
+            cls._map_sub_model_input(config, mapping, outputs)
+
+        # If there is no "." in the label then this is the main parent model
+        child_dst = dst_label if "." not in dst_label else f"{dst_label}.layers"
+        retval = {}
+        for layer in config["config"]["layers"]:
+            retval |= cls.flatten(layer, child_dst, counters, mapping, outputs)
+
+        # Replace functional output with actual layer name of the output of the sub-model:
+        if name and name in outputs and outputs[name] in mapping:
+            logger.debug("[KerasConfigParser] Remapping model '%s' to model output: '%s'",
+                         mapping[name], outputs[name])
+            mapping[name] = mapping[outputs[name]]
+        return retval
+
+    @classmethod
+    def _extract_input_shapes(cls,
+                              config: dict[str, T.Any],
+                              mapping: dict[str, str]) -> dict[str, list[int]]:
+        """Build {producer_label: input_shape} for a leaf layer from its inbound_nodes, normalizing
+        Keras' inconsistent arg structure."""
+        in_shapes = {}
+        for node in config["inbound_nodes"]:
+            for arg in node["args"]:
+                tensors = arg if isinstance(arg, list) else [arg]  # Handle inconsistent arg types
+                for tensor in tensors:
+                    producer = tensor["config"]["keras_history"][0]
+                    in_shapes[mapping[producer]] = tensor["config"]["shape"][1:]
+        return in_shapes
+
+    @classmethod
+    def flatten(cls,
+                config: dict[str, T.Any],
+                parent: str | None = None,
+                counters: dict[str, int] | None = None,
+                mapping: dict[str, str] | None = None,
+                outputs: dict[str, str] | None = None) -> dict[str, dict[str, list[int]]]:
+        """Recurse through the config.json file flattening to a matching format to the hdf weights
+
+        Parameters
+        ----------
+        config
+            A keras config dictionary
+        parent
+            The parent model's standardized layer name. Default: ``None`` (first iteration)
+        counters
+            Count of how many times each standardized layer name has been seen. Default: ``None``
+            (first iteration)
+        mapping
+            Mapping of keras layer names to standardized weight names. Default: ``None`` (first
+            iteration)
+        outputs
+            Mapping of keras functional model names to their output layer names. Default: ``None``
+            (first iteration)
+
+        Returns
+        -------
+        dict of standardized layer names in model creation order mapped to
+        {inbound_node: input_shape}
+        """
+        counters = {} if counters is None else counters
+        mapping = {} if mapping is None else mapping
+        outputs = {} if outputs is None else outputs
+
+        dst_label = cls._next_label(config["class_name"], parent, counters)
+
+        if "layers" in config["config"]:
+            return cls._flatten_sub_model(config, dst_label, counters, mapping, outputs)
+
+        if not config["name"].startswith("input_layer"):  # input layers mapped at model level
+            mapping[config["name"]] = dst_label
+
+        return {dst_label: cls._extract_input_shapes(config, mapping)}
+
+
 class KerasModel:  # pylint:disable=too-few-public-methods
     """Loads data from a .keras model
 
@@ -45,92 +214,6 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         self._optimizer: dict[T.Literal["version", "optimizer", "scale"], T.Any] = {}
 
         self._load_keras_model()
-
-    def _flatten_config(self,  # pylint:disable=too-many-locals
-                        config: dict[str, T.Any],
-                        dst_name: str | None = None,
-                        counters: dict[str, int] | None = None,
-                        mapping: dict[str, str] | None = None,
-                        outputs: dict[str, str] | None = None) -> dict[str, dict[str, list[int]]]:
-        """Recurse through the config.json file flattening to a matching format to the h5 weights
-
-        Parameters
-        ----------
-        config
-            A keras config dictionary
-        collected
-            Data collected so far. Default: ``None`` (first iteration)
-        dst_name
-            The currently building standardized layer name. Default: ``None`` (first iteration)
-        mapping
-            Mapping of keras layer names to standardized weight names. Default: ``None`` (first
-            iteration)
-        outputs
-            Mapping of keras functional model names to their output layer names. Default: ``None``
-            (first iteration)
-
-        Returns
-        -------
-        dict of standardized layer names in model creation order mapped to their inbound nodes and
-        shapes
-        """
-        counters = {} if counters is None else counters
-        mapping = {} if mapping is None else mapping
-        outputs = {} if outputs is None else outputs
-
-        cls_name = config["class_name"]
-
-        if dst_name is None:
-            dst_label = "layers"
-        else:
-            base = f"{dst_name}.{camel_to_snake_case(cls_name)}"
-            cls_count = counters.get(base, 0)
-            suffix = "" if cls_count == 0 else f"_{cls_count}"
-            dst_label = f"{base}{suffix}"
-            counters[base] = cls_count + 1
-
-        if "layers" in config["config"]:
-            if config.get("name"):
-                # Ensures top-level concatenates are mapped to models:
-                mapping[config["name"]] = dst_label
-                # Ensures sub-model inputs are mapped to relevant sub-model outputs:
-                out_layers = config["config"]["output_layers"]
-                outputs[config["name"]] = (out_layers[0][0] if isinstance(out_layers[0], list)
-                                           else out_layers[0])  # Only 1st matters in FS models
-
-                in_layers = config["config"]["input_layers"]
-                in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
-                in_names = [i[0] for i in in_layers]
-                assert len(in_names) == 1  # TODO sub-models with multiple inputs
-                inbounds: list[str] = list(set(a["config"]["keras_history"][0]
-                                               for i in config["inbound_nodes"]
-                                               for a in i["args"]))
-                mapped = [mapping.get(outputs.get(x, x), x)  # Only need first for shape
-                          for x in inbounds][0]
-                logger.debug("[KerasModel] Mapping '%s' to '%s' for sub-model '%s'",
-                             in_names[0], mapped, config["name"])
-                mapping[in_names[0]] = mapped
-
-            dst_name = dst_label if dst_name is None else f"{dst_label}.layers"
-            retval = {}
-            for layer in config["config"]["layers"]:
-                retval |= self._flatten_config(layer, dst_name, counters, mapping, outputs)
-            return retval
-
-        if not config["name"].startswith("input_layer"):  # input layers mapped at model level
-            mapping[config["name"]] = dst_label
-
-        in_shapes = {}
-        for c in config["inbound_nodes"]:
-            for a in c["args"]:
-                if isinstance(a, list):  # Handle inconsistent keras arg types
-                    in_shapes |= {
-                        mapping[x["config"]["keras_history"][0]]: x["config"]["shape"][1:]
-                        for x in a
-                        }
-                else:
-                    in_shapes[mapping[a["config"]["keras_history"][0]]] = a["config"]["shape"][1:]
-        return {dst_label: in_shapes}
 
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
@@ -216,11 +299,11 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             #     json.dump(json.loads(z_file.read("config.json")), ofile, indent=2)
             # exit()
 
-            self.layers = self._flatten_config(json.loads(z_file.read("config.json")))
+            self.layers = KerasConfigParser.flatten(json.loads(z_file.read("config.json")))
             # TODO remove
             # for k, v in self.layers.items():
             #     print(k)
-            #      #print(k, v)
+            #     print(k, v)
             # exit()
             logger.debug("[KerasModel] Standardized model layer names: %s", self.layers)
 
@@ -692,11 +775,25 @@ class KerasToTorch:
         # This will fail if match is not found.
         retval: dict[str, torch.Tensor] = {}
         for lbl, weights in torch_grouped.items():
-            key = next(k for k, v in keras_grouped.items()
-                       if ("mask" in lbl and k in self._mask_layers or
-                           "mask" not in lbl and k not in self._mask_layers)
-                       and v["weight"].shape == weights["weight"].shape
-                       and list(v) == [k for k in weights if k != bn_track])
+            try:
+                key = next(k for k, v in keras_grouped.items()
+                           if ("mask" in lbl and k in self._mask_layers or
+                               "mask" not in lbl and k not in self._mask_layers)
+                           and v["weight"].shape == weights["weight"].shape
+                           and list(v) == [k for k in weights if k != bn_track])
+            except:  # TODO remove
+                print()
+                # print(self._mask_layers)
+                print(lbl, weights["weight"].shape)
+                for k, v in keras_grouped.items():
+                    print()
+                    print(k, v["weight"].shape)
+                    print("mask" in lbl and k in self._mask_layers)
+                    print("mask" not in lbl and k not in self._mask_layers)
+                    print(v["weight"].shape == weights["weight"].shape)
+                    print(list(v) == [k for k in weights if k != bn_track])
+                raise
+
             val = keras_grouped.pop(key)
             if key.rsplit(".", maxsplit=1)[-1].startswith("dense") and val["weight"].ndim == 2:
                 self._dense_reorder(key,
