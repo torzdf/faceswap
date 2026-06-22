@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
-    """The lightweight Encoder"""
+    """ The lightweight Encoder """
     def __init__(self) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
@@ -36,7 +36,7 @@ class Encoder(nn.Module):
         self.up = UpscaleSubpixel(512, 256)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the Lightweight encoder
+        """ Forward pass through the Lightweight encoder
 
         Parameters
         ----------
@@ -57,7 +57,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """The Lightweight Faceswap Decoder Network.
+    """ The Lightweight Faceswap Decoder Network.
 
     Parameters
     ----------
@@ -67,12 +67,12 @@ class Decoder(nn.Module):
     def __init__(self, learn_mask: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+        self.learn_mask = learn_mask
         self.up1 = UpscaleSubpixel(256, 512)
         self.up2 = UpscaleSubpixel(512, 256)
         self.up3 = UpscaleSubpixel(256, 128)
         self.conv = nn.Conv2d(128, 3, 5, stride=1, padding=2)
 
-        self.mask_up1 = self.mask_up2 = self.mask_up3 = None
         if learn_mask:
             self.mask_up1 = UpscaleSubpixel(256, 512)
             self.mask_up2 = UpscaleSubpixel(512, 256)
@@ -80,7 +80,7 @@ class Decoder(nn.Module):
             self.mask_conv = nn.Conv2d(128, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Faceswap decoder
+        """ Forward pass through the Faceswap decoder
 
         Parameters
         ----------
@@ -97,12 +97,9 @@ class Decoder(nn.Module):
         x = self.up3(x)
         x = torch.sigmoid(self.conv(x))
 
-        if self.up_mask1 is None:
+        if not self.learn_mask:
             return (x, )
 
-        assert (self.mask_up1 is not None and
-                self.mask_up2 is not None and
-                self.mask_up3 is not None)
         mask = self.mask_up1(inputs)
         mask = self.mask_up2(mask)
         mask = self.mask_up3(mask)
@@ -126,7 +123,7 @@ class Lightweight(ModelPlugin):
                                       for _ in range(num_identities))
 
     def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the original model
+        """ Forward pass through the original model
 
         Parameters
         ----------

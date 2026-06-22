@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
-    """The DFL-H128 Encoder
+    """ The DFL-H128 Encoder
 
     Parameters
     ----------
@@ -43,7 +43,7 @@ class Encoder(nn.Module):
         self.up = UpscaleSubpixel(self.feats, self.feats)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the DFL-H128 encoder
+        """ Forward pass through the DFL-H128 encoder
 
         Parameters
         ----------
@@ -67,7 +67,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """The DFL-H128 Faceswap Decoder Network.
+    """ The DFL-H128 Faceswap Decoder Network.
 
     Parameters
     ----------
@@ -92,7 +92,7 @@ class Decoder(nn.Module):
             self.mask_conv = nn.Conv2d(encoder_dim // 4, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the DFL-H128 decoder
+        """ Forward pass through the DFL-H128 decoder
 
         Parameters
         ----------
@@ -120,7 +120,7 @@ class Decoder(nn.Module):
 
 
 class DFLH128(ModelPlugin):
-    """DFL-H128 Faceswap Model.
+    """ DFL-H128 Faceswap Model.
 
     Parameters
     ----------
@@ -136,7 +136,7 @@ class DFLH128(ModelPlugin):
                                       for _ in range(num_identities))
 
     def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the DFL-H128 model
+        """ Forward pass through the DFL-H128 model
 
         Parameters
         ----------

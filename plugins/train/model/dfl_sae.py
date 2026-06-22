@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeepFaceLab SAE Model Based on https://github.com/iperov/DeepFaceLab"""
+""" DeepFaceLab SAE Model Based on https://github.com/iperov/DeepFaceLab"""
 from __future__ import annotations
 
 import logging
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class EncoderDF(nn.Module):
-    """The DeepFaceLab SAE-DF Encoder
+    """ The DeepFaceLab SAE-DF Encoder
 
     Parameters
     ----------
@@ -51,10 +51,10 @@ class EncoderDF(nn.Module):
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(dims * 8 * self._lowest_res * self._lowest_res, self._ae_dims)
         self.dense2 = nn.Linear(self._ae_dims, self._ae_dims * self._lowest_res * self._lowest_res)
-        self.up = UpscaleSubpixel(self._ae_dims, self._ae_dims)  # TODO check
+        self.up = UpscaleSubpixel(self._ae_dims, self._ae_dims)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the DeepFaceLab SAE-DF encoder
+        """ Forward pass through the DeepFaceLab SAE-DF encoder
 
         Parameters
         ----------
@@ -78,7 +78,7 @@ class EncoderDF(nn.Module):
 
 
 class EncoderLIAE(nn.Module):
-    """The DeepFaceLab SAE-LIAE Encoder
+    """ The DeepFaceLab SAE-LIAE Encoder
 
     Parameters
     ----------
@@ -103,7 +103,7 @@ class EncoderLIAE(nn.Module):
         self.flatten = nn.Flatten(start_dim=1)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the DeepFaceLab SAE-LIAE encoder
+        """ Forward pass through the DeepFaceLab SAE-LIAE encoder
 
         Parameters
         ----------
@@ -122,7 +122,7 @@ class EncoderLIAE(nn.Module):
 
 
 class InterLIAE(nn.Module):
-    """The DeepFaceLab SAE-LIAE Intermediate layer
+    """ The DeepFaceLab SAE-LIAE Intermediate layer
 
     Parameters
     ----------
@@ -143,10 +143,10 @@ class InterLIAE(nn.Module):
                                 self._ae_dims)
         self.dense2 = nn.Linear(self._ae_dims,
                                 self._ae_dims * 2 * self._input_size[1] * self._input_size[1])
-        self.up = UpscaleSubpixel(self._ae_dims * 2, self._ae_dims * 2)  # TODO check
+        self.up = UpscaleSubpixel(self._ae_dims * 2, self._ae_dims * 2)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the DeepFaceLab SAE-LIAE Intermediate layer
+        """ Forward pass through the DeepFaceLab SAE-LIAE Intermediate layer
 
         Parameters
         ----------
@@ -165,7 +165,7 @@ class InterLIAE(nn.Module):
 
 
 class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The original DeepFaceLab SAE Decoder Network.
+    """ The original DeepFaceLab SAE Decoder Network.
 
     Parameters
     ----------
@@ -217,7 +217,7 @@ class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_conv = nn.Conv2d(decoder_dim * 2, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the DeepFaceLab SAE decoder
+        """ Forward pass through the DeepFaceLab SAE decoder
 
         Parameters
         ----------
@@ -286,7 +286,7 @@ class DFLSae(ModelPlugin):
             self.decoder = Decoder(dec_in, cfg_loss.learn_mask(), dec_dim, ms_count)
 
     def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the DeepFaceLab SAE model
+        """ Forward pass through the DeepFaceLab SAE model
 
         Parameters
         ----------

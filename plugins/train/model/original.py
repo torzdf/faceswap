@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
-    """The original Encoder
+    """ The original Encoder
 
     Parameters
     ----------
@@ -41,13 +41,14 @@ class Encoder(nn.Module):
         self.conv4 = None if low_mem else ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
 
         feats = 512 if low_mem else 1024
+        in_dim = 8 if low_mem else 4
         self.flatten = nn.Flatten(start_dim=1)
-        self.dense1 = nn.Linear(feats * 4 * 4, feats)
+        self.dense1 = nn.Linear(feats * in_dim * in_dim, feats)
         self.dense2 = nn.Linear(feats, 1024 * 4 * 4)
         self.up = UpscaleSubpixel(1024, 512)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the Original encoder
+        """ Forward pass through the Original encoder
 
         Parameters
         ----------
@@ -72,7 +73,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """The original Faceswap Decoder Network.
+    """ The original Faceswap Decoder Network.
 
     Parameters
     ----------
@@ -82,12 +83,12 @@ class Decoder(nn.Module):
     def __init__(self, learn_mask: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+        self.learn_mask = learn_mask
         self.up1 = UpscaleSubpixel(512, 256)
         self.up2 = UpscaleSubpixel(256, 128)
         self.up3 = UpscaleSubpixel(128, 64)
         self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)
 
-        self.mask_up1 = self.mask_up2 = self.mask_up3 = None
         if learn_mask:
             self.mask_up1 = UpscaleSubpixel(512, 256)
             self.mask_up2 = UpscaleSubpixel(256, 128)
@@ -95,7 +96,7 @@ class Decoder(nn.Module):
             self.mask_conv = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Faceswap decoder
+        """ Forward pass through the Faceswap decoder
 
         Parameters
         ----------
@@ -112,12 +113,9 @@ class Decoder(nn.Module):
         x = self.up3(x)
         x = torch.sigmoid(self.conv(x))
 
-        if self.up_mask1 is None:
+        if not self.learn_mask:
             return (x, )
 
-        assert (self.mask_up1 is not None and
-                self.mask_up2 is not None and
-                self.mask_up3 is not None)
         mask = self.mask_up1(inputs)
         mask = self.mask_up2(mask)
         mask = self.mask_up3(mask)
@@ -141,7 +139,7 @@ class Original(ModelPlugin):
                                       for _ in range(num_identities))
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the original model
+        """ Forward pass through the original model
 
         Parameters
         ----------
@@ -159,13 +157,3 @@ class Original(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    p = Original(2)
-    print(p)
-    print(dir(list(p.modules())[-1]))
-    print(list(p.modules())[-1].out_channels)
-    i = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
-    out = p(i)
-    print([[k.shape for k in j] for j in out])
