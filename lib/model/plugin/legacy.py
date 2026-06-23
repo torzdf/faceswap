@@ -615,7 +615,37 @@ class KerasToTorch:
         return retval
 
     @classmethod
-    def _group_layer_weights(cls,
+    def _remap_keras_weights(cls, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Handle remapping of any weights into separate layers where required. Any remapped
+        weights are placed back in the weights list in their original position
+
+        Qualifying weights: SeparableConv2D
+
+        Parameters
+        ----------
+        weights
+            The original keras weights extracted from the hdf file
+
+        Returns
+        -------
+        The original keras weights with any splitting applied.
+        """
+        src_weights = {k: v for k, v in weights.items() if "separable_conv2d" in k}
+        if not src_weights:
+            return weights
+
+        remap = {}
+        for name in src_weights:
+            l_name, v_name, v_idx = name.rsplit(".", maxsplit=2)
+            new_l_name = f"{l_name}_a" if v_idx == "0" else f"{l_name}_b"  # no bias on first conv
+            new_v_idx = v_idx if v_idx == "0" else str(int(v_idx) - 1)  # Reduce v_idx on 2nd conv
+            remap[name] = ".".join([new_l_name, v_name, new_v_idx])
+
+        retval = {remap.get(k, k): v for k, v in weights.items()}
+        logger.debug("[KerasToTorch] Remapped keras weights: %s", remap)
+        return retval
+
+    def _group_layer_weights(self,
                              weights: dict[str, ArrayT],
                              reshape_to_torch: bool
                              ) -> dict[str, dict[T.Literal["weight",
@@ -637,6 +667,10 @@ class KerasToTorch:
         Each layer of the model from the .h5 file with a dictionary containing it's weights and
         biases
         """
+        if reshape_to_torch:
+            weights = T.cast(dict[str, ArrayT],
+                             self._remap_keras_weights(T.cast(dict[str, np.ndarray], weights)))
+
         retval = {}
         for lbl, weight in weights.items():
             name, w_type = lbl.rsplit(".", maxsplit=1)
@@ -645,7 +679,10 @@ class KerasToTorch:
                 name = name.rsplit(".", maxsplit=1)[0]  # Strip .vars from the end
                 w_type = k_map[w_type]  # keras indexing to torch name
                 assert isinstance(weight, np.ndarray)
-                if weight.ndim == 4:
+                if weight.ndim == 4 and "separable_conv2d" in name and weight.shape[0] != 1:
+                    new_shape = (weight.shape[2] * weight.shape[3], 1, *weight.shape[:2])
+                    weight = weight.transpose(2, 3, 0, 1).reshape(new_shape)
+                elif weight.ndim == 4:
                     weight = weight.transpose(3, 2, 0, 1)
                 elif weight.ndim == 2:
                     weight = weight.transpose(1, 0)
@@ -758,15 +795,19 @@ class KerasToTorch:
 
         keras_grouped = self._group_layer_weights(keras_weights, reshape_to_torch=True)
         torch_grouped = self._group_layer_weights(torch_weights, reshape_to_torch=False)
-        if len(keras_grouped) != len(torch_grouped):
-            raise RuntimeError(f"Keras weight count ({len(keras_grouped)}) does not match Torch "
-                               f"weight count ({len(torch_grouped)})")
         #  TODO remove this debug code
+        # for i, w in enumerate((keras_grouped, torch_grouped)):
+        #     print(f"\n{'keras' if i == 0 else "torch"}")
+        #     for k, v in w.items():
+        #         print(k, {x: y.shape for x, y in v.items()})
         # for (kn, kw), (tn, tw) in zip(*(keras_grouped.items(), torch_grouped.items())):
         #     k_shape = kw["weight"].shape
         #     t_shape = tw["weight"].cpu().numpy().shape
         #     print(kn, "|", tn, "|", k_shape, t_shape, k_shape == t_shape)
         # exit()
+        if len(keras_grouped) != len(torch_grouped):
+            raise RuntimeError(f"Keras weight count ({len(keras_grouped)}) does not match Torch "
+                               f"weight count ({len(torch_grouped)})")
 
         # This logic goes through the loaded torch state_dict and searches forwards through the
         # keras model for where the first weight matches and pops it. This should be reasonably
