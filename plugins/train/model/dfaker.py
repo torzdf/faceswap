@@ -11,20 +11,58 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import UpscaleSubpixel, ResidualBlock
+from lib.model.nn_blocks import ConvBlockLegacy, UpscaleSubpixel, ResidualBlock
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
-from .base import ModelPlugin
 
-from .original import Encoder
+from .base import ModelPlugin
 from . import dfaker_defaults as cfg
 
 logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
+class Encoder(nn.Module):
+    """ The DFaker Encoder """
+    def __init__(self) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
+        self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
+        self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
+        self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
+
+        self.flatten = nn.Flatten(start_dim=1)
+        self.dense1 = nn.Linear(1024 * 4 * 4, 1024)
+        self.dense2 = nn.Linear(1024, 1024 * 4 * 4)
+        self.up = UpscaleSubpixel(1024, 512)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Forward pass through the DFaker encoder
+
+        Parameters
+        ----------
+        inputs
+            The input to the encoder
+
+        Returns
+        -------
+        The output from the encoder
+        """
+        x: torch.Tensor = self.conv1(inputs)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+
+        x = self.flatten(x)
+        x = self.dense1(x)
+        x = self.dense2(x)
+        x = x.view(x.shape[0], 1024, 4, 4)
+        return self.up(x)
+
+
 class Decoder(nn.Module):
-    """The DFaker Decoder Network.
+    """ The DFaker Decoder Network.
 
     Parameters
     ----------
@@ -40,12 +78,14 @@ class Decoder(nn.Module):
         if output_size == 128:
             ins = ins[1:]
             outs = outs[1:]
-        self.up = nn.Sequential(
-            *(nn.Sequential(OrderedDict({"up": UpscaleSubpixel(i, o),
+
+        up = [nn.Sequential(OrderedDict({"up": UpscaleSubpixel(i, o, leaky_slope=-1.),
                                          "act": nn.LeakyReLU(negative_slope=0.2),
-                                         "res": ResidualBlock(o, o, padding=1)}))
-              for i, o in zip(ins, outs))
-        )
+                                         "res": ResidualBlock(o)}))
+              for i, o in zip(ins[:-1], outs[:-1])]
+        up += [nn.Sequential(OrderedDict({"up": UpscaleSubpixel(ins[-1], outs[-1]),
+                                          "act": nn.LeakyReLU(negative_slope=0.2)}))]
+        self.up = nn.Sequential(*up)
         self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)
 
         self.mask_up = None
@@ -54,7 +94,7 @@ class Decoder(nn.Module):
             self.mask_conv = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the DFaker decoder
+        """ Forward pass through the DFaker decoder
 
         Parameters
         ----------
@@ -93,12 +133,12 @@ class DFaker(ModelPlugin):
             logger.error("Dfaker output shape should be 128 or 256 px")
             sys.exit(1)
         super().__init__(num_identities, input_size=output_size // 2)
-        self.encoder = Encoder(low_mem=False)
+        self.encoder = Encoder()
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask(), output_size)
                                       for _ in range(num_identities))
 
     def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the DFaker model
+        """ Forward pass through the DFaker model
 
         Parameters
         ----------

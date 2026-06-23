@@ -15,7 +15,7 @@ from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
-from . import original_defaults as cfg
+from . import villain_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
 
         self.down1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same", leaky_slope=-1.)
         self.leaky1 = nn.LeakyReLU(0.2)
-        self.res = nn.Sequential(*(ResidualBlock(128, 128) for _ in range(8 if low_mem else 16)))
+        self.res = nn.Sequential(*(ResidualBlock(128) for _ in range(8 if low_mem else 16)))
         self.leaky2 = nn.LeakyReLU(0.1)
         self.down2 = nn.Sequential(ConvBlockLegacy(128, 128, 5, stride=2, padding="same"),
                                    nn.PixelShuffle(2))
@@ -106,11 +106,11 @@ class Decoder(nn.Module):
         super().__init__()
         self.learn_mask = learn_mask
         self.up1 = nn.Sequential(UpscaleSubpixel(512, 512, leaky_slope=0.2),
-                                 ResidualBlock(512, 512))
+                                 ResidualBlock(512))
         self.up2 = nn.Sequential(UpscaleSubpixel(512, 256, leaky_slope=0.2),
-                                 ResidualBlock(256, 256))
+                                 ResidualBlock(256))
         self.up3 = nn.Sequential(UpscaleSubpixel(256, 128, leaky_slope=0.2),
-                                 ResidualBlock(128, 128))
+                                 ResidualBlock(128))
         self.conv = nn.Conv2d(128, 3, 5, stride=1, padding=2)
 
         if learn_mask:

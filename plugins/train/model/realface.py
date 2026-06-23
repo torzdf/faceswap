@@ -46,8 +46,8 @@ class Encoder(nn.Module):
                                           stride=2,
                                           padding="same",
                                           leaky_slope=0.2),
-                          ResidualBlock(channels[i + 1], channels[i + 1], bias=True),
-                          ResidualBlock(channels[i + 1], channels[i + 1], bias=True))
+                          ResidualBlock(channels[i + 1], bias=True),
+                          ResidualBlock(channels[i + 1], bias=True))
             for i in range(num_downscale - 1)
             ]
         blocks.append(ConvBlockLegacy(channels[-2], channels[-1], 5,
@@ -110,7 +110,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.dense2 = nn.Linear(bottleneck_size, out_channels * upscale_width * upscale_width)
         self.up = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
         self.leaky = nn.LeakyReLU(0.2)
-        self.res = ResidualBlock(out_channels, out_channels, bias=False)
+        self.res = ResidualBlock(out_channels, bias=False)
 
         channels = [out_channels] + [complexity // 2 ** i for i in range(num_upscale - 1)]
         blocks: list[nn.Module] = [UpscaleSubpixel(channels[i], channels[i + 1])
@@ -204,13 +204,13 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.dense2 = nn.Linear(bottleneck_size, out_channels * upscale_width * upscale_width)
         self.up = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
         self.leaky = nn.LeakyReLU(0.2)
-        self.res = ResidualBlock(out_channels, out_channels, bias=False)
+        self.res = ResidualBlock(out_channels, bias=False)
 
         channels = [out_channels] + [complexity // 2 ** i for i in range(num_upscale - 1)]
         blocks: list[nn.Module] = [
             nn.Sequential(UpscaleSubpixel(channels[i], channels[i + 1], leaky_slope=0.2),
-                          ResidualBlock(channels[i + 1], channels[i + 1], bias=False),
-                          ResidualBlock(channels[i + 1], channels[i + 1], bias=True))
+                          ResidualBlock(channels[i + 1], bias=False),
+                          ResidualBlock(channels[i + 1], bias=True))
             for i in range(num_upscale - 2)
             ]
         blocks.append(UpscaleSubpixel(channels[-2], channels[-1]))

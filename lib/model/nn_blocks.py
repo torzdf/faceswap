@@ -132,12 +132,9 @@ class ResidualBlock(nn.Module):
 
     Parameters
     ----------
-    in_channels
-        The dimensionality of the input space (i.e. the number of input filters in the
-        convolution)
-    out_channels
-        The dimensionality of the output space (i.e. the number of output filters in the
-        convolution)
+    channels
+        The dimensionality of the input and output space (i.e. the number of input and output
+        filters in the convolution)
     kernel_size
         An integer or tuple/list of 2 integers, specifying the height and width of the 2D
         convolution window. Can be a single integer to specify the same value for all spatial
@@ -150,22 +147,21 @@ class ResidualBlock(nn.Module):
         The value to use for LeakyReLu negative slope. Default: 0.2
     """
     def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
+                 channels: int,
                  kernel_size: int = 3,
                  padding: T.Literal["same", "valid"] | int = "same",
                  bias: bool = True,
                  leaky_slope: float = 0.2) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels,
-                               out_channels,
+        self.conv1 = nn.Conv2d(channels,
+                               channels,
                                kernel_size,
                                padding=padding,
                                bias=bias)
         self.leaky1 = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
-        self.conv2 = nn.Conv2d(out_channels,
-                               out_channels,
+        self.conv2 = nn.Conv2d(channels,
+                               channels,
                                kernel_size,
                                padding=padding,
                                bias=bias)

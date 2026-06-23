@@ -176,9 +176,9 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.up4 = UpscaleSubpixel(channels[2], channels[3], kernel_size=5, leaky_slope=slope)
 
         if not low_mem:
-            self.up1 = nn.Sequential(self.up1, ResidualBlock(channels[0], channels[0]))
-            self.up2 = nn.Sequential(self.up2, ResidualBlock(channels[1], channels[1]))
-            self.up3 = nn.Sequential(self.up3, ResidualBlock(channels[2], channels[2]))
+            self.up1 = nn.Sequential(self.up1, ResidualBlock(channels[0]))
+            self.up2 = nn.Sequential(self.up2, ResidualBlock(channels[1]))
+            self.up3 = nn.Sequential(self.up3, ResidualBlock(channels[2]))
         self.conv = nn.Conv2d(channels[3], 3, 5, stride=1, padding=2)
         self.act = nn.Sigmoid()
 
