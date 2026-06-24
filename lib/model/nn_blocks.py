@@ -32,7 +32,8 @@ class ConvBlockLegacy(nn.Module):
     padding
         The padding to use. Default: "same"
     leaky_slope
-        The value to use for LeakyReLu negative slope. Default: 0.1
+        The value to use for LeakyReLu negative slope. Negative values remove activation
+        altogether. Default: 0.1
     """
     def __init__(self,
                  in_channels: int,
@@ -49,7 +50,9 @@ class ConvBlockLegacy(nn.Module):
                               kernel_size=kernel_size,
                               stride=stride,
                               padding=0)
-        self.leaky = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
+        self.leaky = None
+        if leaky_slope >= 0.0:
+            self.leaky = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Faceswap Keras Convolutional Layer.
@@ -67,7 +70,9 @@ class ConvBlockLegacy(nn.Module):
         if self.pad is not None:
             x = self.pad(x)
         x = self.conv(x)
-        return self.leaky(x)
+        if self.leaky is not None:
+            x = self.leaky(x)
+        return x
 
 
 class UpscaleSubpixel(nn.Module):

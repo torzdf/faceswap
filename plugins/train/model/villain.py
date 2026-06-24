@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" Original - VillainGuy model
+""" VillainGuy model
     Based on the original https://www.reddit.com/r/deepfakes/ code sample + contributions
     Adapted from a model by VillainGuy (https://github.com/VillainGuy) """
 from __future__ import annotations
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Villain Encoder
+    """ The Villain Encoder
 
     Parameters
     ----------
@@ -45,23 +45,26 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
                                    nn.PixelShuffle(2))
         self.down4 = nn.Sequential(
             ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
-            SeparableConv2d(128, 256, 5, stride=2, padding=2, is_legacy=True)
+            SeparableConv2d(128, 256, 5, stride=2, padding=2, is_legacy=True),
+            nn.ReLU(inplace=True)
             )
 
         self.down5 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
         if not low_mem:
             self.down5 = nn.Sequential(
                 self.down5,
-                SeparableConv2d(512, 1024, 5, stride=2, padding=2, is_legacy=True)
-            )
+                SeparableConv2d(512, 1024, 5, stride=2, padding=2, is_legacy=True),
+                nn.ReLU(inplace=True)
+                )
 
         self.flatten = nn.Flatten(start_dim=1)
-        self.dense1 = nn.Linear(self.feats * 4 * 4, self.feats)
+        in_dim = 8 if low_mem else 4
+        self.dense1 = nn.Linear(self.feats * in_dim * in_dim, self.feats)
         self.dense2 = nn.Linear(self.feats, 1024 * 8 * 8)
         self.up = UpscaleSubpixel(1024, 512)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the Villain encoder
+        """ Forward pass through the Villain encoder
 
         Parameters
         ----------
@@ -94,7 +97,7 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class Decoder(nn.Module):
-    """The Villain Faceswap Decoder Network.
+    """ The Villain Faceswap Decoder Network.
 
     Parameters
     ----------
@@ -120,7 +123,7 @@ class Decoder(nn.Module):
             self.mask_conv = nn.Conv2d(128, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Villain Faceswap decoder
+        """ Forward pass through the Villain Faceswap decoder
 
         Parameters
         ----------
@@ -163,7 +166,7 @@ class Villain(ModelPlugin):
                                       for _ in range(num_identities))
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the original model
+        """ Forward pass through the Villain model
 
         Parameters
         ----------
@@ -181,10 +184,3 @@ class Villain(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    p = Villain(2)
-    i = [torch.rand((1, 3, 128, 128)), torch.rand((1, 3, 128, 128))]
-    out = p(i)
-    print([[k.shape for k in j] for j in out])
