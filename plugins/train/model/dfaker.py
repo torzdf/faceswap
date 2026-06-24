@@ -23,8 +23,14 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
-    """ The DFaker Encoder """
-    def __init__(self) -> None:
+    """ The DFaker Encoder
+
+    Parameters
+    ----------
+    input_size
+        The pixel input size to the model
+    """
+    def __init__(self, input_size: int) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
@@ -33,7 +39,8 @@ class Encoder(nn.Module):
         self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
 
         self.flatten = nn.Flatten(start_dim=1)
-        self.dense1 = nn.Linear(1024 * 4 * 4, 1024)
+        dim = 4 if input_size == 64 else 8
+        self.dense1 = nn.Linear(1024 * dim * dim, 1024)
         self.dense2 = nn.Linear(1024, 1024 * 4 * 4)
         self.up = UpscaleSubpixel(1024, 512)
 
@@ -73,9 +80,10 @@ class Decoder(nn.Module):
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
-        ins = [512, 512, 512, 256, 128]
+        ins = [512, 1024, 512, 256, 128]
         outs = [1024, 512, 256, 128, 64]
         if output_size == 128:
+            ins[1] = 512
             ins = ins[1:]
             outs = outs[1:]
 
@@ -83,9 +91,7 @@ class Decoder(nn.Module):
                                          "act": nn.LeakyReLU(negative_slope=0.2),
                                          "res": ResidualBlock(o)}))
               for i, o in zip(ins[:-1], outs[:-1])]
-        up += [nn.Sequential(OrderedDict({"up": UpscaleSubpixel(ins[-1], outs[-1]),
-                                          "act": nn.LeakyReLU(negative_slope=0.2)}))]
-        self.up = nn.Sequential(*up)
+        self.up = nn.Sequential(*up, UpscaleSubpixel(ins[-1], outs[-1]))
         self.conv = nn.Conv2d(64, 3, 5, stride=1, padding=2)
 
         self.mask_up = None
@@ -133,7 +139,7 @@ class DFaker(ModelPlugin):
             logger.error("Dfaker output shape should be 128 or 256 px")
             sys.exit(1)
         super().__init__(num_identities, input_size=output_size // 2)
-        self.encoder = Encoder()
+        self.encoder = Encoder(self.input_shape[1])
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask(), output_size)
                                       for _ in range(num_identities))
 
@@ -156,10 +162,3 @@ class DFaker(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    # TODO validate and remove test code
-    p = DFaker(2)
-    t = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
-    p(t)
