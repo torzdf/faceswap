@@ -615,11 +615,10 @@ class KerasToTorch:
         return retval
 
     @classmethod
-    def _remap_keras_weights(cls, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """Handle remapping of any weights into separate layers where required. Any remapped
-        weights are placed back in the weights list in their original position
+    def _prepare_keras_weights(cls, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Some Keras weights need preparation for porting. Specifically:
 
-        Qualifying weights: SeparableConv2D
+        SeparableConv2D split to 2x convs (replaced in original order)
 
         Parameters
         ----------
@@ -628,7 +627,7 @@ class KerasToTorch:
 
         Returns
         -------
-        The original keras weights with any splitting applied.
+        The original keras weights with any processing applied.
         """
         src_weights = {k: v for k, v in weights.items() if "separable_conv2d" in k}
         if not src_weights:
@@ -667,10 +666,6 @@ class KerasToTorch:
         Each layer of the model from the .h5 file with a dictionary containing it's weights and
         biases
         """
-        if reshape_to_torch:
-            weights = T.cast(dict[str, ArrayT],
-                             self._remap_keras_weights(T.cast(dict[str, np.ndarray], weights)))
-
         retval = {}
         for lbl, weight in weights.items():
             name, w_type = lbl.rsplit(".", maxsplit=1)
@@ -782,14 +777,24 @@ class KerasToTorch:
         The imported keras weights for importing into a torch plugin
         """
         # TODO Test this for all models as topological unlikely to always work
-        # for k in keras_weights:
-        #     print(k)
-        # for t in torch_weights:
-        #     print(t)
-        # exit()
+        keras_weights = self._prepare_keras_weights(keras_weights)
         bn_track = "num_batches_tracked"
         if len(keras_weights) != len({k: v for k, v in torch_weights.items()  # Exclude bn tracker
                                       if not k.endswith(bn_track)}):
+            # TODO remove
+            for i in range(max(len(keras_weights), len(torch_weights))):
+                if len(keras_weights) > i:
+                    k_key = list(keras_weights)[i]
+                    out = k_key + "|" + str(keras_weights[k_key].shape) + "|"
+                else:
+                    out = " | |"
+                if len(torch_weights) > i:
+                    t_key = list(torch_weights)[i]
+                    out += t_key + "|" + str(torch_weights[t_key].cpu().numpy().shape) + "|"
+                else:
+                    out += " | |"
+                print(out)
+
             raise RuntimeError(f"Keras weight count ({len(keras_weights)}) does not match Torch "
                                f"weight count ({len(torch_weights)})")
 

@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
+from lib.model.layers import InstanceNormLegacy
 from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Encoder(nn.Module):
+class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
     """The Unbalanced Encoder
 
     Parameters
@@ -42,8 +43,12 @@ class Encoder(nn.Module):
         self.dense_width = input_size // 16
         half_width = self.dense_width // 2
 
-        self.down1 = ConvBlockLegacy(3, complexity, 5, stride=2)
-        self.down2 = ConvBlockLegacy(complexity, complexity * 2, 5, stride=2)
+        self.down1 = ConvBlockLegacy(3, complexity, 5, stride=2, leaky_slope=-1.)
+        self.norm1 = InstanceNormLegacy()
+        self.leaky1 = nn.LeakyReLU(0.1, inplace=True)
+        self.down2 = ConvBlockLegacy(complexity, complexity * 2, 5, stride=2, leaky_slope=-1.)
+        self.norm2 = InstanceNormLegacy()
+        self.leaky2 = nn.LeakyReLU(0.1, inplace=True)
         self.down3 = ConvBlockLegacy(complexity * 2, complexity * 4, 5, stride=2)
         self.down4 = ConvBlockLegacy(complexity * 4, complexity * 6, 5, stride=2)
         self.down5 = ConvBlockLegacy(complexity * 6, complexity * 8, 5, stride=2)
@@ -64,7 +69,11 @@ class Encoder(nn.Module):
         The output from the encoder
         """
         x = self.down1(inputs)
+        x = self.norm1(x)
+        x = self.leaky1(x)
         x = self.down2(x)
+        x = self.norm2(x)
+        x = self.leaky2(x)
         x = self.down3(x)
         x = self.down4(x)
         x = self.down5(x)
@@ -173,7 +182,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.up1 = UpscaleSubpixel(in_channels, channels[0], kernel_size=5, leaky_slope=slope)
         self.up2 = UpscaleSubpixel(channels[0], channels[1], kernel_size=5, leaky_slope=slope)
         self.up3 = UpscaleSubpixel(channels[1], channels[2], kernel_size=5, leaky_slope=slope)
-        self.up4 = UpscaleSubpixel(channels[2], channels[3], kernel_size=5, leaky_slope=slope)
+        self.up4 = UpscaleSubpixel(channels[2], channels[3], kernel_size=5, leaky_slope=0.1)
 
         if not low_mem:
             self.up1 = nn.Sequential(self.up1, ResidualBlock(channels[0]))
@@ -267,10 +276,3 @@ class Unbalanced(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    p = Unbalanced(2)
-    i = [torch.rand((1, 3, 128, 128)), torch.rand((1, 3, 128, 128))]
-    out = p(i)
-    print([[k.shape for k in j] for j in out])

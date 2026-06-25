@@ -18,6 +18,41 @@ from lib.utils import get_module_objects
 logger = logging.getLogger(__name__)
 
 
+class InstanceNormLegacy(nn.Module):
+    """A stripped down instance normalization that mimics Keras' epsilon, beta and gamma
+    implementation. Don't use for new models. Use nn.InstanceNorm2d instead
+
+    Parameters
+    ----------
+    eps
+        Small float added to variance to avoid dividing by zero. Default: `1e-3`
+    """
+    def __init__(self, eps: float = 1e-3) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(1))  # gamma
+        self.bias = nn.Parameter(torch.zeros(1))  # beta
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the legacy keras instance normalization layer
+
+        Parameters
+        ----------
+        inputs
+            The tensor to normalize
+
+        Returns
+        -------
+            The normalized tensor
+        """
+        reduction_dims = tuple(range(1, len(inputs.shape)))
+        mean = inputs.mean(dim=reduction_dims, keepdim=True)
+        stdev = inputs.std(dim=reduction_dims, unbiased=True, keepdim=True) + self.eps
+        normed = (inputs - mean) / stdev
+        return normed * self.weight + self.bias
+
+
 class SamePad2d(nn.Module):
     """Asymmetric padding to replicate Keras' padding='same' for backwards compatibility. This
     should not be used to new models. It exists purely to enable bit-accurate porting of Tensorflow
