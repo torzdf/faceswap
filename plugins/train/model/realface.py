@@ -108,7 +108,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(in_channels * upscale_width * upscale_width, bottleneck_size)
         self.dense2 = nn.Linear(bottleneck_size, out_channels * upscale_width * upscale_width)
-        self.up = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
+        self.up1 = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
         self.leaky = nn.LeakyReLU(0.2)
         self.res = ResidualBlock(out_channels, bias=False)
 
@@ -116,17 +116,17 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         blocks: list[nn.Module] = [UpscaleSubpixel(channels[i], channels[i + 1])
                                    for i in range(num_upscale - 2)]
         blocks.append(UpscaleSubpixel(channels[-2], channels[-1]))
-        self.up = nn.Sequential(*blocks)
+        self.up2 = nn.Sequential(*blocks)
         self.conv = nn.Conv2d(channels[-1], 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
             self.leaky_mask = nn.LeakyReLU(0.1)
 
             m_complexity = 384
-            m_channels = [out_channels] + [m_complexity // 2 ** i for i in range(num_upscale)]
-            m_blocks: list[nn.Module] = [UpscaleSubpixel(channels[i], channels[i + 1])
-                                         for i in range(num_upscale - 1)]
-            m_blocks.append(UpscaleSubpixel(m_channels[-3], m_channels[-1]))
+            m_channels = [out_channels] + [m_complexity // 2 ** i for i in range(num_upscale - 1)]
+            m_blocks: list[nn.Module] = [UpscaleSubpixel(m_channels[i], m_channels[i + 1])
+                                         for i in range(num_upscale - 2)]
+            m_blocks.append(UpscaleSubpixel(m_channels[-2], m_channels[-1]))
             self.mask_up = nn.Sequential(*m_blocks)
             self.mask_conv = nn.Conv2d(m_channels[-1], 1, 5, stride=1, padding=2)
 
@@ -147,13 +147,13 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         x = self.dense1(x)
         x: torch.Tensor = self.dense2(x)
         x = x.view(x.shape[0], self.out_channels, self.upscale_width, self.upscale_width)
-        x = self.up(x)
+        x = self.up1(x)
 
         mask = x
 
         x = self.leaky(x)
         x = self.res(x)
-        x = self.up(x)
+        x = self.up2(x)
         x = torch.sigmoid(self.conv(x))
 
         if not self.learn_mask:
@@ -202,7 +202,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(in_channels * upscale_width * upscale_width, bottleneck_size)
         self.dense2 = nn.Linear(bottleneck_size, out_channels * upscale_width * upscale_width)
-        self.up = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
+        self.up1 = UpscaleSubpixel(out_channels, out_channels, leaky_slope=-1.)
         self.leaky = nn.LeakyReLU(0.2)
         self.res = ResidualBlock(out_channels, bias=False)
 
@@ -214,17 +214,17 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             for i in range(num_upscale - 2)
             ]
         blocks.append(UpscaleSubpixel(channels[-2], channels[-1]))
-        self.up = nn.Sequential(*blocks)
+        self.up2 = nn.Sequential(*blocks)
         self.conv = nn.Conv2d(channels[-1], 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
             self.leaky_mask = nn.LeakyReLU(0.1)
 
             m_complexity = 384
-            m_channels = [out_channels] + [m_complexity // 2 ** i for i in range(num_upscale)]
-            m_blocks: list[nn.Module] = [UpscaleSubpixel(channels[i], channels[i + 1])
-                                         for i in range(num_upscale - 1)]
-            m_blocks.append(UpscaleSubpixel(m_channels[-3], m_channels[-1]))
+            m_channels = [out_channels] + [m_complexity // 2 ** i for i in range(num_upscale - 1)]
+            m_blocks: list[nn.Module] = [UpscaleSubpixel(m_channels[i], m_channels[i + 1])
+                                         for i in range(num_upscale - 2)]
+            m_blocks.append(UpscaleSubpixel(m_channels[-2], m_channels[-1]))
             self.mask_up = nn.Sequential(*m_blocks)
             self.mask_conv = nn.Conv2d(m_channels[-1], 1, 5, stride=1, padding=2)
 
@@ -245,21 +245,21 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         x = self.dense1(x)
         x: torch.Tensor = self.dense2(x)
         x = x.view(x.shape[0], self.out_channels, self.upscale_width, self.upscale_width)
-        x = self.up(x)
+        x = self.up1(x)
 
         mask = x
 
         x = self.leaky(x)
         x = self.res(x)
-        x = self.up(x)
-        x = self.conv(x)
+        x = self.up2(x)
+        x = torch.sigmoid(self.conv(x))
 
         if not self.learn_mask:
             return (x, )
 
         mask = self.leaky_mask(mask)
         mask = self.mask_up(mask)
-        mask = self.mask_conv(mask)
+        mask = torch.sigmoid(self.mask_conv(mask))
         return (x, mask)
 
 
