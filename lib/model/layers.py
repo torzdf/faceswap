@@ -203,4 +203,39 @@ class SeparableConv2d(nn.Module):
         return x
 
 
+class UpSampling2dLegacy(nn.Module):
+    """Upsampling layer to match Keras behavior. Do not use this for new models
+
+    Parameters
+    ----------
+    size
+        The upsampling factors for rows and columns. Default: (2, 2)
+    interpolation
+        The interpolation to use. Default: "nearest"
+    """
+    def __init__(self,
+                 size: int | tuple[int, int] = (2, 2),
+                 interpolation: T.Literal["bicubic", "bilinear", "nearest"] = "nearest") -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.factor = (size, size) if isinstance(size, int) else size
+        self.mode = interpolation
+        self.align_corners = False if interpolation in ("bicubic", "bilinear") else None
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Call the Upsampling2D Layer
+
+        Parameters
+        ----------
+        inputs
+            The input tensor to be upsampled
+
+        Returns
+        -------
+        The upsampled tensor
+        """
+        size = (inputs.shape[-2] * self.factor[0], inputs.shape[-1] * self.factor[1])
+        return F.interpolate(inputs, size=size, mode=self.mode, align_corners=self.align_corners)
+
+
 __all__ = get_module_objects(__name__)

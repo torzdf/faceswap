@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
+from lib.model.layers import UpSampling2dLegacy
 from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class Upscale2xBlock(nn.Module):
-    """Custom hybrid upscale layer for sub-pixel up-scaling.
+    """ Custom hybrid upscale layer for sub-pixel up-scaling.
 
     Most of up-scaling is approximating lighting gradients which can be accurately achieved
     using linear fitting. This layer attempts to improve memory consumption by splitting
@@ -73,10 +74,10 @@ class Upscale2xBlock(nn.Module):
                                        leaky_slope=0.1 if activation else -1.0)
         if self.fast or (not self.fast and self.out_channels > 0):
             self.conv = nn.Conv2d(in_channels, self.out_channels, 3, padding=1)
-            self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
+            self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation="bilinear")
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Call the Upscale Subpixel Layer.
+        """ Call the Upscale Subpixel Layer.
 
         Parameters
         ----------
@@ -91,7 +92,7 @@ class Upscale2xBlock(nn.Module):
         if self.fast:
             x = self.conv(x)
             x = self.upsample(x)
-            x1 = self.upscale(x)
+            x1 = self.upscale(inputs)
             x = x1 + x
         else:
             x_sr = self.upscale(x)
@@ -105,7 +106,7 @@ class Upscale2xBlock(nn.Module):
 
 
 class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Dlight Encoder
+    """ The Dlight Encoder
 
     Parameters
     ----------
@@ -156,7 +157,7 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.drop2 = nn.Dropout(p=0.05)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the Dlight encoder
+        """ Forward pass through the Dlight encoder
 
         Parameters
         ----------
@@ -198,7 +199,7 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Dlight Faceswap Decoder A Network.
+    """ The Dlight Faceswap Decoder A Network.
 
     Parameters
     ----------
@@ -215,7 +216,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         dec_a_complexity = 256
         mask_complexity = 128
 
-        self.up1 = nn.UpsamplingBilinear2d(scale_factor=upscale_ratio)
+        self.up1 = UpSampling2dLegacy(size=upscale_ratio, interpolation="bilinear")
         self.up2 = Upscale2xBlock(1024, dec_a_complexity, fast=False)
         self.up3 = Upscale2xBlock(dec_a_complexity, dec_a_complexity // 2, fast=False)
         self.up4 = Upscale2xBlock(dec_a_complexity // 2, dec_a_complexity // 4, fast=False)
@@ -234,7 +235,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Dlight decoder A
+        """ Forward pass through the Dlight decoder A
 
         Parameters
         ----------
@@ -266,7 +267,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Dlight Faceswap Decoder B Network.
+    """ The Dlight Faceswap Decoder B Network.
 
     Parameters
     ----------
@@ -283,23 +284,23 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         dec_b_complexity = 512
         mask_complexity = 128
 
-        self.up1 = nn.Sequential(OrderedDict({
-            "up": Upscale2xBlock(1024,
-                                 dec_b_complexity,
-                                 scale_factor=upscale_ratio,
-                                 fast=False,
-                                 activation=False),
-            "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            "res1": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=True),
-            "res2": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False),
-            "res3": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False)
+        self.up1 = Upscale2xBlock(1024,
+                                  dec_b_complexity,
+                                  scale_factor=upscale_ratio,
+                                  fast=False,
+                                  activation=False)
+        self.leaky1 = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.res1 = nn.Sequential(OrderedDict({
+            "res1": ResidualBlock(dec_b_complexity, bias=True),
+            "res2": ResidualBlock(dec_b_complexity, bias=False),
+            "res3": ResidualBlock(dec_b_complexity, bias=False)
         }))
 
         self.up2 = nn.Sequential(OrderedDict({
             "up": Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=False, activation=False),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            "res1": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=True),
-            "res2": ResidualBlock(dec_b_complexity, dec_b_complexity, padding=1, bias=False),
+            "res1": ResidualBlock(dec_b_complexity, bias=True),
+            "res2": ResidualBlock(dec_b_complexity, bias=False),
             "bn": nn.BatchNorm2d(dec_b_complexity, eps=0.001, momentum=0.01)
         }))
 
@@ -309,10 +310,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
                                  fast=False,
                                  activation=False),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            "res": ResidualBlock(dec_b_complexity // 2,
-                                 dec_b_complexity // 2,
-                                 padding=1,
-                                 bias=True)
+            "res": ResidualBlock(dec_b_complexity // 2, padding=1, bias=True)
         }))
 
         self.up4 = nn.Sequential(OrderedDict({
@@ -321,10 +319,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
                                  fast=False,
                                  activation=False),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
-            "res": ResidualBlock(dec_b_complexity // 4,
-                                 dec_b_complexity // 4,
-                                 padding=1,
-                                 bias=False),
+            "res": ResidualBlock(dec_b_complexity // 4, padding=1, bias=False),
             "bn": nn.BatchNorm2d(dec_b_complexity // 4, eps=0.001, momentum=0.01)
         }))
 
@@ -335,7 +330,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.mask_up1 = Upscale2xBlock(512, mask_complexity, fast=False)
             self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
             self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
                                            mask_complexity // 4,
@@ -346,7 +341,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Dlight decoder B
+        """ Forward pass through the Dlight decoder B
 
         Parameters
         ----------
@@ -360,6 +355,8 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         """
         x = self.up1(inputs)
         xy = x
+        x = self.leaky1(x)
+        x = self.res1(x)
 
         x = self.up2(x)
         x = self.up3(x)
@@ -379,7 +376,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Dlight Faceswap Decoder B Fast Network.
+    """ The Dlight Faceswap Decoder B Fast Network.
 
     Parameters
     ----------
@@ -405,7 +402,7 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False)
+            self.mask_up1 = Upscale2xBlock(512, mask_complexity, fast=False)
             self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
             self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
                                            mask_complexity // 4,
@@ -416,7 +413,7 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Dlight B Fast decoder
+        """ Forward pass through the Dlight B Fast decoder
 
         Parameters
         ----------
@@ -466,7 +463,7 @@ class Dlight(ModelPlugin):
         features = {"lowmem": 0, "fair": 1, "best": 2}[cfg.features()]
         details = {"fast": 0, "good": 1}[cfg.details()]
 
-        up_ratios = {128: 2, 256: 4, 384: 64}
+        up_ratios = {128: 2, 256: 4, 384: 6}
         out_size = cfg.output_size()
         if out_size not in up_ratios:
             raise FaceswapError("Config error: output_size must be one of: 128, 256, or 384.")
@@ -484,7 +481,7 @@ class Dlight(ModelPlugin):
                                        dec_b(learn_mask, upscale_ratio)))
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the original model
+        """ Forward pass through the Dlight model
 
         Parameters
         ----------
@@ -502,20 +499,3 @@ class Dlight(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-if __name__ == "__main__":
-    size = 128
-    # TODO remove after validation
-    i = [torch.rand((1, 3, size, size)), torch.rand((1, 3, size, size))]
-    # e = Encoder(256, 512)
-    # out = e(i[0])
-
-    # print(out.shape)
-    # exit()
-    p = Dlight(2)
-    print(p)
-    # print(dir(list(p.modules())[-1]))
-    # print(list(p.modules())[-1].out_channels)
-    #
-    out_ = p(i)
-    print([[k.shape for k in j] for j in out_])
