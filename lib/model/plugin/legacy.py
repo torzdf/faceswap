@@ -188,6 +188,8 @@ class KerasConfigParser:
         if not config["name"].startswith("input_layer"):  # input layers mapped at model level
             mapping[config["name"]] = dst_label
 
+        logger.debug("[KerasConfigParser] mapped layer '%s' to weight '%s'",
+                     config["name"], dst_label)
         return {dst_label: cls._extract_input_shapes(config, mapping)}
 
 
@@ -340,9 +342,7 @@ class KerasToTorch:
         self._state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
                                float | dict[str, T.Any]] = {}
 
-        self._pixel_shuffler_convs = self._get_pixel_shuffler_convs(
-            {k: list(v) for k, v in self._keras.layers.items()}
-            )
+        self._pixel_shuffler_convs = self._get_pixel_shuffler_convs(self._keras.layers)
         self._dense_reshapes = self._get_dense_reshapes(self._keras.layers)
         self._mask_layers = self._get_mask_layers({k: list(v)
                                                    for k, v in self._keras.layers.items()},
@@ -352,7 +352,8 @@ class KerasToTorch:
         self._state = self._get_state()
 
     @classmethod
-    def _get_pixel_shuffler_convs(cls, layers: dict[str, list[str]]) -> list[str]:
+    def _get_pixel_shuffler_convs(cls, layers: dict[str, dict[str, list[int]]]
+                                  ) -> dict[str, int]:
         """Obtain a list of convolutions that lead into pixel shuffler layers for channel re-
         ordering
 
@@ -364,27 +365,42 @@ class KerasToTorch:
 
         Returns
         -------
-        list of convolution names that lead into pixel shuffler layers
+        dict of convolution names that lead into pixel shuffler layers to the scale of the pixel
+        shuffler layer
         """
-        retval = []
+        retval: dict[str, int] = {}
         for layer, inbound in layers.items():
             if not layer.rsplit(".", maxsplit=1)[-1].startswith("pixel_shuffler"):
                 continue
             assert len(inbound) == 1  # FS never has more than 2 inputs into a PS
-            in_ = inbound[0]
+            in_ = list(inbound)[0]
+            in_size = inbound[in_][0]
+            in_conv = None
             while True:
                 if in_.rsplit(".", maxsplit=1)[-1].startswith("conv2d"):
                     logger.debug("[KerasToTorch] Collected conv '%s' for pixel shuffler '%s'",
                                  in_, layer)
-                    retval.append(in_)
+                    in_conv = in_
                     break
 
                 logger.debug("[KerasToTorch] Skipping non-conv '%s' for pixel shuffler '%s'",
                              in_, layer)
                 next_in = layers[in_]
                 assert len(next_in) == 1
-                in_ = next_in[0]
-        logger.debug("[KerasToTorch] Pixel Shuffler convs: %s", retval)
+                in_ = list(next_in)[0]
+            assert in_conv is not None
+
+            out_size = None
+            for in_layers in layers.values():
+                if layer in in_layers:
+                    out_sizes = set(x[0] for x in in_layers.values())
+                    assert len(out_sizes) == 1
+                    out_size = list(out_sizes)[0]
+                    break
+            assert out_size is not None
+            retval[in_conv] = out_size // in_size
+
+        logger.debug("[KerasToTorch] Pixel Shuffler convs and scales: %s", retval)
         return retval
 
     @classmethod
@@ -740,7 +756,8 @@ class KerasToTorch:
 
     @classmethod
     def _pixel_shuffle_reorder(cls,
-                               weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
+                               weights: dict[T.Literal["weight", "bias"], np.ndarray],
+                               scale: int) -> None:
         """Shuffle the order that weights are stored to channels first prior to feeding the pixel
         shuffler
 
@@ -748,8 +765,9 @@ class KerasToTorch:
         ----------
         weights
             The weights and bias for a conv layer being imported from Keras
+        scale
+            The scale of the pixel shuffler layer
         """
-        scale = 2
         out_channels = weights["weight"].shape[0] // (scale * scale)
         trans = []
         for k_prime in range(scale * scale * out_channels):
@@ -778,28 +796,29 @@ class KerasToTorch:
         """
         # TODO Test this for all models as topological unlikely to always work
         keras_weights = self._prepare_keras_weights(keras_weights)
-        bn_track = "num_batches_tracked"
-        if len(keras_weights) != len({k: v for k, v in torch_weights.items()  # Exclude bn tracker
-                                      if not k.endswith(bn_track)}):
+        torch_filtered = {k: v for k, v in torch_weights.items()  # Doesn't exist in keras
+                          if not k.endswith("num_batches_tracked")}  # Reinserted at end
+
+        if len(keras_weights) != len(torch_filtered):
             # TODO remove
-            for i in range(max(len(keras_weights), len(torch_weights))):
+            for i in range(max(len(keras_weights), len(torch_filtered))):
                 if len(keras_weights) > i:
                     k_key = list(keras_weights)[i]
                     out = k_key + "|" + str(keras_weights[k_key].shape) + "|"
                 else:
                     out = " | |"
-                if len(torch_weights) > i:
-                    t_key = list(torch_weights)[i]
-                    out += t_key + "|" + str(torch_weights[t_key].cpu().numpy().shape) + "|"
+                if len(torch_filtered) > i:
+                    t_key = list(torch_filtered)[i]
+                    out += t_key + "|" + str(torch_filtered[t_key].cpu().numpy().shape) + "|"
                 else:
                     out += " | |"
                 print(out)
 
             raise RuntimeError(f"Keras weight count ({len(keras_weights)}) does not match Torch "
-                               f"weight count ({len(torch_weights)})")
+                               f"weight count ({len(torch_filtered)})")
 
         keras_grouped = self._group_layer_weights(keras_weights, reshape_to_torch=True)
-        torch_grouped = self._group_layer_weights(torch_weights, reshape_to_torch=False)
+        torch_grouped = self._group_layer_weights(torch_filtered, reshape_to_torch=False)
         #  TODO remove this debug code
         # for i, w in enumerate((keras_grouped, torch_grouped)):
         #     print(f"\n{'keras' if i == 0 else "torch"}")
@@ -819,14 +838,13 @@ class KerasToTorch:
         # robust as some tensors can drift a little, but not too far. Mask layer ordering is the
         # biggest barrier, so the search is filtered if learn_mask is enabled.
         # This will fail if match is not found.
-        retval: dict[str, torch.Tensor] = {}
+        mapped: dict[str, torch.Tensor] = {}
         for lbl, weights in torch_grouped.items():
             try:
                 key = next(k for k, v in keras_grouped.items()
                            if ("mask" in lbl and k in self._mask_layers or
                                "mask" not in lbl and k not in self._mask_layers)
-                           and v["weight"].shape == weights["weight"].shape
-                           and list(v) == [k for k in weights if k != bn_track])
+                           and v["weight"].shape == weights["weight"].shape)
             except:  # TODO remove
                 print()
                 # print(self._mask_layers)
@@ -837,7 +855,7 @@ class KerasToTorch:
                     print("mask" in lbl and k in self._mask_layers)
                     print("mask" not in lbl and k not in self._mask_layers)
                     print(v["weight"].shape == weights["weight"].shape)
-                    print(list(v) == [k for k in weights if k != bn_track])
+                    print(list(v) == list(weights))
                 raise
 
             val = keras_grouped.pop(key)
@@ -846,17 +864,15 @@ class KerasToTorch:
                                     T.cast(dict[T.Literal["weight", "bias"], np.ndarray], val))
             if key in self._pixel_shuffler_convs:
                 self._pixel_shuffle_reorder(T.cast(dict[T.Literal["weight", "bias"], np.ndarray],
-                                                   val))
+                                                   val),
+                                            self._pixel_shuffler_convs[key])
 
             logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
                          key, lbl, val["weight"].shape)
             for k, v in val.items():
-                if k == "running_mean":
-                    logger.debug("[KerasToTorch] Keeping 'num_batches_tracked' for torch: '%s'",
-                                 lbl)
-                    retval[f"{lbl}.num_batches_tracked"] = weights[bn_track]
-                retval[f"{lbl}.{k}"] = torch.from_numpy(v)
+                mapped[f"{lbl}.{k}"] = torch.from_numpy(v)
 
+        retval = {k: mapped.get(k, v) for k, v in torch_weights.items()}  # Re-insert BN
         logger.debug("[KerasToTorch] Mapped weights: %s", len(retval))
         return retval
 
