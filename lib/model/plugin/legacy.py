@@ -1,5 +1,5 @@
 #! /usr/env/bin/python3
-"""Handles loading information from legacy .keras models"""
+""" Handles loading information from legacy .keras models """
 from __future__ import annotations
 
 import io
@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 class KerasConfigParser:
-    """Parses a nested keras config dictionary to a flattened dictionary of standardized layer
-    names as stored within the hdf weights file, mapped to: {inbound_node: input_shape}"""
+    """ Parses a nested keras config dictionary to a flattened dictionary of standardized layer
+    names as stored within the hdf weights file, mapped to: {inbound_node: input_shape} """
 
     @classmethod
     def _next_label(cls, cls_name: str, dst_name: str | None, counters: dict[str, int]) -> str:
-        """Compute the standardized (hdf-style) label for a single config node.
+        """ Compute the standardized (hdf-style) label for a single config node.
 
         Parameters
         ----------
@@ -54,9 +54,9 @@ class KerasConfigParser:
 
     @classmethod
     def _sub_model_output_name(cls, config: dict[str, T.Any]) -> str:
-        """Get the Keras name of a sub-model's output layer to ensure sub-model inputs are mapped
+        """ Get the Keras name of a sub-model's output layer to ensure sub-model inputs are mapped
         to the relevant sub-model output layer. For Faceswap sub-models with multiple outputs,
-        only the first output name is required"""
+        only the first output name is required """
         out_layers = config["config"]["output_layers"]
         return out_layers[0][0] if isinstance(out_layers[0], list) else out_layers[0]
 
@@ -65,8 +65,8 @@ class KerasConfigParser:
                              config: dict[str, T.Any],
                              mapping: dict[str, str],
                              outputs: dict[str, str]) -> None:
-        """Map a sub-model's internal input layer name to whatever produces its input from the
-        outer graph."""
+        """ Map a sub-model's internal input layer name to whatever produces its input from the
+        outer graph. """
         in_layers = config["config"]["input_layers"]
         in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
         in_names = [i[0] for i in in_layers]
@@ -89,7 +89,7 @@ class KerasConfigParser:
                            counters: dict[str, int],
                            mapping: dict[str, str],
                            outputs: dict[str, str]) -> dict[str, dict[str, list[int]]]:
-        """Flatten a nested Functional/Model layer, registering its input/output name mappings via
+        """ Flatten a nested Functional/Model layer, registering its input/output name mappings via
         recursing into its children.
 
         Parameters
@@ -135,8 +135,8 @@ class KerasConfigParser:
     def _extract_input_shapes(cls,
                               config: dict[str, T.Any],
                               mapping: dict[str, str]) -> dict[str, list[int]]:
-        """Build {producer_label: input_shape} for a leaf layer from its inbound_nodes, normalizing
-        Keras' inconsistent arg structure."""
+        """ Build {producer_label: input_shape} for a leaf layer from its inbound_nodes,
+        normalizing Keras' inconsistent arg structure. """
         in_shapes = {}
         for node in config["inbound_nodes"]:
             for arg in node["args"]:
@@ -153,7 +153,7 @@ class KerasConfigParser:
                 counters: dict[str, int] | None = None,
                 mapping: dict[str, str] | None = None,
                 outputs: dict[str, str] | None = None) -> dict[str, dict[str, list[int]]]:
-        """Recurse through the config.json file flattening to a matching format to the hdf weights
+        """ Recurse through the config.json file flattening to a matching format to the hdf weights
 
         Parameters
         ----------
@@ -194,7 +194,7 @@ class KerasConfigParser:
 
 
 class KerasModel:  # pylint:disable=too-few-public-methods
-    """Loads data from a .keras model
+    """ Loads data from a .keras model
 
     Parameters
     ----------
@@ -205,14 +205,14 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         logger.debug(parse_class_init(locals()))
         self._model_path = model_path
         self.state = self._load_state_file()
-        """The keras model's state file"""
+        """ The keras model's state file """
         self.layers: dict[str, dict[str, list[int]]] = {}
-        """Flattened dict of standardized layer names within the model in creation order as
+        """ Flattened dict of standardized layer names within the model in creation order as
         derived from the model's config.json, standardized to h5 file weights labels format mapped
-        to layer inbound nodes and shapes"""
+        to layer inbound nodes and shapes """
         self.weights = {}
-        """The stored layer name to numpy array for the loaded keras model in model creation
-        order"""
+        """ The stored layer name to numpy array for the loaded keras model in model creation
+        order """
         self._optimizer: dict[T.Literal["version", "optimizer", "scale"], T.Any] = {}
 
         self._load_keras_model()
@@ -220,7 +220,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
                      collected: None | dict[str, np.ndarray] = None) -> dict[str, np.ndarray]:
-        """Recurse through the data and collect model weights as numpy arrays
+        """ Recurse through the data and collect model weights as numpy arrays
 
         Parameters
         ----------
@@ -250,7 +250,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         raise RuntimeError(f"Unhandled h5py file type '{entry.name}': {type(entry)}")
 
     def _sort_weights(self, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """Sort the weights into model construction order
+        """ Sort the weights into model construction order
 
         Parameters
         ----------
@@ -274,7 +274,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         return retval
 
     def _load_state_file(self) -> dict[str, T.Any]:
-        """Load the legacy state file"""
+        """ Load the legacy state file """
         state_path = f"{os.path.splitext(self._model_path)[0]}_state.json"
         if not os.path.exists(state_path):
             logger.warning("Legacy state file '%s' not found. Model training history not imported",
@@ -287,7 +287,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         return retval
 
     def _load_keras_model(self):
-        """Load the objects we require out of the keras model file"""
+        """ Load the objects we require out of the keras model file """
         with zipfile.ZipFile(self._model_path, "r") as z_file:
             name_list = z_file.namelist()
             logger.debug("[KerasModel] zip file contents: %s", name_list)
@@ -325,7 +325,7 @@ ArrayT = T.TypeVar("ArrayT", torch.Tensor, np.ndarray)
 
 
 class KerasToTorch:
-    """Port weights from a keras trained Faceswap model to pyTorch format
+    """ Port weights from a keras trained Faceswap model to pyTorch format
 
     Parameters
     ----------
@@ -334,6 +334,10 @@ class KerasToTorch:
     keras_file
         The fullpath to the keras model file
     """
+    custom_mapping = {"iae": {"inter_side.0": "layers.functional_1",
+                              "inter_both": "layers.functional_2"}}
+    """ Mapping for instances where torch and keras build orders don't match up """
+
     def __init__(self, torch_model: FaceswapModel, keras_file: str) -> None:
         logger.debug(parse_class_init(locals()))
         self._keras = KerasModel(keras_file)
@@ -354,7 +358,7 @@ class KerasToTorch:
     @classmethod
     def _get_pixel_shuffler_convs(cls, layers: dict[str, dict[str, list[int]]]
                                   ) -> dict[str, int]:
-        """Obtain a list of convolutions that lead into pixel shuffler layers for channel re-
+        """ Obtain a list of convolutions that lead into pixel shuffler layers for channel re-
         ordering
 
         Parameters
@@ -406,7 +410,7 @@ class KerasToTorch:
     @classmethod
     def _get_dense_reshapes(cls, layers: dict[str, dict[str, list[int]]]
                             ) -> dict[str, tuple[bool, tuple[int, int, int]]]:
-        """Obtain the Dense layers that either follow a flatten or precede a reshape that require
+        """ Obtain the Dense layers that either follow a flatten or precede a reshape that require
         their weights reshaped for channel first ordering
 
         Parameters
@@ -474,7 +478,7 @@ class KerasToTorch:
                             current: list[str],
                             sub_model: str,
                             seen: set[str] | None = None) -> list[str]:
-        """From the given layers recurse backwards through all layers to the beginning of the sub-
+        """ From the given layers recurse backwards through all layers to the beginning of the sub-
         model
 
         Parameters
@@ -510,7 +514,7 @@ class KerasToTorch:
     def _get_mask_layers(self,
                          layers: dict[str, list[str]],
                          weights: dict[str, tuple[int, ...]]) -> list[str]:
-        """Identify keras layer names that are part of the mask output chain.
+        """ Identify keras layer names that are part of the mask output chain.
 
         Keras interleaves creation of upscales between main image and mask when learn_mask is
         enabled, whilst Torch creates image upscales first then mask. This can cause shape clash
@@ -558,8 +562,8 @@ class KerasToTorch:
         return retval
 
     def _get_state(self) -> dict[str, T.Any]:
-        """Obtain the legacy state dict removing any keys that may break downstream dataclasses and
-        updating any legacy items to be compatible with state version 2.0
+        """ Obtain the legacy state dict removing any keys that may break downstream dataclasses
+        and updating any legacy items to be compatible with state version 2.0
 
         Returns
         -------
@@ -632,7 +636,7 @@ class KerasToTorch:
 
     @classmethod
     def _prepare_keras_weights(cls, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """Some Keras weights need preparation for porting. Specifically:
+        """ Some Keras weights need preparation for porting. Specifically:
 
         SeparableConv2D split to 2x convs (replaced in original order)
 
@@ -668,7 +672,7 @@ class KerasToTorch:
                                                            "running_mean",
                                                            "running_var",
                                                            "num_batches_tracked"], ArrayT]]:
-        """Group the list of layer weights and biases by layer and remove trailing 'vars' label
+        """ Group the list of layer weights and biases by layer and remove trailing 'vars' label
 
         Parameters
         ----------
@@ -712,8 +716,8 @@ class KerasToTorch:
     def _dense_reorder(self,
                        name: str,
                        weights: dict[T.Literal["weight", "bias"], np.ndarray]) -> None:
-        """Shuffle the order that weights are stored for either the in-channels or out-channels for
-        Dense operations from channels last to channels first in place.
+        """ Shuffle the order that weights are stored for either the in-channels or out-channels
+        for Dense operations from channels last to channels first in place.
 
         This handles the bottleneck for most existing Faceswap models fairly effectively
 
@@ -724,7 +728,7 @@ class KerasToTorch:
         weights
             The weights and bias for a Dense layer being imported from Keras
         """
-        if name not in self._dense_reshapes:  # TODO confirm
+        if name not in self._dense_reshapes:
             logger.debug("[KerasToTorch] Skipping unmapped Dense layer '%s'", name)
             return
 
@@ -758,7 +762,7 @@ class KerasToTorch:
     def _pixel_shuffle_reorder(cls,
                                weights: dict[T.Literal["weight", "bias"], np.ndarray],
                                scale: int) -> None:
-        """Shuffle the order that weights are stored to channels first prior to feeding the pixel
+        """ Shuffle the order that weights are stored to channels first prior to feeding the pixel
         shuffler
 
         Parameters
@@ -784,17 +788,39 @@ class KerasToTorch:
                          "index of length %s", weights["bias"].shape, len(trans))
             weights["bias"] = weights["bias"][trans]
 
+    def _get_keras_key(self,
+                       torch_key: str,
+                       weight_shape: torch.Size,
+                       keras_grouped: dict[str, dict[T.Literal["weight",
+                                                               "bias",
+                                                               "running_mean",
+                                                               "running_var",
+                                                               "num_batches_tracked"], np.ndarray]]
+                       ) -> str:
+        """ Obtain the next qualifying weight key for the given torch key """
+        re_mapping = self.custom_mapping.get(self._torch.name, {})
+        re_map = next((x for x in [v if torch_key.startswith(k) else None
+                                   for k, v in re_mapping.items()]
+                       if x), None)
+        if re_map:
+            logger.debug("[KerasToTorch] Remapping '%s' to keras model '%s'", torch_key, re_map)
+        retval = next(k for k, v in keras_grouped.items()
+                      if ("mask" in torch_key and k in self._mask_layers
+                          or "mask" not in torch_key and k not in self._mask_layers)
+                      and (not re_map or k.startswith(re_map))
+                      and v["weight"].shape == weight_shape)
+        return retval
+
     def _map_weights(self,
                      torch_weights: dict[str, torch.Tensor],
                      keras_weights: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
-        """Convert the loaded keras weights to the format provided by the pre-existing torch
+        """ Convert the loaded keras weights to the format provided by the pre-existing torch
         weights and return as a compatible torch state_dict
 
         Returns
         -------
         The imported keras weights for importing into a torch plugin
         """
-        # TODO Test this for all models as topological unlikely to always work
         keras_weights = self._prepare_keras_weights(keras_weights)
         torch_filtered = {k: v for k, v in torch_weights.items()  # Doesn't exist in keras
                           if not k.endswith("num_batches_tracked")}  # Reinserted at end
@@ -841,10 +867,7 @@ class KerasToTorch:
         mapped: dict[str, torch.Tensor] = {}
         for lbl, weights in torch_grouped.items():
             try:
-                key = next(k for k, v in keras_grouped.items()
-                           if ("mask" in lbl and k in self._mask_layers or
-                               "mask" not in lbl and k not in self._mask_layers)
-                           and v["weight"].shape == weights["weight"].shape)
+                key = self._get_keras_key(lbl, weights["weight"].shape, keras_grouped)
             except:  # TODO remove
                 print()
                 # print(self._mask_layers)
@@ -877,8 +900,8 @@ class KerasToTorch:
         return retval
 
     def _build_state_dict(self) -> None:
-        """Load the model state information to the plugin, initialize the plugin and map keras
-        weights to the generated plugin's weights"""
+        """ Load the model state information to the plugin, initialize the plugin and map keras
+        weights to the generated plugin's weights """
         # Initialize empty model with loaded state settings
         self._torch.load_state_dict({"state": self._state})
         self._state_dict = {"version": 1.0,
@@ -890,7 +913,7 @@ class KerasToTorch:
 
     def state_dict(self) -> dict[T.Literal["model", "state", "optimizer", "version"],
                                  float | dict[str, T.Any]]:
-        """Get the migrated state_dict from the old keras model"""
+        """ Get the migrated state_dict from the old keras model """
         if not self._state_dict:
             self._build_state_dict()
         return self._state_dict
