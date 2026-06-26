@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Improved autoencoder for faceswap"""
+""" Improved autoencoder for faceswap """
 from __future__ import annotations
 
 import logging
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
-    """The IAE Encoder"""
+    """ The IAE Encoder """
     def __init__(self) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
@@ -31,7 +31,7 @@ class Encoder(nn.Module):
         self.flatten = nn.Flatten(start_dim=1)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the IAE encoder
+        """ Forward pass through the IAE encoder
 
         Parameters
         ----------
@@ -50,7 +50,7 @@ class Encoder(nn.Module):
 
 
 class Intermediate(nn.Module):
-    """The IAE Intermediate Network"""
+    """ The IAE Intermediate Network """
     def __init__(self) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
@@ -58,7 +58,7 @@ class Intermediate(nn.Module):
         self.dense2 = nn.Linear(1024, 512 * 4 * 4)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the IAE Intermediate layer
+        """ Forward pass through the IAE Intermediate layer
 
         Parameters
         ----------
@@ -75,7 +75,7 @@ class Intermediate(nn.Module):
 
 
 class Decoder(nn.Module):
-    """The IAE Faceswap Decoder Network.
+    """ The IAE Faceswap Decoder Network.
 
     Parameters
     ----------
@@ -100,7 +100,7 @@ class Decoder(nn.Module):
             self.mask_conv = nn.Conv2d(64, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the Faceswap decoder
+        """ Forward pass through the Faceswap decoder
 
         Parameters
         ----------
@@ -150,7 +150,7 @@ class IAE(ModelPlugin):
         self.decoder = Decoder(cfg_loss.learn_mask())
 
     def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the IAE model
+        """ Forward pass through the IAE model
 
         Parameters
         ----------
@@ -170,10 +170,3 @@ class IAE(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    p = IAE(2)
-    print(p)
-    print(dir(list(p.modules())[-1]))
-    print(list(p.modules())[-1].out_channels)
