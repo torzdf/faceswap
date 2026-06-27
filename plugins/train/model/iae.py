@@ -9,10 +9,11 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
+from lib.model.layers import UpscaleSubpixel
 from lib.model.layers_legacy import ConvBlockLegacy
-from lib.model.nn_blocks import UpscaleSubpixel
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
+
 from .base import ModelPlugin
 
 
