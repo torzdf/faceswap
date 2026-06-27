@@ -10,7 +10,7 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 from plugins.train import train_config as cfg
 
-from .layers_legacy import PixelShuffler, ReflectionPadding2D, Swish, KResizeImages
+from .layers_old import PixelShuffler, ReflectionPadding2D, Swish, KResizeImages
 from .normalization_legacy import InstanceNormalization
 
 if T.TYPE_CHECKING:
@@ -73,7 +73,7 @@ class Conv2D():  # pylint:disable=too-many-ancestors,abstract-method
         if kwargs.get("name", None) is None:
             filters = kwargs["filters"] if "filters" in kwargs else args[0]
             kwargs["name"] = _get_name(f"conv2d_{filters}")
-        #kwargs = {k: v for k, v in kwargs.items() if k != "is_upscale"}
+        kwargs = {k: v for k, v in kwargs.items() if k != "is_upscale"}
         self._conv2d = layers.Conv2D(*args, padding=padding, **kwargs)
         logger.debug("Initialized %s", self.__class__.__name__)
 

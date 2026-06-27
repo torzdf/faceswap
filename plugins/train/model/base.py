@@ -16,18 +16,25 @@ class ModelPlugin(nn.Module, abc.ABC):
         The pixel input size to the model. Default: 0 (invalid)
     is_rgb
         ``True`` for rgb. ``False`` for bgr. Default: ``False`` (bgr)
-
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int, input_size: int = 0, is_rgb: bool = False) -> None:
+    def __init__(self,
+                 num_identities: int,
+                 input_size: int = 0,
+                 is_rgb: bool = False,
+                 is_legacy: bool = False) -> None:
         assert input_size > 0
         self.num_identities = num_identities
         self.input_shape = (3, input_size, input_size)
         self.is_rgb = is_rgb
+        self.is_legacy = is_legacy
         super().__init__()
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
         params = ", ".join(f"{k}={v}" for k, v in {"num_identities": self.num_identities,
                                                    "input_size": self.input_shape[1],
-                                                   "is_rgb": self.is_rgb}.items())
+                                                   "is_rgb": self.is_rgb,
+                                                   "is_legacy": self.is_legacy}.items())
         return f"{self.__class__.__name__}({params})"

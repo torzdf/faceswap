@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tensorboard call back for PyTorch logging. Hopefully temporary until a native Keras version
-is implemented"""
+""" Tensorboard call back for PyTorch logging. Hopefully temporary until a native Keras version
+is implemented """
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class _Config:
-    """Manages the updatable config items
+    """ Manages the updatable config items
 
     Parameters
     ----------
@@ -33,12 +33,12 @@ class _Config:
         self._config, self._updatable = self._generate_config()
 
     def __repr__(self) -> str:
-        """Cleaner logging"""
+        """ Cleaner logging """
         return f"{self.__class__.__name__}(plugin_path={repr(self._import_path)})"
 
     @property
     def session_config(self) -> dict[str, T.Any]:
-        """The currently set values for any updatable config items"""
+        """ The currently set values for any updatable config items """
         return {k: v() for k, v in self._config.items() if k in self._updatable}
 
     def _get_global_options(self) -> dict[str, ConfigItem]:
@@ -107,7 +107,7 @@ class _Config:
         return config, updatable
 
     def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
-        """Load the contents of the state_dict into this state object
+        """ Load the contents of the state_dict into this state object
 
         Parameters
         ----------
@@ -136,25 +136,26 @@ class _Config:
         logger.debug("%s Loaded state_dict: %s", self._name, state_dict)
 
     def state_dict(self) -> dict[str, T.Any]:
-        """This _config object's state_dict"""
-        return {k: v() for k, v in self._config.items()}
+        """ This _config object's state_dict """
+        conf = {k: v() for k, v in self._config.items()}
+        return conf | {"version": 1.0}
 
 
 @dataclass
 class Session:
-    """Holds information about training sessions"""
+    """ Holds information about training sessions """
     batch_size: int
-    """Batch size for the session"""
+    """ Batch size for the session """
     config: dict[str, T.Any]
-    """Updatable config items for the session"""
+    """ Updatable config items for the session """
     timestamp: float = time.time()
-    """Session start time stamps"""
+    """ Session start time stamps """
     iterations: int = 0
-    """Number of iterations processed for the session"""
+    """ Number of iterations processed for the session """
 
 
 class State:
-    """Holds information about the training state of the model
+    """ Holds information about the training state of the model
 
     Parameters
     ----------
@@ -171,46 +172,46 @@ class State:
 
         self._batch_size = batch_size
         self.lr_finder = -1.0
-        """The value discovered from the learning rate finder. -1 if no value stored"""
+        """ The value discovered from the learning rate finder. -1 if no value stored """
         self._sessions: dict[int, Session] = {}
         self.lowest_avg_loss: float = 0.0
-        """float: The lowest average loss seen between save intervals. """
+        """ float: The lowest average loss seen between save intervals. """
         self.learning_rate_from_finder: bool = False
-        """bool. Set to ``True`` if learning rate is being read from the finder rather than user
-        config"""
+        """ bool. Set to ``True`` if learning rate is being read from the finder rather than user
+        config """
+        self.is_legacy = False
+        """ ``True`` if the model was originally created in Keras """
         self._config = _Config(plugin_path)
-        self._version = 2.0
-
         self._total_steps = 0
         self._step_called = False
 
     def __repr__(self) -> str:
-        """Cleaner logging"""
+        """ Cleaner logging """
         return self._repr
 
     @property
     def session_id(self) -> int:
-        """The current session ID. If training has not yet commenced, this will be the last session
-        ID trained. If the first training step has been reached, this will be the currently
-        training session ID"""
+        """ The current session ID. If training has not yet commenced, this will be the last
+        session ID trained. If the first training step has been reached, this will be the currently
+        training session ID """
         if not self._sessions:
             return 0
         return max(self._sessions)
 
     @property
     def iterations(self) -> int:
-        """The total number of iterations the model has been trained for"""
+        """ The total number of iterations the model has been trained for """
         return self._total_steps
 
     @property
     def session_iterations(self) -> int:
-        """The number of iterations the model has been trained for during the current session"""
+        """ The number of iterations the model has been trained for during the current session """
         if not self._sessions or self.session_id not in self._sessions:
             return 0
         return self._sessions[self.session_id].iterations
 
     def load_state_dict(self, state_dict: dict[str, T.Any]):
-        """Load the contents of the state_dict into this state object
+        """ Load the contents of the state_dict into this state object
 
         Parameters
         ----------
@@ -221,21 +222,23 @@ class State:
         self._sessions = {k: Session(**v) for k, v in state_dict.get("sessions", {}).items()}
         self.lowest_avg_loss = state_dict.get("lowest_avg_loss", 0.0)
         self.lr_finder = state_dict.get("lr_finder", -1.0)
+        self.is_legacy = state_dict.get("is_legacy", False)
         self._config.load_state_dict(state_dict.get("config", {}))
         logger.debug("[State] Loaded state_dict: %s", state_dict)
 
     def state_dict(self) -> dict[str, T.Any]:
-        """This State object's state_dict"""
+        """ This State object's state_dict """
         return {"iterations": self._total_steps,
                 "lowest_avg_loss": self.lowest_avg_loss,
                 "lr_finder": self.lr_finder,
                 "sessions": {k: asdict(v) for k, v in self._sessions.items()
                              if v.iterations > 0},
                 "config": self._config.state_dict(),
-                "version": self._version}
+                "is_legacy": self.is_legacy,
+                "version": 2.0}
 
     def step(self) -> None:
-        """Increment the session and total steps
+        """ Increment the session and total steps
 
         Parameters
         ----------

@@ -573,10 +573,6 @@ class KerasToTorch:
                   for k, v in self._keras.state.items()
                   if k not in ("mixed_precision_layers",  # Dropped
                                "sessions")}  # Handled later
-        retval["sessions"] = {int(i): {"batch_size" if k == "batchsize" else k: v
-                                       for k, v in s.items() if k != "no_logs"}
-                              for i, s in self._keras.state["sessions"].items()}
-
         legacy_defaults = {  # If these do not exist then state file is v. old. Set sane defaults
             "centering": "legacy",
             "coverage": 62.5,
@@ -629,7 +625,10 @@ class KerasToTorch:
                 del retval[old]
                 logger.info("[KerasToTorch] Updated state config from legacy '%s' to '%s: %s'",
                             old, new, old)
-
+        retval["sessions"] = {int(i): {"batch_size" if k == "batchsize" else k: v
+                                       for k, v in s.items() if k != "no_logs"}
+                              for i, s in self._keras.state["sessions"].items()}
+        retval["is_legacy"] = True
         retval["version"] = 2.0
         logger.debug("[KerasToTorch] Cleaned state: %s", retval)
         return retval

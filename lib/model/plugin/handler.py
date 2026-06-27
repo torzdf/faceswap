@@ -100,7 +100,7 @@ class FaceswapModel:
             self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
             logger.debug("%s Reloading plugin", self._name)
             old = self._plugin
-            self._plugin = old.__class__(self._num_identities)
+            self._plugin = old.__class__(self._num_identities, is_legacy=self.state.is_legacy)
             del old
         if "model" in state_dict:
             self._plugin.load_state_dict(T.cast(dict[str, T.Any], state_dict["model"]))
