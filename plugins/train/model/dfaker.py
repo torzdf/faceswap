@@ -11,7 +11,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import ConvBlockLegacy, UpscaleSubpixel, ResidualBlock
+from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.nn_blocks import UpscaleSubpixel, ResidualBlock
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -29,15 +30,26 @@ class Encoder(nn.Module):
     ----------
     input_size
         The pixel input size to the model
+    is_legacy
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self, input_size: int) -> None:
+    def __init__(self, input_size: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
-        self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
-        self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
-        self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
-
+        if is_legacy:
+            self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
+            self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
+            self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
+            self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
+        else:
+            self.conv1 = nn.Sequential(nn.Conv2d(3, 128, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+            self.conv2 = nn.Sequential(nn.Conv2d(128, 256, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+            self.conv3 = nn.Sequential(nn.Conv2d(256, 512, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+            self.conv4 = nn.Sequential(nn.Conv2d(512, 1024, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
         self.flatten = nn.Flatten(start_dim=1)
         dim = 4 if input_size == 64 else 8
         self.dense1 = nn.Linear(1024 * dim * dim, 1024)
@@ -130,16 +142,17 @@ class DFaker(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int = 2) -> None:
+    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
-
         output_size = cfg.output_size()
         if output_size not in (128, 256):
             logger.error("Dfaker output shape should be 128 or 256 px")
             sys.exit(1)
-        super().__init__(num_identities, input_size=output_size // 2)
-        self.encoder = Encoder(self.input_shape[1])
+        super().__init__(num_identities, input_size=output_size // 2, is_legacy=is_legacy)
+        self.encoder = Encoder(self.input_shape[1], self.is_legacy)
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask(), output_size)
                                       for _ in range(num_identities))
 

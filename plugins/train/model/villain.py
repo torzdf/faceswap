@@ -11,7 +11,8 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.layers import SeparableConv2d
-from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.nn_blocks import ResidualBlock, UpscaleSubpixel
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -29,31 +30,51 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
     ----------
     low_mem
         ``True`` for low memory version
+    is_legacy
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self, low_mem: bool) -> None:
+    def __init__(self, low_mem: bool, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.feats = 512 if low_mem else 1024
 
-        self.down1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same", leaky_slope=-1.)
+        if is_legacy:
+            self.down1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same", leaky_slope=-1.)
+        else:
+            self.down1 = nn.Conv2d(3, 128, 5, stride=2, padding=2)
         self.leaky1 = nn.LeakyReLU(0.2)
         self.res = nn.Sequential(*(ResidualBlock(128) for _ in range(8 if low_mem else 16)))
         self.leaky2 = nn.LeakyReLU(0.1)
-        self.down2 = nn.Sequential(ConvBlockLegacy(128, 128, 5, stride=2, padding="same"),
-                                   nn.PixelShuffle(2))
-        self.down3 = nn.Sequential(ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
-                                   nn.PixelShuffle(2))
-        self.down4 = nn.Sequential(
-            ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
-            SeparableConv2d(128, 256, 5, stride=2, padding=2, is_legacy=True),
-            nn.ReLU(inplace=True)
-            )
 
-        self.down5 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
+        if is_legacy:
+            self.down2 = nn.Sequential(ConvBlockLegacy(128, 128, 5, stride=2, padding="same"),
+                                       nn.PixelShuffle(2))
+            self.down3 = nn.Sequential(ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
+                                       nn.PixelShuffle(2))
+            self.down4 = nn.Sequential(
+                ConvBlockLegacy(32, 128, 5, stride=2, padding="same"),
+                SeparableConv2d(128, 256, 5, stride=2, padding=2, is_legacy=True),
+                nn.ReLU(inplace=True)
+                )
+            self.down5 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
+        else:
+            self.down2 = nn.Sequential(nn.Conv2d(128, 128, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True),
+                                       nn.PixelShuffle(2))
+            self.down3 = nn.Sequential(nn.Conv2d(32, 128, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True),
+                                       nn.PixelShuffle(2))
+            self.down4 = nn.Sequential(nn.Conv2d(32, 128, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True),
+                                       SeparableConv2d(128, 256, 5, stride=2, padding=2),
+                                       nn.ReLU(inplace=True))
+            self.down5 = nn.Sequential(nn.Conv2d(256, 512, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+
         if not low_mem:
             self.down5 = nn.Sequential(
                 self.down5,
-                SeparableConv2d(512, 1024, 5, stride=2, padding=2, is_legacy=True),
+                SeparableConv2d(512, 1024, 5, stride=2, padding=2, is_legacy=is_legacy),
                 nn.ReLU(inplace=True)
                 )
 
@@ -157,11 +178,13 @@ class Villain(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int = 2) -> None:
+    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__(num_identities, input_size=128)
-        self.encoder = Encoder(cfg.lowmem())
+        super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
+        self.encoder = Encoder(cfg.lowmem(), self.is_legacy)
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask())
                                       for _ in range(num_identities))
 

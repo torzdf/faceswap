@@ -10,8 +10,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import InstanceNormLegacy
-from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.model.layers_legacy import ConvBlockLegacy, InstanceNormLegacy
+from lib.model.nn_blocks import ResidualBlock, UpscaleSubpixel
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Unbalanced Encoder
+    """ The Unbalanced Encoder
 
     Parameters
     ----------
@@ -35,29 +35,61 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         The dimensions to reshape the bottleneck
     input_size
         The pixel input dimension to the encoder
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, complexity: int, bottleneck: int, dense_dim: int, input_size: int) -> None:
+    def __init__(self,
+                 complexity: int,
+                 bottleneck: int,
+                 dense_dim: int,
+                 input_size: int,
+                 is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.dense_dim = dense_dim
         self.dense_width = input_size // 16
         half_width = self.dense_width // 2
 
-        self.down1 = ConvBlockLegacy(3, complexity, 5, stride=2, leaky_slope=-1.)
-        self.norm1 = InstanceNormLegacy()
+        if is_legacy:
+            self.down1 = ConvBlockLegacy(3, complexity, 5, stride=2, leaky_slope=-1.)
+            self.norm1 = InstanceNormLegacy()
+        else:
+            self.down1 = nn.Conv2d(3, complexity, 5, stride=2, padding=2)
+            self.norm1 = nn.InstanceNorm2d(complexity, affine=True)
         self.leaky1 = nn.LeakyReLU(0.1, inplace=True)
-        self.down2 = ConvBlockLegacy(complexity, complexity * 2, 5, stride=2, leaky_slope=-1.)
-        self.norm2 = InstanceNormLegacy()
+
+        if is_legacy:
+            self.down2 = ConvBlockLegacy(complexity, complexity * 2, 5, stride=2, leaky_slope=-1.)
+            self.norm2 = InstanceNormLegacy()
+        else:
+            self.down2 = nn.Conv2d(complexity, complexity * 2, 5, stride=2, padding=2)
+            self.norm2 = nn.InstanceNorm2d(complexity * 2, affine=True)
         self.leaky2 = nn.LeakyReLU(0.1, inplace=True)
-        self.down3 = ConvBlockLegacy(complexity * 2, complexity * 4, 5, stride=2)
-        self.down4 = ConvBlockLegacy(complexity * 4, complexity * 6, 5, stride=2)
-        self.down5 = ConvBlockLegacy(complexity * 6, complexity * 8, 5, stride=2)
+
+        if is_legacy:
+            self.down3 = ConvBlockLegacy(complexity * 2, complexity * 4, 5, stride=2)
+            self.down4 = ConvBlockLegacy(complexity * 4, complexity * 6, 5, stride=2)
+            self.down5 = ConvBlockLegacy(complexity * 6, complexity * 8, 5, stride=2)
+        else:
+            self.down3 = nn.Sequential(
+                nn.Conv2d(complexity * 2, complexity * 4, 5, stride=2, padding=2),
+                nn.LeakyReLU(0.1, inplace=True)
+            )
+            self.down4 = nn.Sequential(
+                nn.Conv2d(complexity * 4, complexity * 6, 5, stride=2, padding=2),
+                nn.LeakyReLU(0.1, inplace=True)
+            )
+            self.down5 = nn.Sequential(
+                nn.Conv2d(complexity * 6, complexity * 8, 5, stride=2, padding=2),
+                nn.LeakyReLU(0.1, inplace=True)
+            )
+
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(complexity * 8 * half_width * half_width, bottleneck)
         self.dense2 = nn.Linear(bottleneck, self.dense_dim * self.dense_width * self.dense_width)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the Original encoder
+        """ Forward pass through the Original encoder
 
         Parameters
         ----------
@@ -84,7 +116,7 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Faceswap Unbalanced Decoder A Network.
+    """ The Faceswap Unbalanced Decoder A Network.
 
     Parameters
     ----------
@@ -121,7 +153,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_act = nn.Sigmoid()
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the RealFace A decoder
+        """ Forward pass through the RealFace A decoder
 
         Parameters
         ----------
@@ -152,7 +184,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Faceswap Unbalanced Decoder B Network.
+    """ The Faceswap Unbalanced Decoder B Network.
 
     Parameters
     ----------
@@ -200,7 +232,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_act = nn.Sigmoid()
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the RealFace A decoder
+        """ Forward pass through the RealFace A decoder
 
         Parameters
         ----------
@@ -237,19 +269,23 @@ class Unbalanced(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int = 2) -> None:
+    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+
         logger.debug(parse_class_init(locals()))
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")
-        super().__init__(num_identities, input_size=cfg.input_size())
+        super().__init__(num_identities, input_size=cfg.input_size(), is_legacy=is_legacy)
 
         dense_dim = 384 if cfg.lowmem() else 512
         self.encoder = Encoder(128 if cfg.lowmem() else cfg.complexity_encoder(),
                                512 if cfg.lowmem() else cfg.nodes(),
                                dense_dim,
-                               self.input_shape[-1])
+                               self.input_shape[-1],
+                               self.is_legacy)
         self.decoder_a = DecoderA(dense_dim,
                                   320 if cfg.lowmem() else cfg.complexity_decoder_a(),
                                   cfg_loss.learn_mask())
@@ -258,7 +294,7 @@ class Unbalanced(ModelPlugin):
                                   cfg_loss.learn_mask())
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the original model
+        """ Forward pass through the original model
 
         Parameters
         ----------
