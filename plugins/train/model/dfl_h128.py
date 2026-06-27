@@ -8,7 +8,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import ConvBlockLegacy, UpscaleSubpixel
+from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.nn_blocks import UpscaleSubpixel
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -26,17 +27,28 @@ class Encoder(nn.Module):
     ----------
     encoder_dim
         The size of the bottleneck and subsequent multiplier
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, encoder_dim: int) -> None:
+    def __init__(self, encoder_dim: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
         self.feats = encoder_dim
-        self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
-        self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
-        self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
-        self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
-
+        if is_legacy:
+            self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
+            self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
+            self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
+            self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
+        else:
+            self.conv1 = nn.Sequential(nn.Conv2d(3, 128, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+            self.conv2 = nn.Sequential(nn.Conv2d(128, 256, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+            self.conv3 = nn.Sequential(nn.Conv2d(256, 512, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+            self.conv4 = nn.Sequential(nn.Conv2d(512, 1024, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(1024 * 8 * 8, self.feats)
         self.dense2 = nn.Linear(self.feats, self.feats * 8 * 8)
@@ -126,12 +138,14 @@ class DFLH128(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int = 2) -> None:
+    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__(num_identities, input_size=128)
+        super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
         encoder_dim = 256 if cfg.lowmem() else 512
-        self.encoder = Encoder(encoder_dim)
+        self.encoder = Encoder(encoder_dim, self.is_legacy)
         self.decoders = nn.ModuleList(Decoder(encoder_dim, cfg_loss.learn_mask())
                                       for _ in range(num_identities))
 
