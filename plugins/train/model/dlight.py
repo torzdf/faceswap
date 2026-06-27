@@ -17,8 +17,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import UpSampling2dLegacy
-from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.model.layers_legacy import ConvBlockLegacy, UpSampling2dLegacy
+from lib.model.nn_blocks import ResidualBlock, UpscaleSubpixel
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -54,6 +54,8 @@ class Upscale2xBlock(nn.Module):
         Use a faster up-scaling method that may appear more rugged. Default: ``False``
     activation
         ``True`` to enable leaky_relu activation in pixel shuffler layer. Default: ``True``
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
     def __init__(self,
                  in_channels: int,
@@ -61,7 +63,8 @@ class Upscale2xBlock(nn.Module):
                  scale_factor: int = 2,
                  sr_ratio: float = 0.5,
                  fast: bool = False,
-                 activation: bool = True) -> None:
+                 activation: bool = True,
+                 is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.fast = fast
@@ -74,7 +77,10 @@ class Upscale2xBlock(nn.Module):
                                        leaky_slope=0.1 if activation else -1.0)
         if self.fast or (not self.fast and self.out_channels > 0):
             self.conv = nn.Conv2d(in_channels, self.out_channels, 3, padding=1)
-            self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation="bilinear")
+            if is_legacy:
+                self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation="bilinear")
+            else:
+                self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Call the Upscale Subpixel Layer.
@@ -114,38 +120,65 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         The base filters to use for each convolution
     encoder_dim
         The bottleneck size
+    is_legacy
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self, encoder_filters: int, encoder_dim: int) -> None:
+    def __init__(self, encoder_filters: int, encoder_dim: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
         in_chan = 3
         out_chan = encoder_filters // 2
-        self.conv1 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        if is_legacy:
+            self.conv1 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        else:
+            self.conv1 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+
         self.pool1 = nn.AvgPool2d((2, 2))
         self.leaky1 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        self.conv2 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        if is_legacy:
+            self.conv2 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        else:
+            self.conv2 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+
         self.pool2 = nn.AvgPool2d((2, 2))
         self.leaky2 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        self.conv3 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        if is_legacy:
+            self.conv3 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        else:
+            self.conv3 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+
         self.pool3 = nn.AvgPool2d((2, 2))
         self.leaky3 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        self.conv4 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        if is_legacy:
+            self.conv4 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        else:
+            self.conv4 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+
         self.pool4 = nn.AvgPool2d((2, 2))
         self.leaky4 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        self.conv5 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        if is_legacy:
+            self.conv5 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
+        else:
+            self.conv5 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
+                                       nn.LeakyReLU(0.1, inplace=True))
+
         self.pool5 = nn.AvgPool2d((2, 2))
         self.leaky5 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
@@ -207,8 +240,10 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         ``True`` to set a secondary task to learn a mask
     upscale_ratio
         The amount to upscale the input to the layer
+    is_legacy
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self, learn_mask: bool, upscale_ratio: int) -> None:
+    def __init__(self, learn_mask: bool, upscale_ratio: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
@@ -216,22 +251,40 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         dec_a_complexity = 256
         mask_complexity = 128
 
-        self.up1 = UpSampling2dLegacy(size=upscale_ratio, interpolation="bilinear")
-        self.up2 = Upscale2xBlock(1024, dec_a_complexity, fast=False)
-        self.up3 = Upscale2xBlock(dec_a_complexity, dec_a_complexity // 2, fast=False)
-        self.up4 = Upscale2xBlock(dec_a_complexity // 2, dec_a_complexity // 4, fast=False)
-        self.up5 = Upscale2xBlock(dec_a_complexity // 4, dec_a_complexity // 8, fast=False)
+        if is_legacy:
+            self.up1 = UpSampling2dLegacy(size=upscale_ratio, interpolation="bilinear")
+        else:
+            self.up1 = nn.UpsamplingBilinear2d(scale_factor=upscale_ratio)
+
+        self.up2 = Upscale2xBlock(1024, dec_a_complexity, fast=False, is_legacy=is_legacy)
+        self.up3 = Upscale2xBlock(dec_a_complexity,
+                                  dec_a_complexity // 2,
+                                  fast=False,
+                                  is_legacy=is_legacy)
+        self.up4 = Upscale2xBlock(dec_a_complexity // 2,
+                                  dec_a_complexity // 4,
+                                  fast=False,
+                                  is_legacy=is_legacy)
+        self.up5 = Upscale2xBlock(dec_a_complexity // 4,
+                                  dec_a_complexity // 8,
+                                  fast=False,
+                                  is_legacy=is_legacy)
         self.conv = nn.Conv2d(dec_a_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False)
-            self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.mask_up1 = Upscale2xBlock(1024, mask_complexity, fast=False, is_legacy=is_legacy)
+            self.mask_up2 = Upscale2xBlock(mask_complexity,
+                                           mask_complexity // 2,
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
                                            mask_complexity // 4,
-                                           fast=False)
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_up4 = Upscale2xBlock(mask_complexity // 4,
                                            mask_complexity // 8,
-                                           fast=False)
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -275,8 +328,10 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         ``True`` to set a secondary task to learn a mask
     upscale_ratio
         The amount to upscale the input to the layer
+    is_legacy
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self, learn_mask: bool, upscale_ratio: int) -> None:
+    def __init__(self, learn_mask: bool, upscale_ratio: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
@@ -288,7 +343,8 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
                                   dec_b_complexity,
                                   scale_factor=upscale_ratio,
                                   fast=False,
-                                  activation=False)
+                                  activation=False,
+                                  is_legacy=is_legacy)
         self.leaky1 = nn.LeakyReLU(negative_slope=0.2, inplace=True)
         self.res1 = nn.Sequential(OrderedDict({
             "res1": ResidualBlock(dec_b_complexity, bias=True),
@@ -297,7 +353,11 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         }))
 
         self.up2 = nn.Sequential(OrderedDict({
-            "up": Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=False, activation=False),
+            "up": Upscale2xBlock(dec_b_complexity,
+                                 dec_b_complexity,
+                                 fast=False,
+                                 activation=False,
+                                 is_legacy=is_legacy),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
             "res1": ResidualBlock(dec_b_complexity, bias=True),
             "res2": ResidualBlock(dec_b_complexity, bias=False),
@@ -308,7 +368,8 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             "up": Upscale2xBlock(dec_b_complexity,
                                  dec_b_complexity // 2,
                                  fast=False,
-                                 activation=False),
+                                 activation=False,
+                                 is_legacy=is_legacy),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
             "res": ResidualBlock(dec_b_complexity // 2, padding=1, bias=True)
         }))
@@ -317,7 +378,8 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             "up": Upscale2xBlock(dec_b_complexity // 2,
                                  dec_b_complexity // 4,
                                  fast=False,
-                                 activation=False),
+                                 activation=False,
+                                 is_legacy=is_legacy),
             "act": nn.LeakyReLU(negative_slope=0.2, inplace=True),
             "res": ResidualBlock(dec_b_complexity // 4, padding=1, bias=False),
             "bn": nn.BatchNorm2d(dec_b_complexity // 4, eps=0.001, momentum=0.01)
@@ -326,18 +388,24 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.up5 = Upscale2xBlock(dec_b_complexity // 4,
                                   dec_b_complexity // 8,
                                   fast=False,
-                                  activation=True)
+                                  activation=True,
+                                  is_legacy=is_legacy)
         self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.mask_up1 = Upscale2xBlock(512, mask_complexity, fast=False)
-            self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.mask_up1 = Upscale2xBlock(512, mask_complexity, fast=False, is_legacy=is_legacy)
+            self.mask_up2 = Upscale2xBlock(mask_complexity,
+                                           mask_complexity // 2,
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
                                            mask_complexity // 4,
-                                           fast=False)
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_up4 = Upscale2xBlock(mask_complexity // 4,
                                            mask_complexity // 8,
-                                           fast=False)
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -384,8 +452,10 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
         ``True`` to set a secondary task to learn a mask
     upscale_ratio
         The amount to upscale the input to the layer
+    is_legacy
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self, learn_mask: bool, upscale_ratio: int) -> None:
+    def __init__(self, learn_mask: bool, upscale_ratio: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
@@ -394,22 +464,39 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
         mask_complexity = 128
 
         self.up1 = UpscaleSubpixel(1024, dec_b_complexity, scale_factor=upscale_ratio)
-        self.up2 = Upscale2xBlock(dec_b_complexity, dec_b_complexity, fast=True)
-        self.up3 = Upscale2xBlock(dec_b_complexity, dec_b_complexity // 2, fast=True)
-        self.up4 = Upscale2xBlock(dec_b_complexity // 2, dec_b_complexity // 4, fast=True)
-        self.up5 = Upscale2xBlock(dec_b_complexity // 4, dec_b_complexity // 8, fast=True)
+        self.up2 = Upscale2xBlock(dec_b_complexity,
+                                  dec_b_complexity,
+                                  fast=True,
+                                  is_legacy=is_legacy)
+        self.up3 = Upscale2xBlock(dec_b_complexity,
+                                  dec_b_complexity // 2,
+                                  fast=True,
+                                  is_legacy=is_legacy)
+        self.up4 = Upscale2xBlock(dec_b_complexity // 2,
+                                  dec_b_complexity // 4,
+                                  fast=True,
+                                  is_legacy=is_legacy)
+        self.up5 = Upscale2xBlock(dec_b_complexity // 4,
+                                  dec_b_complexity // 8,
+                                  fast=True,
+                                  is_legacy=is_legacy)
 
         self.conv = nn.Conv2d(dec_b_complexity // 8, 3, 5, stride=1, padding=2)
 
         if self.learn_mask:
-            self.mask_up1 = Upscale2xBlock(512, mask_complexity, fast=False)
-            self.mask_up2 = Upscale2xBlock(mask_complexity, mask_complexity // 2, fast=False)
+            self.mask_up1 = Upscale2xBlock(512, mask_complexity, fast=False, is_legacy=is_legacy)
+            self.mask_up2 = Upscale2xBlock(mask_complexity,
+                                           mask_complexity // 2,
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_up3 = Upscale2xBlock(mask_complexity // 2,
                                            mask_complexity // 4,
-                                           fast=False)
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_up4 = Upscale2xBlock(mask_complexity // 4,
                                            mask_complexity // 8,
-                                           fast=False)
+                                           fast=False,
+                                           is_legacy=is_legacy)
             self.mask_conv = nn.Conv2d(mask_complexity // 8, 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -451,13 +538,15 @@ class Dlight(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int = 2) -> None:
+    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")
-        super().__init__(num_identities, input_size=128)
+        super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
 
         learn_mask = cfg_loss.learn_mask()
         features = {"lowmem": 0, "fair": 1, "best": 2}[cfg.features()]
@@ -476,9 +565,9 @@ class Dlight(ModelPlugin):
                        2: 1536 + bonum_fortunam}[features]
 
         dec_b = DecoderB if details > 0 else DecoderBFast
-        self.encoder = Encoder(encoder_filters, encoder_dim)
-        self.decoders = nn.ModuleList((DecoderA(learn_mask, upscale_ratio),
-                                       dec_b(learn_mask, upscale_ratio)))
+        self.encoder = Encoder(encoder_filters, encoder_dim, self.is_legacy)
+        self.decoders = nn.ModuleList((DecoderA(learn_mask, upscale_ratio, self.is_legacy),
+                                       dec_b(learn_mask, upscale_ratio, self.is_legacy)))
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
         """ Forward pass through the Dlight model

@@ -36,7 +36,7 @@ features = ConfigItem(
     datatype=str,
     default="best",
     group="settings",
-    info="Higher settings will allow learning more features such as tatoos, piercing and "
+    info="Higher settings will allow learning more features such as tattoos, piercing and "
          "wrinkles.\nStrongly affects VRAM usage.",
     choices=["lowmem", "fair", "best"],
     gui_radio=True,

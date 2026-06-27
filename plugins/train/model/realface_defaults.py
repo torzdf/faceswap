@@ -31,7 +31,7 @@ from lib.config import ConfigItem
 
 HELPTEXT = (
     "An extra detailed variant of Original model.\n"
-    "Incorporates ideas from Bryanlyon and inspiration from the Villain model.\n"
+    "Incorporates ideas from Bryan Lyon and inspiration from the Villain model.\n"
     "Requires about 6GB-8GB of VRAM (batchsize 8-16).\n"
 )
 

@@ -15,7 +15,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.nn_blocks import ConvBlockLegacy, ResidualBlock, UpscaleSubpixel
+from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.nn_blocks import ResidualBlock, UpscaleSubpixel
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
-    """The RealFace Encoder
+    """ The RealFace Encoder
 
     Parameters
     ----------
@@ -35,29 +36,44 @@ class Encoder(nn.Module):
         Encoder Convolution Layer Complexity
     num_downscale
         The number of downscale blocks
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, complexity: int, num_downscale: int = 4) -> None:
+    def __init__(self, complexity: int, num_downscale: int = 4, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
         channels = [3] + [complexity * 2 ** i for i in range(num_downscale)]
-        blocks: list[nn.Module] = [
-            nn.Sequential(ConvBlockLegacy(channels[i], channels[i + 1], 5,
+        if is_legacy:
+            blocks: list[nn.Module] = [
+                nn.Sequential(ConvBlockLegacy(channels[i], channels[i + 1], 5,
+                                              stride=2,
+                                              padding="same",
+                                              leaky_slope=0.2),
+                              ResidualBlock(channels[i + 1], bias=True),
+                              ResidualBlock(channels[i + 1], bias=True))
+                for i in range(num_downscale - 1)
+                ]
+            blocks.append(ConvBlockLegacy(channels[-2], channels[-1], 5,
                                           stride=2,
                                           padding="same",
-                                          leaky_slope=0.2),
-                          ResidualBlock(channels[i + 1], bias=True),
-                          ResidualBlock(channels[i + 1], bias=True))
-            for i in range(num_downscale - 1)
-            ]
-        blocks.append(ConvBlockLegacy(channels[-2], channels[-1], 5,
-                                      stride=2,
-                                      padding="same",
-                                      leaky_slope=0.1))
+                                          leaky_slope=0.1))
+        else:
+            blocks = [nn.Sequential(nn.Conv2d(channels[i], channels[i + 1], 5,
+                                              stride=2,
+                                              padding=2),
+                                    nn.LeakyReLU(0.2, inplace=True),
+                                    ResidualBlock(channels[i + 1], bias=True),
+                                    ResidualBlock(channels[i + 1], bias=True))
+                      for i in range(num_downscale - 1)]
+            blocks.extend([nn.Conv2d(channels[-2], channels[-1], 5,
+                                     stride=2,
+                                     padding=2),
+                           nn.LeakyReLU(0.1, inplace=True)])
         self.down = nn.Sequential(*blocks)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the Original encoder
+        """ Forward pass through the Original encoder
 
         Parameters
         ----------
@@ -72,7 +88,7 @@ class Encoder(nn.Module):
 
 
 class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Faceswap RealFace Decoder A Network.
+    """ The Faceswap RealFace Decoder A Network.
 
     Parameters
     ----------
@@ -131,7 +147,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_conv = nn.Conv2d(m_channels[-1], 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the RealFace A decoder
+        """ Forward pass through the RealFace A decoder
 
         Parameters
         ----------
@@ -166,7 +182,7 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
 
 
 class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """The Faceswap RealFace Decoder B Network.
+    """ The Faceswap RealFace Decoder B Network.
 
     Parameters
     ----------
@@ -229,7 +245,7 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
             self.mask_conv = nn.Conv2d(m_channels[-1], 1, 5, stride=1, padding=2)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Forward pass through the RealFace B decoder
+        """ Forward pass through the RealFace B decoder
 
         Parameters
         ----------
@@ -270,8 +286,10 @@ class RealFace(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
     """
-    def __init__(self, num_identities: int = 2) -> None:
+    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
@@ -285,9 +303,11 @@ class RealFace(ModelPlugin):
         dense_width, num_upscale = self._get_dense_width_upscaler_numbers(input_size,
                                                                           downscale_ratio)
         dense_filters = (int(1024 - (dense_width - 4) * 64) // 16) * 16
-        super().__init__(num_identities, input_size=input_size)
+        super().__init__(num_identities, input_size=input_size, is_legacy=is_legacy)
 
-        self.encoder = Encoder(cfg.complexity_encoder(), num_downscale=num_downscale)
+        self.encoder = Encoder(cfg.complexity_encoder(),
+                               num_downscale=num_downscale,
+                               is_legacy=self.is_legacy)
 
         dec_input_filters = cfg.complexity_encoder() * 2 ** (num_downscale - 1)
         dec_upscale_width = cfg.input_size() // downscale_ratio
@@ -337,7 +357,7 @@ class RealFace(ModelPlugin):
         return dense_width, num_upscale
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
-        """Forward pass through the original model
+        """ Forward pass through the original model
 
         Parameters
         ----------
@@ -355,10 +375,3 @@ class RealFace(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    p = RealFace(2)
-    i = [torch.rand((1, 3, 64, 64)), torch.rand((1, 3, 64, 64))]
-    out = p(i)
-    print([[k.shape for k in j] for j in out])
