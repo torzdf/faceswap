@@ -137,9 +137,9 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         self.learn_mask = learn_mask
 
         self.up1 = nn.Sequential(UpscaleSubpixel(in_channels, complexity, kernel_size=5),
-                                 nn.Dropout(0.25))
+                                 nn.Dropout(0.25, inplace=True))
         self.up2 = nn.Sequential(UpscaleSubpixel(complexity, complexity, kernel_size=5),
-                                 nn.Dropout(0.15 if in_channels < 512 else 0.25))
+                                 nn.Dropout(0.15 if in_channels < 512 else 0.25, inplace=True))
         self.up3 = UpscaleSubpixel(complexity, complexity // 2, kernel_size=5)
         self.up4 = UpscaleSubpixel(complexity // 2, complexity // 4, kernel_size=5)
         self.conv = nn.Conv2d(complexity // 4, 3, 5, stride=1, padding=2)

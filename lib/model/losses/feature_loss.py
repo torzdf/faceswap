@@ -195,7 +195,7 @@ class _LPIPSLinearNet(nn.Module):
             assert isinstance(in_channels, int)
             conv = nn.Conv2d(in_channels, 1, 1, stride=1, padding=0, bias=False)
             if self._use_dropout:
-                layers.append(nn.Sequential(nn.Dropout(), conv))
+                layers.append(nn.Sequential(nn.Dropout(inplace=True), conv))
             else:
                 layers.append(conv)
 

@@ -11,7 +11,7 @@ from torch import nn
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from .layers_legacy import SamePad2d
+from .layers_legacy import SamePad2d, UpSampling2dLegacy
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +153,199 @@ class SeparableConv2d(nn.Module):
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x
+
+
+class Upscale2xBlock(nn.Module):
+    """ Custom hybrid upscale layer for sub-pixel up-scaling.
+
+    Most of up-scaling is approximating lighting gradients which can be accurately achieved
+    using linear fitting. This layer attempts to improve memory consumption by splitting
+    with bilinear and convolutional layers so that the sub-pixel update will get details
+    whilst the bilinear filter will get lighting.
+
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
+
+    Parameters
+    ----------
+    in_channels
+        The input channels to the upscale block
+    out_channels
+        The output channels from the upscale block
+    scale_factor
+        The amount to upscale by image. Default: `2`
+    sr_ratio
+        The proportion of super resolution (pixel shuffler) filters to use. Non-fast mode only.
+        Default: `0.5`
+    fast
+        Use a faster up-scaling method that may appear more rugged. Default: ``False``
+    activation
+        ``True`` to enable leaky_relu activation in pixel shuffler layer. Default: ``True``
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
+    """
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 scale_factor: int = 2,
+                 sr_ratio: float = 0.5,
+                 fast: bool = False,
+                 activation: bool = True,
+                 is_legacy: bool = False) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.fast = fast
+        self.out_channels = (out_channels if fast
+                             else out_channels - int(out_channels * sr_ratio))
+
+        self.upscale = UpscaleSubpixel(in_channels,
+                                       self.out_channels,
+                                       scale_factor=scale_factor,
+                                       leaky_slope=0.1 if activation else -1.0)
+        if self.fast or (not self.fast and self.out_channels > 0):
+            self.conv = nn.Conv2d(in_channels, self.out_channels, 3, padding=1)
+            if is_legacy:
+                self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation="bilinear")
+            else:
+                self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Call the Upscale Subpixel Layer.
+
+        Parameters
+        ----------
+        inputs
+            The input to the Upscale Subpixel layer
+
+        Returns
+        -------
+        The output tensor from the Upscale Subpixel Layer
+        """
+        x = inputs
+        if self.fast:
+            x = self.conv(x)
+            x = self.upsample(x)
+            x1 = self.upscale(inputs)
+            x = x1 + x
+        else:
+            x_sr = self.upscale(x)
+            if self.out_channels > 0:
+                x = self.conv(x)
+                x = self.upsample(x)
+                x = torch.concat([x_sr, x], dim=1)
+            else:
+                x = x_sr
+        return x
+
+
+class UpscaleDNY(nn.Module):
+    """ Upscale block that implements methodology similar to the Disney Research Paper using an
+    upsampling2D block and 2 x convolutions
+
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
+
+    References
+    ----------
+    https://studios.disneyresearch.com/2020/06/29/high-resolution-neural-face-swapping-for-visual-effects/
+
+    Parameters
+    ----------
+    in_channels
+        The input channels to the upscale block
+    out_channels
+        The output channels from the upscale block
+    scale_factor
+        The amount to upscale the image. Default: `2`
+    interpolation: ["nearest", "bilinear"], optional
+        Interpolation to use for up-sampling. Default: "bilinear"
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default ``False``
+    """
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 scale_factor: int = 2,
+                 interpolation: T.Literal["nearest", "bilinear"] = "bilinear",
+                 is_legacy: bool = False) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        if is_legacy:
+            self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation=interpolation)
+        elif interpolation == "nearest":
+            self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor)
+        else:
+            self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
+        self.convs = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                                   nn.LeakyReLU(0.2, inplace=True),
+                                   nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                                   nn.LeakyReLU(0.2, inplace=True))
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Forward through the UpscaleDNY block
+
+        Parameters
+        ----------
+        inputs
+            The input to the block
+
+        Returns
+        -------
+        The output from the block
+        """
+        return self.convs(self.upsample(inputs))
+
+
+class UpscaleResizeImages(nn.Module):
+    """ Upscale block that originally used the Keras Backend function resize_images to perform the
+    up scaling, now adapted for torch. Similar in methodology to the :class:`Upscale2xBlock`
+
+    Parameters
+    ----------
+    in_channels
+        The input channels to the upscale block
+    out_channels
+        The output channels from the upscale block
+    scale_factor
+        The amount to upscale the image. Default: `2`
+    interpolation: ["nearest", "bilinear"], optional
+        Interpolation to use for up-sampling. Default: "bilinear"
+    """
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 scale_factor: int = 2,
+                 interpolation: T.Literal["nearest", "bilinear"] = "bilinear") -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        if interpolation == "nearest":
+            self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor)
+        else:
+            self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
+
+        self.conv = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.conv_trans = nn.ConvTranspose2d(out_channels,
+                                             out_channels,
+                                             3,
+                                             stride=2,
+                                             padding=2)  # TODO CONFIRM PADDING + IN-PADDING VS OUT_PADDING + REFLECT PADDING GETS ADDED
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Call the Faceswap Resize Images Layer.
+
+        Parameters
+        ----------
+        inputs
+            The input to the layer
+
+        Returns
+        -------
+        The output tensor from the Upscale Layer
+        """
+        x_sr = self.conv(self.upsample(inputs))
+        x_us = self.conv_trans(inputs)
+        return self.act(x_sr + x_us)
 
 
 class UpscaleSubpixel(nn.Module):

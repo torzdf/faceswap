@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import ResidualBlock, UpscaleSubpixel
+from lib.model.layers import ResidualBlock, UpscaleSubpixel, Upscale2xBlock
 from lib.model.layers_legacy import ConvBlockLegacy, UpSampling2dLegacy
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
@@ -27,89 +27,6 @@ from . import dlight_defaults as cfg
 
 
 logger = logging.getLogger(__name__)
-
-
-class Upscale2xBlock(nn.Module):
-    """ Custom hybrid upscale layer for sub-pixel up-scaling.
-
-    Most of up-scaling is approximating lighting gradients which can be accurately achieved
-    using linear fitting. This layer attempts to improve memory consumption by splitting
-    with bilinear and convolutional layers so that the sub-pixel update will get details
-    whilst the bilinear filter will get lighting.
-
-    Adds reflection padding if it has been selected by the user, and other post-processing
-    if requested by the plugin.
-
-    Parameters
-    ----------
-    in_channels
-        The input channels to the upscale block
-    out_channels
-        The output channels from the upscale block
-    scale_factor
-        The amount to upscale by image. Default: `2`
-    sr_ratio
-        The proportion of super resolution (pixel shuffler) filters to use. Non-fast mode only.
-        Default: `0.5`
-    fast
-        Use a faster up-scaling method that may appear more rugged. Default: ``False``
-    activation
-        ``True`` to enable leaky_relu activation in pixel shuffler layer. Default: ``True``
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
-    """
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 scale_factor: int = 2,
-                 sr_ratio: float = 0.5,
-                 fast: bool = False,
-                 activation: bool = True,
-                 is_legacy: bool = False) -> None:
-        logger.debug(parse_class_init(locals()))
-        super().__init__()
-        self.fast = fast
-        self.out_channels = (out_channels if fast
-                             else out_channels - int(out_channels * sr_ratio))
-
-        self.upscale = UpscaleSubpixel(in_channels,
-                                       self.out_channels,
-                                       scale_factor=scale_factor,
-                                       leaky_slope=0.1 if activation else -1.0)
-        if self.fast or (not self.fast and self.out_channels > 0):
-            self.conv = nn.Conv2d(in_channels, self.out_channels, 3, padding=1)
-            if is_legacy:
-                self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation="bilinear")
-            else:
-                self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Call the Upscale Subpixel Layer.
-
-        Parameters
-        ----------
-        inputs
-            The input to the Upscale Subpixel layer
-
-        Returns
-        -------
-        The output tensor from the Upscale Subpixel Layer
-        """
-        x = inputs
-        if self.fast:
-            x = self.conv(x)
-            x = self.upsample(x)
-            x1 = self.upscale(inputs)
-            x = x1 + x
-        else:
-            x_sr = self.upscale(x)
-            if self.out_channels > 0:
-                x = self.conv(x)
-                x = self.upsample(x)
-                x = torch.concat([x_sr, x], dim=1)
-            else:
-                x = x_sr
-        return x
 
 
 class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
@@ -186,9 +103,9 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         in_chan += out_chan
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(in_chan * 4 * 4, encoder_dim)
-        self.drop1 = nn.Dropout(p=0.05)
+        self.drop1 = nn.Dropout(p=0.05, inplace=True)
         self.dense2 = nn.Linear(encoder_dim, 1024 * 4 * 4)
-        self.drop2 = nn.Dropout(p=0.05)
+        self.drop2 = nn.Dropout(p=0.05, inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Forward pass through the Dlight encoder

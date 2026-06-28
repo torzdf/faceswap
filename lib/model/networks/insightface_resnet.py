@@ -245,7 +245,7 @@ class IRNet(nn.Module):
         """
         fc_scale = 7 * 7 if input_size == 112 else 14 * 14
         return nn.Sequential(nn.BatchNorm2d(num_features),
-                             nn.Dropout(0.4),
+                             nn.Dropout(0.4, inplace=True),
                              Flatten(),
                              nn.Linear(num_features * fc_scale, 512),
                              nn.BatchNorm1d(512, affine=False))
