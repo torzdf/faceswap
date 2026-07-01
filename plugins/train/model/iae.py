@@ -183,8 +183,8 @@ class IAE(ModelPlugin):
         The output for each identity training through the model
         """
         encoded = [self.encoder(x) for x in inputs]
-        inters = [torch.concat([int(enc), self.inter_both(enc)], dim=1)
-                  for enc, int in zip(encoded, self.inter_side)]
+        inters = [torch.concat([inter(enc), self.inter_both(enc)], dim=1)
+                  for enc, inter in zip(encoded, self.inter_side)]
         decoded = tuple(self.decoder(x) for x in inters)
         return decoded
 
