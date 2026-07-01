@@ -76,6 +76,66 @@ class AdaIN(nn.Module):
         return (1.0 - self.style_strength) * content + self.style_strength * stylized
 
 
+class ChannelLayerNorm(nn.Module):
+    """ nn.LayerNorm applied over the channel dim of channels-first tensors.
+
+    Parameters
+    ----------
+    num_features
+        The number of channels in the input Tensor
+    eps
+        Epsilon to apply to nn.LayerNorm. Default: 1e-5
+    """
+    def __init__(self, num_features: int, eps: float = 1e-5) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.norm = nn.LayerNorm(num_features, eps=eps)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Apply Channel First Layer Normalization
+
+        Parameters
+        ----------
+        inputs
+            The Tensor to normalize
+
+        Returns
+        -------
+        The normalized tenor
+        """
+        return self.norm(inputs.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
+class ChannelRMSNorm(nn.Module):
+    """ nn.RMSNorm applied over the channel dim of channels-first tensors.
+
+    Parameters
+    ----------
+    num_features
+        The number of channels in the input Tensor
+    eps
+        Epsilon to apply to nn.RMSNorm. Default: ``None`` (use torch's configured epsilon)
+    """
+    def __init__(self, num_features: int, eps: float | None = None) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.norm = nn.RMSNorm(num_features, eps=eps)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Apply Channel First RMS Normalization
+
+        Parameters
+        ----------
+        inputs
+            The Tensor to normalize
+
+        Returns
+        -------
+        The normalized tenor
+        """
+        return self.norm(inputs.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
 class GaussianNoise(nn.Module):
     """Additive zero-centered Gaussian noise, active only during training.
 
