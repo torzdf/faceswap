@@ -16,6 +16,132 @@ from .layers_legacy import SamePad2d, UpSampling2dLegacy
 logger = logging.getLogger(__name__)
 
 
+class AdaIN(nn.Module):
+    """ Adaptive Instance Normalization Layer for Pytorch.
+
+    Parameters
+    ----------
+    dim
+        The axis that should be normalized (typically the features axis). For instance, after a
+        `Conv2D` layer set `axis=1`. Setting `dim=None` will normalize all values in each instance
+        of the batch. Default: 1
+    style_strength
+        The strength of style to apply to the content
+    epsilon
+        Small float added to variance to avoid dividing by zero. Default: 1e-3
+
+    References
+    ----------
+    Arbitrary Style Transfer in Real-time with Adaptive Instance Normalization -
+    https://arxiv.org/abs/1703.06868
+    """
+
+    def __init__(self, dim: int | None = 1, style_strength: float = 1.0, epsilon: float = 1e-3
+                 ) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        assert dim != 0, "dim cannot be the batch dimension"
+        self.dim = dim
+        self.style_strength = style_strength
+        self.epsilon = epsilon
+
+    def forward(self, content: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+        """ Apply Adaptive Instance Normalization
+
+        Parameters
+        ----------
+        content
+            The content image tensor
+        style
+            The style image Tensor
+
+        Returns
+        -------
+        The content with Adaptive Instance Normalization applied
+        """
+        reduction_axes = list(range(1, len(content.shape)))
+
+        if self.dim is not None:
+            del reduction_axes[self.dim - 1]
+
+        content_std, content_mean = torch.std_mean(content, dim=reduction_axes, keepdim=True)
+        style_std, style_mean = torch.std_mean(style, dim=reduction_axes, keepdim=True)
+
+        normed = (content - content_mean) / (content_std + self.epsilon)
+        stylized = normed * style_std + style_mean
+
+        if self.style_strength == 1.0:
+            return stylized
+
+        return (1.0 - self.style_strength) * content + self.style_strength * stylized
+
+
+class GaussianNoise(nn.Module):
+    """Additive zero-centered Gaussian noise, active only during training.
+
+    Parameters
+    ----------
+    stddev
+        Standard deviation of the noise distribution. default: 0.1
+    seed
+        Random seed to enable deterministic behavior. default: ``None`` (disabled)
+    """
+    def __init__(self, stddev: float = 0.1, seed: int | None = None) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.stddev = stddev
+        self.seed = seed if seed is None else torch.Generator()
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Call the GaussianNoise layer
+
+        Parameters
+        ----------
+        inputs
+            The input to the GaussianNoise layer
+
+        Returns
+        -------
+        The input tensor added to random gaussian noise
+        """
+        if not self.training or self.stddev == 0:
+            return inputs
+        x = torch.randn_like(inputs, generator=self.seed) * self.stddev
+        return inputs + x
+
+
+class Reshape(nn.Module):
+    """ Convenience layer for defining reshapes within module's __init__
+
+    Parameters
+    ----------
+    shape
+        The shape to reshape to
+    is_contiguous
+        ``True`` if the input tensor is contiguous (when view will be used) or ``False`` to use
+        reshape. default: ``False``
+    """
+    def __init__(self, shape: tuple[int, ...], is_contiguous: bool = False) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self.shape = shape
+        self.reshape = torch.Tensor.view if is_contiguous else torch.reshape
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Call the Reshape layer
+
+        Parameters
+        ----------
+        inputs
+            The input to the Reshape layer
+
+        Returns
+        -------
+        The reshaped tensor
+        """
+        return self.reshape(inputs, (inputs.shape[0], *self.shape))
+
+
 class ResidualBlock(nn.Module):
     """ Residual block adapted from dfaker, using legacy keras padding
 
@@ -278,7 +404,7 @@ class UpscaleDNY(nn.Module):
             self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
         self.convs = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, padding=1),
                                    nn.LeakyReLU(0.2, inplace=True),
-                                   nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                                   nn.Conv2d(out_channels, out_channels, 3, padding=1),
                                    nn.LeakyReLU(0.2, inplace=True))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -324,7 +450,7 @@ class UpscaleResizeImages(nn.Module):
             self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
 
         self.conv = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.conv_trans = nn.ConvTranspose2d(out_channels,
+        self.conv_trans = nn.ConvTranspose2d(in_channels,
                                              out_channels,
                                              3,
                                              stride=2,
