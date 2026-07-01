@@ -136,7 +136,7 @@ enc_architecture = ConfigItem(
          "trained on face related tasks. All have a default input size of 224px except for "
          "ViT-L-14-336px that has an input size of 336px. Ref: Learning Transferable Visual "
          "Models From Natural Language Supervision (2021): https://arxiv.org/abs/2103.00020"
-         "\n\n\tconvnext: There are 6 varations of increasing complexity. All have a default "
+         "\n\n\tconvnext: There are 6 variations of increasing complexity. All have a default "
          "input size of 224px. Ref: A ConvNet for the 2020s (2022): "
          "https://arxiv.org/abs/1608.06993"
          "\n\n\tdensenet: (32px-224px). Ref: Densely Connected Convolutional Networks "
@@ -153,7 +153,7 @@ enc_architecture = ConfigItem(
          "32px for all variants. The maximum input resolution for each variant is: b0: 224px, "
          "b1: 240px, b2: 260px, b3: 300px, s: 384px, m: 480px, l: 480px. Ref: EfficientNetV2: "
          "Smaller Models and Faster Training (2021): https://arxiv.org/abs/2104.00298"
-         "\n\n\tfs_original: (32px - 1024px). A configurable variant of the original facewap "
+         "\n\n\tfs_original: (32px - 1024px). A configurable variant of the original faceswap "
          "encoder. ImageNet weights cannot be loaded for this model. Additional parameters "
          "can be configured with the 'fs_enc' options. A version of this encoder is used in "
          "the following models: Original, Original (lowmem), Dfaker, DFL-H128, DFL-SAE, IAE, "
@@ -176,7 +176,7 @@ enc_architecture = ConfigItem(
          "https://arxiv.org/abs/1707.07012"
          "\n\n\tresnet: (32px - 224px). Deep Residual Learning for Image Recognition (2015): "
          "https://arxiv.org/abs/1512.03385"
-         "\n\n\tvgg: (32px - 224px). Very Deep Convolutional Networks for Large-Scale Image "
+         "\n\n\t vgg: (32px - 224px). Very Deep Convolutional Networks for Large-Scale Image "
          "Recognition (2014): https://arxiv.org/abs/1409.1556"
          "\n\n\txception: (71px - 229px). Ref: Deep Learning with Depthwise Separable "
          "Convolutions (2017): https://arxiv.org/abs/1409.1556.\n",
@@ -452,7 +452,7 @@ dec_upscale_method = ConfigItem(
          "\n\tupscale_hybrid - Developed by Andenixa. Uses a combination of PixelShuffler and "
          "Upsampling2D to upscale, saving about 1/3rd of VRAM of the heaviest methods."
          "\n\tupscale_dny - An alternative upscale implementation using Upsampling2D to "
-         "upsale.",
+         "upscale.",
     choices=["subpixel", "resize_images", "upscale_fast", "upscale_hybrid", "upscale_dny"],
     gui_radio=True,
     fixed=True)
@@ -466,7 +466,7 @@ dec_upscales_in_fc = ConfigItem(
     info="It is possible to place some of the upscales at the end of the fully connected "
          "model. For models with split decoders, but a shared fully connected layer, this "
          "would have the effect of saving some VRAM but possibly at the cost of introducing "
-         "artefacts. For models with a shared decoder but split fully connected layers, this "
+         "artifacts. For models with a shared decoder but split fully connected layers, this "
          "would have the effect of increasing VRAM usage by processing some of the upscales "
          "for each side rather than together.",
     fixed=True)
@@ -631,7 +631,7 @@ fs_original_min_filters = ConfigItem(
     datatype=int,
     default=128,
     group="faceswap encoder configuration",
-    info="Faceswap Encoder only: The minumum number of filters to use for encoder "
+    info="Faceswap Encoder only: The minimum number of filters to use for encoder "
          "convolutions. (i.e. the number of filters to use for the first encoder layer).",
     min_max=(16, 2048),
     rounding=64,
@@ -703,7 +703,7 @@ mobilenet_minimalistic = ConfigItem(
     datatype=bool,
     default=False,
     group="mobilenet encoder configuration",
-    info="Use a minimilist version of MobilenetV3.\n"
+    info="Use a minimalist version of MobilenetV3.\n"
          "In addition to large and small models MobilenetV3 also contains so-called "
          "minimalistic models, these models have the same per-layer dimensions characteristic "
          "as MobilenetV3 however, they don't utilize any of the advanced blocks "
