@@ -186,15 +186,14 @@ class _Structure:
         The forward hook function
         """
         def hook_fn(module: nn.Module, inputs: torch.Tensor, outputs: torch.Tensor) -> None:
-            assert len(inputs) == 1
             layer = summary.get(
                 name,
                 Layer(name=name,
                       layer_type=module.__class__.__name__,
                       is_plugin=module.__module__.startswith("plugins.train.model."),
                       is_parent=len(list(module.children())) > 0,
-                      input_shape=T.cast(tuple[int, ...] | list[tuple[int, ...]],
-                                         _recurse_to_tensor(inputs[0], "shape")),
+                      input_shape=[T.cast(tuple[int, ...], _recurse_to_tensor(x, "shape"))
+                                   for x in inputs],
                       output=_recurse_to_tensor(outputs),
                       num_params=sum(p.numel() for p in module.parameters()),
                       num_buffers=sum(p.numel() for p in module.buffers()),
