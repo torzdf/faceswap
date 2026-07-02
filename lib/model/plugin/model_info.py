@@ -192,8 +192,8 @@ class _Structure:
                       layer_type=module.__class__.__name__,
                       is_plugin=module.__module__.startswith("plugins.train.model."),
                       is_parent=len(list(module.children())) > 0,
-                      input_shape=[T.cast(tuple[int, ...], _recurse_to_tensor(x, "shape"))
-                                   for x in inputs],
+                      input_shape=T.cast(tuple[int, ...] | list[tuple[int, ...]],
+                                         _recurse_to_tensor(inputs, "shape")),
                       output=_recurse_to_tensor(outputs),
                       num_params=sum(p.numel() for p in module.parameters()),
                       num_buffers=sum(p.numel() for p in module.buffers()),
