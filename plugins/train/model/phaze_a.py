@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import typing as T
 import logging
+import sys
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 from torch import nn
+from torchvision import models as TVMods
 
 from lib.logger import parse_class_init
 from lib.model.layers_legacy import ConvBlockLegacy, InstanceNormLegacy, UpSampling2dLegacy
-from lib.model.layers import (AdaIN, GaussianNoise, Reshape, ResidualBlock, UpscaleDNY,
-                              Upscale2xBlock, UpscaleResizeImages, UpscaleSubpixel)
+from lib.model.layers import (
+    AdaIN, ChannelLayerNorm, ChannelRMSNorm, GaussianNoise, Reshape, ResidualBlock, UpscaleDNY,
+    Upscale2xBlock, UpscaleResizeImages, UpscaleSubpixel
+    )
 from lib.training.data import get_label
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
@@ -25,9 +29,11 @@ from . import phaze_a_defaults as cfg
 logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code,too-many-lines
 
+# TODO error on too small input size
 
-UpsamplersT = T.Literal["resize_images", "subpixel", "upscale_dny",
-                        "upscale_fast", "upscale_hybrid", "upsample2d"]
+
+UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
+                      "upscale_fast", "upscale_hybrid", "upsample2d"]
 
 
 def _get_curve(start_y: int,
@@ -85,6 +91,40 @@ def _get_curve(start_y: int,
     return retval
 
 
+def _get_normalization(normalization: str,
+                       in_channels: int,
+                       is_legacy: bool) -> nn.Module:
+    """ Obtain the selected normalization layer
+
+    Parameters
+    ----------
+    normalization
+        The normalization method to obtain
+    in_channels
+        The number of features that the normalization will apply to
+    is_legacy
+        ``True`` if the model was originally created in Keras.`
+
+    Returns
+    -------
+    The configured normalization layer
+    """
+    # TODO other normalizations
+    if is_legacy and normalization == "instance":
+        retval = InstanceNormLegacy()
+    elif normalization == "instance":
+        retval = nn.InstanceNorm2d(in_channels, affine=True)
+    elif normalization == "layer":
+        retval = ChannelLayerNorm(in_channels, eps=1e-3 if is_legacy else 1e-5)
+    elif normalization == "rms":
+        retval = ChannelRMSNorm(in_channels, eps=1e-8 if is_legacy else None)
+    else:
+        raise FaceswapError(f"Invalid bottleneck_norm '{normalization}'. Choose from: "
+                            "['batch', 'group', 'instance', 'layer', 'rms']")
+    logger.debug("Got normalization '%s': %s", normalization, retval)
+    return retval
+
+
 def _scale_dim(target_resolution: int, original_dim: int) -> int:
     """ Scale a given `original_dim` so that it is a factor of the target resolution.
 
@@ -111,7 +151,7 @@ def _scale_dim(target_resolution: int, original_dim: int) -> int:
     return new_dim
 
 
-def _get_upscale_layer(method: UpsamplersT,
+def _get_upscale_layer(method: UpsampleT,
                        in_channels: int,
                        out_channels: int,
                        upsamples: int = 2,
@@ -175,120 +215,201 @@ class _EncoderInfo:
         The name of the model in TorchVision. Empty string `""` if the encoder does not
         exist in TorchVision
     default_size
-        The default input size of the encoder
-    scaling
-        The float scaling that the encoder expects. Default: `(0, 1)`
+        The default input size of the encoder. Default: 224
     min_size
         The minimum input size that the encoder will allow. Default: 32
     enforce_for_weights
         ``True`` if the input size for the model must be forced to the default size when loading
         imagenet weights, otherwise ``False``. Default: ``False``
-    color_order
-        The color order that the model expects (`"bgr"` or `"rgb"`). Default: `"rgb"`
+    layer_append
+        Mapping of additional layers from the classifier that should be included in the model:
+        (layer_name, index | None). Default: ``None`` (no additional layers)
+    legacy_scaling
+        The float scaling that the Keras version of the model expected. Default: `(0, 1)`
+    legacy_bgr
+        ``True`` if the Keras version of the model expected BGR input. Default: ``False``
     """
     torch_name: str
-    default_size: int
-    scaling: tuple[int, int] = (0, 1)
+    default_size: int = 224
     min_size: int = 32
     enforce_for_weights: bool = False
-    color_order: T.Literal["bgr", "rgb"] = "rgb"
+    layer_append: tuple[tuple[str, int | None], ...] | None = None
+    legacy_scaling: tuple[int, int] = (0, 1)
+    legacy_bgr: bool = False
 
+
+def convnext_xlarge(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
+                    ) -> TVMods.convnext.ConvNeXt:
+    """ ConvNext X-Large settings from Keras that does not exit in Torch"""
+    block_setting = [TVMods.convnext.CNBlockConfig(256, 512, 3),
+                     TVMods.convnext.CNBlockConfig(512, 1024, 3),
+                     TVMods.convnext.CNBlockConfig(1024, 2048, 27),
+                     TVMods.convnext.CNBlockConfig(2048, None, 3)]
+    stochastic_depth_prob = kwargs.pop("stochastic_depth_prob", 0.5)
+    retval = TVMods.convnext.ConvNeXt(block_setting, stochastic_depth_prob, **kwargs)
+    # TODO port weights and load here
+    return retval
+
+
+def efficientnet_v2_b0(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
+                       ) -> TVMods.efficientnet.EfficientNet:
+    """ EfficientNetV2_b0 settings from Keras that does not exit in Torch"""
+    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
+                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    dropout = kwargs.pop("dropout", 0.2)
+    retval = TVMods.efficientnet.EfficientNet(
+        inverted_residual_setting, dropout, last_channel=1280, **kwargs)
+    # TODO port weights and load here
+    return retval
+
+
+def efficientnet_v2_b1(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
+                       ) -> TVMods.efficientnet.EfficientNet:
+    """ EfficientNetV2_b1 settings from Keras that does not exit in Torch"""
+    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
+                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    dropout = kwargs.pop("dropout", 0.2)
+    retval = TVMods.efficientnet.EfficientNet(
+        inverted_residual_setting, dropout, last_channel=1280, **kwargs
+        )
+    # TODO port weights and load here
+    return retval
+
+
+def efficientnet_v2_b2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
+                       ) -> TVMods.efficientnet.EfficientNet:
+    """ EfficientNetV2_b2 settings from Keras that does not exit in Torch"""
+    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
+                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    dropout = kwargs.pop("dropout", 0.2)
+    retval = TVMods.efficientnet.EfficientNet(
+        inverted_residual_setting, dropout, last_channel=1408, **kwargs
+        )
+    # TODO port weights and load here
+    return retval
+
+
+def efficientnet_v2_b3(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
+                       ) -> TVMods.efficientnet.EfficientNet:
+    """ EfficientNetV2_b3 settings from Keras that does not exit in Torch"""
+    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
+                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
+                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
+                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    dropout = kwargs.pop("dropout", 0.2)
+    retval = TVMods.efficientnet.EfficientNet(
+        inverted_residual_setting, dropout, last_channel=1536, **kwargs
+        )
+    # TODO port weights and load here
+    return retval
+
+
+_CONVNEXT_APPEND = (("classifier", 0), )
 
 _MODEL_MAPPING: dict[str, _EncoderInfo] = {
-    "clipv_farl-b-16-16": _EncoderInfo(  # TODO
-        torch_name="FaRL-B-16-16", default_size=224),
-    "clipv_farl-b-16-64": _EncoderInfo(  # TODO
-        torch_name="FaRL-B-16-64", default_size=224),
-    "clipv_vit-b-16": _EncoderInfo(  # TODO
-        torch_name="ViT-B-16", default_size=224),
-    "clipv_vit-b-32": _EncoderInfo(  # TODO
-        torch_name="ViT-B-32", default_size=224),
-    "clipv_vit-l-14": _EncoderInfo(  # TODO
-        torch_name="ViT-L-14", default_size=224),
-    "clipv_vit-l-14-336px": _EncoderInfo(  # TODO
-        torch_name="ViT-L-14-336px", default_size=336),
-    "convnext_tiny": _EncoderInfo(  # TODO
-        torch_name="ConvNeXtTiny", scaling=(0, 255), default_size=224),
-    "convnext_small": _EncoderInfo(  # TODO
-        torch_name="ConvNeXtSmall", scaling=(0, 255), default_size=224),
-    "convnext_base": _EncoderInfo(  # TODO
-        torch_name="ConvNeXtBase", scaling=(0, 255), default_size=224),
-    "convnext_large": _EncoderInfo(  # TODO
-        torch_name="ConvNeXtLarge", scaling=(0, 255), default_size=224),
-    "convnext_extra_large": _EncoderInfo(  # TODO
-        torch_name="ConvNeXtXLarge", scaling=(0, 255), default_size=224),
-    "densenet121": _EncoderInfo(  # TODO
-        torch_name="DenseNet121", default_size=224),
-    "densenet169": _EncoderInfo(  # TODO
-        torch_name="DenseNet169", default_size=224),
-    "densenet201": _EncoderInfo(  # TODO
-        torch_name="DenseNet201", default_size=224),
-    "efficientnet_b0": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB0", scaling=(0, 255), default_size=224),
-    "efficientnet_b1": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB1", scaling=(0, 255), default_size=240),
-    "efficientnet_b2": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB2", scaling=(0, 255), default_size=260),
-    "efficientnet_b3": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB3", scaling=(0, 255), default_size=300),
-    "efficientnet_b4": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB4", scaling=(0, 255), default_size=380),
-    "efficientnet_b5": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB5", scaling=(0, 255), default_size=456),
-    "efficientnet_b6": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB6", scaling=(0, 255), default_size=528),
-    "efficientnet_b7": _EncoderInfo(  # TODO
-        torch_name="EfficientNetB7", scaling=(0, 255), default_size=600),
-    "efficientnet_v2_b0": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2B0", scaling=(-1, 1), default_size=224),
-    "efficientnet_v2_b1": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2B1", scaling=(-1, 1), default_size=240),
-    "efficientnet_v2_b2": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2B2", scaling=(-1, 1), default_size=260),
-    "efficientnet_v2_b3": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2B3", scaling=(-1, 1), default_size=300),
-    "efficientnet_v2_s": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2S", scaling=(-1, 1), default_size=384),
-    "efficientnet_v2_m": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2M", scaling=(-1, 1), default_size=480),
-    "efficientnet_v2_l": _EncoderInfo(  # TODO
-        torch_name="EfficientNetV2L", scaling=(-1, 1), default_size=480),
+    "clipv_farl-b-16-16": _EncoderInfo(torch_name="FaRL-B-16-16"),  # TODO
+    "clipv_farl-b-16-64": _EncoderInfo(torch_name="FaRL-B-16-64"),  # TODO
+    "clipv_vit-b-16": _EncoderInfo(torch_name="ViT-B-16"),  # TODO
+    "clipv_vit-b-32": _EncoderInfo(torch_name="ViT-B-32"),  # TODO
+    "clipv_vit-l-14": _EncoderInfo(torch_name="ViT-L-14"),  # TODO
+    "clipv_vit-l-14-336px": _EncoderInfo(torch_name="ViT-L-14-336px", default_size=336),  # TODO
+    "convnext_tiny": _EncoderInfo(
+        torch_name="convnext_tiny", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
+    "convnext_small": _EncoderInfo(
+        torch_name="convnext_small", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
+    "convnext_base": _EncoderInfo(
+            torch_name="convnext_base", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
+    "convnext_large": _EncoderInfo(
+        torch_name="convnext_large", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
+    "convnext_extra_large": _EncoderInfo(
+        torch_name="~convnext_xlarge", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
+    "densenet121": _EncoderInfo(torch_name="densenet121", min_size=64),
+    "densenet161": _EncoderInfo(torch_name="densenet161", min_size=64),
+    "densenet169": _EncoderInfo(torch_name="densenet169", min_size=64),
+    "densenet201": _EncoderInfo(torch_name="densenet201", min_size=64),
+    "efficientnet_b0": _EncoderInfo(
+        torch_name="efficientnet_b0", min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b1": _EncoderInfo(
+        torch_name="efficientnet_b1", default_size=240, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b2": _EncoderInfo(
+        torch_name="efficientnet_b2", default_size=260, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b3": _EncoderInfo(
+        torch_name="efficientnet_b3", default_size=300, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b4": _EncoderInfo(
+        torch_name="efficientnet_b4", default_size=380, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b5": _EncoderInfo(
+        torch_name="efficientnet_b5", default_size=456, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b6": _EncoderInfo(
+        torch_name="efficientnet_b6", default_size=528, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_b7": _EncoderInfo(
+        torch_name="efficientnet_b7", default_size=600, min_size=48, legacy_scaling=(0, 255)),
+    "efficientnet_v2_b0": _EncoderInfo(
+        torch_name="~efficientnet_v2_b0", legacy_scaling=(-1, 1)),
+    "efficientnet_v2_b1": _EncoderInfo(
+        torch_name="~efficientnet_v2_b1", default_size=240, min_size=48, legacy_scaling=(-1, 1)),
+    "efficientnet_v2_b2": _EncoderInfo(
+        torch_name="~efficientnet_v2_b2", default_size=260, min_size=48, legacy_scaling=(-1, 1)),
+    "efficientnet_v2_b3": _EncoderInfo(
+        torch_name="~efficientnet_v2_b0", default_size=300, min_size=48, legacy_scaling=(-1, 1)),
+    "efficientnet_v2_s": _EncoderInfo(
+        torch_name="efficientnet_v2_s", default_size=384, min_size=48, legacy_scaling=(-1, 1)),
+    "efficientnet_v2_m": _EncoderInfo(
+        torch_name="efficientnet_v2_m", default_size=480, min_size=48, legacy_scaling=(-1, 1)),
+    "efficientnet_v2_l": _EncoderInfo(
+        torch_name="efficientnet_v2_l", default_size=480, min_size=48, legacy_scaling=(-1, 1)),
     "inception_resnet_v2": _EncoderInfo(  # TODO
-        torch_name="InceptionResNetV2", scaling=(-1, 1), min_size=75, default_size=299),
+        torch_name="InceptionResNetV2", min_size=75, default_size=299, legacy_scaling=(-1, 1)),
     "inception_v3": _EncoderInfo(  # TODO
-        torch_name="InceptionV3", scaling=(-1, 1), min_size=75, default_size=299),
+        torch_name="inception_v3", min_size=75, default_size=299, legacy_scaling=(-1, 1)),
     "mobilenet": _EncoderInfo(  # TODO
-        torch_name="MobileNet", scaling=(-1, 1), default_size=224),
+        torch_name="MobileNet", legacy_scaling=(-1, 1)),
     "mobilenet_v2": _EncoderInfo(  # TODO
-        torch_name="MobileNetV2", scaling=(-1, 1), default_size=224),
+        torch_name="MobileNetV2", legacy_scaling=(-1, 1)),
     "mobilenet_v3_large": _EncoderInfo(  # TODO
-        torch_name="MobileNetV3Large", scaling=(-1, 1), default_size=224),
+        torch_name="MobileNetV3Large", legacy_scaling=(-1, 1)),
     "mobilenet_v3_small": _EncoderInfo(  # TODO
-        torch_name="MobileNetV3Small", scaling=(-1, 1), default_size=224),
+        torch_name="MobileNetV3Small", legacy_scaling=(-1, 1)),
     "nasnet_large": _EncoderInfo(  # TODO
-        torch_name="NASNetLarge", scaling=(-1, 1), default_size=331, enforce_for_weights=True),
+        torch_name="NASNetLarge",
+        default_size=331,
+        enforce_for_weights=True,
+        legacy_scaling=(-1, 1)),
     "nasnet_mobile": _EncoderInfo(  # TODO
-        torch_name="NASNetMobile", scaling=(-1, 1), default_size=224, enforce_for_weights=True),
+        torch_name="NASNetMobile", enforce_for_weights=True, legacy_scaling=(-1, 1)),
     "resnet50": _EncoderInfo(  # TODO
-        torch_name="ResNet50", scaling=(-1, 1), min_size=32, default_size=224),
+        torch_name="ResNet50", min_size=32, legacy_scaling=(-1, 1)),
     "resnet50_v2": _EncoderInfo(  # TODO
-        torch_name="ResNet50V2", scaling=(-1, 1), default_size=224),
+        torch_name="ResNet50V2", legacy_scaling=(-1, 1)),
     "resnet101": _EncoderInfo(  # TODO
-        torch_name="ResNet101", scaling=(-1, 1), default_size=224),
+        torch_name="ResNet101", legacy_scaling=(-1, 1)),
     "resnet101_v2": _EncoderInfo(  # TODO
-        torch_name="ResNet101V2", scaling=(-1, 1), default_size=224),
+        torch_name="ResNet101V2", legacy_scaling=(-1, 1)),
     "resnet152": _EncoderInfo(  # TODO
-        torch_name="ResNet152", scaling=(-1, 1), default_size=224),
+        torch_name="ResNet152", legacy_scaling=(-1, 1)),
     "resnet152_v2": _EncoderInfo(  # TODO
-        torch_name="ResNet152V2", scaling=(-1, 1), default_size=224),
+        torch_name="ResNet152V2", legacy_scaling=(-1, 1)),
     "vgg16": _EncoderInfo(  # TODO
-        torch_name="VGG16", color_order="bgr", scaling=(0, 255), default_size=224),
+        torch_name="VGG16", legacy_scaling=(0, 255), legacy_bgr=True),
     "vgg19": _EncoderInfo(  # TODO
-        torch_name="VGG19", color_order="bgr", scaling=(0, 255), default_size=224),
+        torch_name="VGG19", legacy_scaling=(0, 255), legacy_bgr=True),
     "xception": _EncoderInfo(  # TODO
-        torch_name="Xception", scaling=(-1, 1), min_size=71, default_size=299),
+        torch_name="Xception", min_size=71, default_size=299, legacy_scaling=(-1, 1)),
     "fs_original": _EncoderInfo(
-        torch_name="", color_order="bgr", min_size=32, default_size=1024)}
+        torch_name="", min_size=32, default_size=1024)}
 
 
 class _EncoderFaceswap(nn.Module):
@@ -336,7 +457,7 @@ class _EncoderFaceswap(nn.Module):
                                           4 if i == depth - 1 else 3,
                                           padding=0 if i == depth - 1 else 1),
                                 nn.LeakyReLU(0.2, inplace=True),
-                                nn.Identity() if i == depth - 1 else nn.MaxPool2d(2))  # TODO May be incorrect. Check difference between keras MaxPooling + GlobalMaxPooling
+                                nn.Identity() if i == depth - 1 else nn.MaxPool2d(2))
                   for i in range(depth))
             )
         elif is_legacy:
@@ -408,10 +529,10 @@ class Bottleneck(nn.Module):
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        assert len(input_shape) == 3  # TODO remove after testing this holds true
+        assert len(input_shape) == 3  # TODO remove after testing this holds true and then remove len check from nn.Flatten
         layers = []
         if normalization and normalization != "none":
-            layers.append(self._get_normalization(normalization, is_legacy, input_shape))
+            layers.append(_get_normalization(normalization, input_shape[0], is_legacy))
         if len(input_shape) > 1 and bottleneck in ("dense", "flatten"):
             layers.append(nn.Flatten())
 
@@ -421,30 +542,12 @@ class Bottleneck(nn.Module):
             output_shape = (size, )
         elif bottleneck in ("average_pooling", "max_pooling"):
             lyr = nn.MaxPool2d if bottleneck == "max_pooling" else nn.AvgPool2d
-            layers.append(lyr(input_shape[1]))  # TODO confirm this is correct for global pooling
+            layers.append(lyr(input_shape[1]))
             layers.append(nn.Flatten())  # Flatten prior to fc layers
 
         self.bottleneck = nn.Sequential(*layers) if len(layers) > 1 else layers[0]
         self.output_shape = output_shape
         """ The output shape from the bottleneck excluding batch dimension """
-
-    @classmethod
-    def _get_normalization(cls,
-                           normalization: str,
-                           is_legacy: bool,
-                           input_shape: tuple[int, ...]) -> nn.Module:
-        """ Obtain the selected normalization layer """
-        if is_legacy and normalization == "instance":
-            return InstanceNormLegacy()
-        if normalization == "instance":
-            return nn.InstanceNorm2d(input_shape[0], affine=True)
-        if normalization == "rms":
-            return nn.RMSNorm(list(input_shape), eps=1e-8)  # TODO check legacy
-        if normalization == "layer":
-            return nn.LayerNorm(list(input_shape), eps=1e-3)  # TODO check legacy
-
-        raise FaceswapError(f"Invalid bottleneck_norm '{normalization}'. Choose from: "
-                            "['instance', 'rms', 'layer']")
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Forward through the bottleneck
@@ -492,35 +595,58 @@ class Encoder(nn.Module):
                  is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.scaling = _MODEL_MAPPING[architecture].scaling  # TODO scaling to ModelPlugin for passing to loss function
-        self.encoder = self._get_encoder(architecture, input_size, is_legacy)
+        mod_info = _MODEL_MAPPING[architecture]
+        self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
+        self.encoder = self._get_encoder(mod_info, input_size, is_legacy)
+        print(self.encoder)
+        input_size = mod_info.default_size  # TODO remove
+        output_shape = T.cast(tuple[int, int, int],
+                              (self._get_output_shape(input_size) if mod_info.torch_name
+                               else self.encoder.output_shape))
+        # TODO remove
+        for sz in range(48, 257, 16):
+            self._get_output_shape(sz)
 
         self.bottleneck = None
         if bottleneck_args is not None:
-            self.bottleneck = Bottleneck(T.cast(tuple[int, int, int], self.encoder.output_shape),
-                                         *bottleneck_args,
-                                         is_legacy=is_legacy)
-
-        # TODO method to calculate for non-fs encoders:
-        # TODO try to standardize encoder output shapes to tuple[int, int, int]
-        self.output_shape = T.cast(tuple[int, int, int] | tuple[int],
-                                   (self.encoder.output_shape if self.bottleneck is None
-                                    else self.bottleneck.output_shape))
+            self.bottleneck = Bottleneck(output_shape, *bottleneck_args, is_legacy=is_legacy)
+        self.output_shape = output_shape if self.bottleneck is None else self.bottleneck.output_shape
         """ The output shape from the encoder excluding batch dimension """
 
-    def _get_encoder(self, architecture: str, input_size: int, is_legacy: bool) -> nn.Module:
+    def _get_encoder(self, mod_info: _EncoderInfo, input_size: int, is_legacy: bool) -> nn.Module:
         """ Obtain the torch Module for the specified encoder architecture """
-        info = _MODEL_MAPPING[architecture]
-        if info.torch_name and architecture.startswith("clipv_"):
+        logger.info("[Encoder] Loading encoder: '%s'", mod_info)
+        if mod_info.torch_name.startswith("clipv_"):
             raise NotImplementedError  # TODO
-        if info.torch_name:
-            raise NotImplementedError  # TODO
+        if mod_info.torch_name:
+            is_local = mod_info.torch_name.startswith("~")
+            name = mod_info.torch_name[1:] if is_local else mod_info.torch_name
+            mod = sys.modules[__name__] if is_local else TVMods
+            encoder = getattr(mod, name)(weights="DEFAULT")
+            if not mod_info.layer_append:
+                return encoder.features
+            retval = nn.Sequential(encoder.features)
+            for layer, idx in mod_info.layer_append:
+                app_layer = getattr(encoder, layer)
+                if idx is not None:
+                    app_layer = app_layer[idx]
+                logger.info("[Encoder] Appending layer to '%s': '%s'", name, app_layer)
+                retval.append(app_layer)
+            return retval
         return _EncoderFaceswap(cfg.fs_original_depth(),
                                 cfg.fs_original_min_filters(),
                                 cfg.fs_original_max_filters(),
                                 input_size,
                                 cfg.fs_original_use_alt(),
                                 is_legacy)
+
+    def _get_output_shape(self, input_size: int) -> tuple[int, int, int]:
+        """ Run a dummy tensor through the model to get the output shape """
+        with torch.no_grad():
+            input_ = torch.zeros(1, 3, input_size, input_size)
+            retval = tuple(self.encoder(input_).shape[1:])
+        logger.info("[Encoder] Input size: %s, Output shape: %s", input_size, retval)
+        return retval
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Call the Phaze-A Encoder
@@ -535,10 +661,10 @@ class Encoder(nn.Module):
         The output tensor from the Phaze-A Encoder
         """
         x = inputs
-        if self.scaling == (0, 255):
-            x *= 255.  # models expecting inputs from 0 to 255.
-        elif self.scaling == (-1, -1):
-            x *= 2.  # models expecting inputs from -1 to 1.
+        if self.legacy_scaling == (0, 255):
+            x *= 255.  # legacy model expecting inputs from 0 to 255.
+        elif self.legacy_scaling == (-1, -1):
+            x *= 2.  # legacy model expecting inputs from -1 to 1.
             x = x - 1.
         x = self.encoder(x)
         if self.bottleneck is not None:
@@ -589,7 +715,7 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
                  max_filters: int,
                  slope_mode: T.Literal["full", "cap_max", "cap_min"],
                  slope: float,
-                 method: UpsamplersT,
+                 method: UpsampleT,
                  gaussian: bool,
                  normalization: T.Literal["none", "batch", "group", "instance", "layer", "rms"],
                  res_blocks: int,
@@ -601,7 +727,7 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         self._filter_args = (min_filters, max_filters, slope_mode, slope)
 
         self._is_dny = method.lower() == "upscale_dny"
-        self._method: UpsamplersT = method
+        self._method: UpsampleT = method
         self._learn_mask = learn_mask
         self._gaussian = gaussian
         self._norm_method = normalization
@@ -822,6 +948,9 @@ class FullyConnected(nn.Module):
         ``None`` if it is placed in the encoder
     upscales
         The number of decoder upscales that should be placed within the fully connected block
+    upscale_blocks
+        The object that builds the upscale blocks
+
     is_legacy
         ``True`` if the model was originally created in Keras
     """
@@ -830,10 +959,11 @@ class FullyConnected(nn.Module):
                  feats: list[int],
                  dim: int,
                  dropout: float,
-                 upsampler: UpsamplersT,
+                 upsampler: UpsampleT,
                  upsamples: int,
                  upsample_filters: int,
                  upscales: int,
+                 upscale_blocks: UpscaleBlocks,
                  bottleneck_args: tuple[str, int, str] | None,
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
@@ -853,37 +983,40 @@ class FullyConnected(nn.Module):
             dense.append(nn.Linear(feats[i], out_feats))
 
         self.fc = nn.Sequential(*dense) if len(dense) > 1 else dense[0]
-        self.upscales = self._get_upscales(
-            upsampler, upsamples, self.dst_shape[0], upsample_filters, is_legacy
-            )
+        self.upsamples = self._get_upsamples(upsampler,
+                                             upsamples,
+                                             self.dst_shape[0],
+                                             upsample_filters,
+                                             is_legacy)
+        self.upscales = upscale_blocks((0, upscales)) if upscales else None
+        self.learn_mask = self.upscales and len(self.upscales) == 2
 
-        if upscales:
-            pass  # TODO
-
-    def _get_upscales(self,
-                      upsampler: UpsamplersT,
-                      upsamples: int,
-                      in_channels: int,
-                      out_channels: int,
-                      is_legacy: bool) -> nn.Module | None:
+    def _get_upsamples(self,
+                       upsampler: UpsampleT,
+                       upsamples: int,
+                       in_channels: int,
+                       out_channels: int,
+                       is_legacy: bool) -> nn.Sequential | nn.Module | None:
         """ Obtain the upscale layers if requested """
-        if upsamples == 0:
+        if not upsamples:
+            if is_legacy and upsampler == "upsample2d":  # Bug in keras code
+                return nn.LeakyReLU(0.1, inplace=True)
             return None
 
         if upsampler == "upsample2d" and upsamples > 1:
-            return nn.Sequential(
-                _get_upscale_layer(
-                    upsampler, in_channels, out_channels, 2 ** upsamples, is_legacy=is_legacy
-                    ),
-                nn.LeakyReLU(0.1, inplace=True)
-                )
-        layers = [_get_upscale_layer(upsampler, in_channels, out_channels, 2, is_legacy=is_legacy)
-                  for _ in range(upsamples)]
+            retval = nn.Sequential(_get_upscale_layer(
+                upsampler, in_channels, out_channels, 2 ** upsamples, is_legacy=is_legacy
+                ))
+        else:
+            retval = nn.Sequential(*(
+                _get_upscale_layer(upsampler, in_channels, out_channels, 2, is_legacy=is_legacy)
+                for _ in range(upsamples)
+                ))
         if upsampler == "upsample2d":
-            layers.append(nn.LeakyReLU(0.1, inplace=True))
-        return nn.Sequential(*layers)
+            retval.append(nn.LeakyReLU(0.1, inplace=True))
+        return retval
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """ Call the Phaze-A Fully Connected layer
 
         Parameters
@@ -893,16 +1026,22 @@ class FullyConnected(nn.Module):
 
         Returns
         -------
-        The output tensor from the Phaze-A Fully Connected layer
+        The output tensor from the Phaze-A Fully Connected layer. If upscales are placed within the
+        FC layer and learn_mask is selected then this will be a tuple of (face, mask) output
+        otherwise a single face tensor
         """
         x = inputs
         if self.bottleneck is not None:
             x = self.bottleneck(x)
         x = T.cast(torch.Tensor, self.fc(x))
         x = x.view(x.shape[0], *self.dst_shape)
-        if self.upscales is not None:
-            x = self.upscales(x)
-        return x
+        if self.upsamples:
+            x = self.upsamples(x)
+        if not self.upscales:
+            return x
+        if not self.learn_mask:
+            return self.upscales[0](x)
+        return tuple(up(x) for up in self.upscales)
 
 
 class Inter(nn.Module):
@@ -961,7 +1100,7 @@ class Inter(nn.Module):
                  slope: float,
                  dim: int,
                  dropout: float,
-                 upsampler: UpsamplersT,
+                 upsampler: UpsampleT,
                  upsamples: int,
                  upsample_filters: int,
                  upscales: int,
@@ -993,7 +1132,8 @@ class Inter(nn.Module):
         self.shared = (None if shared == "none" else "shared" if shared == "full" else "A")
         self.output_shape = (out_filters * (2 if self.shared else 1), final_dim, final_dim)
         """ The output shape from the inter layers """
-        # TODO output shape leading into G-Block may be incorrect with dec_up_in_fc
+        # TODO output shape leading into G-Block may be incorrect with dec_up_in_fc or, more likely
+        # we will need an FC output prior to dec upscales
         upscale_blocks.set_input_shape(self.output_shape)
 
         fc_args = (input_shape,
@@ -1004,6 +1144,7 @@ class Inter(nn.Module):
                    upsamples,
                    self._scale_filters(upsample_filters, final_dim, model_output_size),  # TODO see above.
                    upscales,
+                   upscale_blocks,
                    bottleneck_args,
                    is_legacy)
         if split:
@@ -1018,7 +1159,8 @@ class Inter(nn.Module):
         self.is_split = split
         self.fc = list(modules.values())[0] if len(modules) == 1 else nn.ModuleDict(modules)
 
-    def _scale_filters(self, original_filters: int, final_dim: int, output_size: int) -> int:
+    @classmethod
+    def _scale_filters(cls, original_filters: int, final_dim: int, output_size: int) -> int:
         """ Scale the filters to be compatible with the model's selected output size.
 
         Parameters
@@ -1236,11 +1378,13 @@ class PhazeA(ModelPlugin):
             raise FaceswapError("Phaze-A output shape must be a multiple of 16")
         self._validate_encoder_architecture()
         input_size = self._get_input_size()
+        is_bgr = cfg.enc_architecture() == "fs_original" or (
+            is_legacy and _MODEL_MAPPING[cfg.enc_architecture()].legacy_bgr
+            )
         super().__init__(num_identities,
                          input_size,
-                         is_rgb=_MODEL_MAPPING[cfg.enc_architecture()].color_order == "rgb",
+                         is_rgb=not is_bgr,
                          is_legacy=is_legacy)
-
         bottleneck_args = (cfg.bottleneck_type(), cfg.bottleneck_size(), cfg.bottleneck_norm())
         bottleneck_in_enc = cfg.bottleneck_in_encoder()
         self.encoder = Encoder(cfg.enc_architecture(),
@@ -1254,7 +1398,7 @@ class PhazeA(ModelPlugin):
             cfg.dec_max_filters(),
             T.cast(T.Literal["full", "cap_max", "cap_min"], cfg.dec_slope_mode()),
             cfg.dec_filter_slope(),
-            T.cast(UpsamplersT, cfg.dec_upscale_method()),
+            T.cast(UpsampleT, cfg.dec_upscale_method()),
             cfg.dec_gaussian(),
             T.cast(T.Literal["none", "batch", "group", "instance", "layer", "rms"],
                    cfg.dec_norm()),
@@ -1275,7 +1419,7 @@ class PhazeA(ModelPlugin):
                            cfg.fc_filter_slope(),
                            cfg.fc_dimensions(),
                            cfg.fc_dropout(),
-                           T.cast(UpsamplersT, cfg.fc_upsampler()),
+                           T.cast(UpsampleT, cfg.fc_upsampler()),
                            cfg.fc_upsamples(),
                            cfg.fc_upsample_filters(),
                            cfg.dec_upscales_in_fc(),
@@ -1442,11 +1586,13 @@ if __name__ == "__main__":
     log_setup("DEBUG", "", "")
     load_config(None)
     INP_SIZE = 64
+    cfg.enc_architecture.set("efficientnet_v2_b3")
     # cfg.split_fc.set(True)
     # cfg.shared_fc.set("half")
     # cfg.fc_upsampler.set("subpixel")
     mod = PhazeA(2, True)
-    # print(mod)
+    print(mod)
+    exit()
 
     inps = [torch.rand((1, 3, INP_SIZE, INP_SIZE)), torch.rand((1, 3, INP_SIZE, INP_SIZE))]
     outs = mod(inps)
