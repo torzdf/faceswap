@@ -218,6 +218,12 @@ class _EncoderInfo:
         The default input size of the encoder. Default: 224
     min_size
         The minimum input size that the encoder will allow. Default: 32
+    kwargs
+        Additional keyword arguments that can be used for building the model. Default: ``None``
+    last_layer
+        When the Torch model does not have a feats Sequential model, then this is the last layer
+        that should be included in the encoder. All following layers are replaced with an
+        nn.Identity() layer. Default: ``None`` (use feats Sequential model)
     enforce_for_weights
         ``True`` if the input size for the model must be forced to the default size when loading
         imagenet weights, otherwise ``False``. Default: ``False``
@@ -232,11 +238,15 @@ class _EncoderInfo:
     torch_name: str
     default_size: int = 224
     min_size: int = 32
+    kwargs: dict[str, T.Any] | None = None
+    last_layer: str | None = None
     enforce_for_weights: bool = False
     layer_append: tuple[tuple[str, int | None], ...] | None = None
     legacy_scaling: tuple[int, int] = (0, 1)
     legacy_bgr: bool = False
 
+
+# TODO move these builder to models?
 
 def convnext_xlarge(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
                     ) -> TVMods.convnext.ConvNeXt:
@@ -337,76 +347,83 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
         torch_name="convnext_large", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
     "convnext_extra_large": _EncoderInfo(
         torch_name="~convnext_xlarge", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
-    "densenet121": _EncoderInfo(torch_name="densenet121", min_size=64),
-    "densenet161": _EncoderInfo(torch_name="densenet161", min_size=64),
-    "densenet169": _EncoderInfo(torch_name="densenet169", min_size=64),
-    "densenet201": _EncoderInfo(torch_name="densenet201", min_size=64),
-    "efficientnet_b0": _EncoderInfo(
-        torch_name="efficientnet_b0", min_size=48, legacy_scaling=(0, 255)),
+    "densenet121": _EncoderInfo(torch_name="densenet121"),
+    "densenet161": _EncoderInfo(torch_name="densenet161"),
+    "densenet169": _EncoderInfo(torch_name="densenet169"),
+    "densenet201": _EncoderInfo(torch_name="densenet201"),
+    "efficientnet_b0": _EncoderInfo(torch_name="efficientnet_b0", legacy_scaling=(0, 255)),
     "efficientnet_b1": _EncoderInfo(
-        torch_name="efficientnet_b1", default_size=240, min_size=48, legacy_scaling=(0, 255)),
+        torch_name="efficientnet_b1", default_size=240, legacy_scaling=(0, 255)),
     "efficientnet_b2": _EncoderInfo(
-        torch_name="efficientnet_b2", default_size=260, min_size=48, legacy_scaling=(0, 255)),
+        torch_name="efficientnet_b2", default_size=260, legacy_scaling=(0, 255)),
     "efficientnet_b3": _EncoderInfo(
-        torch_name="efficientnet_b3", default_size=300, min_size=48, legacy_scaling=(0, 255)),
+        torch_name="efficientnet_b3", default_size=300, legacy_scaling=(0, 255)),
     "efficientnet_b4": _EncoderInfo(
-        torch_name="efficientnet_b4", default_size=380, min_size=48, legacy_scaling=(0, 255)),
+        torch_name="efficientnet_b4", default_size=380, legacy_scaling=(0, 255)),
     "efficientnet_b5": _EncoderInfo(
-        torch_name="efficientnet_b5", default_size=456, min_size=48, legacy_scaling=(0, 255)),
+        torch_name="efficientnet_b5", default_size=456, legacy_scaling=(0, 255)),
     "efficientnet_b6": _EncoderInfo(
-        torch_name="efficientnet_b6", default_size=528, min_size=48, legacy_scaling=(0, 255)),
+        torch_name="efficientnet_b6", default_size=528, legacy_scaling=(0, 255)),
     "efficientnet_b7": _EncoderInfo(
-        torch_name="efficientnet_b7", default_size=600, min_size=48, legacy_scaling=(0, 255)),
-    "efficientnet_v2_b0": _EncoderInfo(
-        torch_name="~efficientnet_v2_b0", legacy_scaling=(-1, 1)),
+        torch_name="efficientnet_b7", default_size=600, legacy_scaling=(0, 255)),
+    "efficientnet_v2_b0": _EncoderInfo(torch_name="~efficientnet_v2_b0", legacy_scaling=(-1, 1)),
     "efficientnet_v2_b1": _EncoderInfo(
-        torch_name="~efficientnet_v2_b1", default_size=240, min_size=48, legacy_scaling=(-1, 1)),
+        torch_name="~efficientnet_v2_b1", default_size=240, legacy_scaling=(-1, 1)),
     "efficientnet_v2_b2": _EncoderInfo(
-        torch_name="~efficientnet_v2_b2", default_size=260, min_size=48, legacy_scaling=(-1, 1)),
+        torch_name="~efficientnet_v2_b2", default_size=260, legacy_scaling=(-1, 1)),
     "efficientnet_v2_b3": _EncoderInfo(
-        torch_name="~efficientnet_v2_b0", default_size=300, min_size=48, legacy_scaling=(-1, 1)),
+        torch_name="~efficientnet_v2_b0", default_size=300, legacy_scaling=(-1, 1)),
     "efficientnet_v2_s": _EncoderInfo(
-        torch_name="efficientnet_v2_s", default_size=384, min_size=48, legacy_scaling=(-1, 1)),
+        torch_name="efficientnet_v2_s", default_size=384, legacy_scaling=(-1, 1)),
     "efficientnet_v2_m": _EncoderInfo(
-        torch_name="efficientnet_v2_m", default_size=480, min_size=48, legacy_scaling=(-1, 1)),
+        torch_name="efficientnet_v2_m", default_size=480, legacy_scaling=(-1, 1)),
     "efficientnet_v2_l": _EncoderInfo(
-        torch_name="efficientnet_v2_l", default_size=480, min_size=48, legacy_scaling=(-1, 1)),
-    "inception_resnet_v2": _EncoderInfo(  # TODO
+        torch_name="efficientnet_v2_l", default_size=480, legacy_scaling=(-1, 1)),
+    "inception_resnet_v2": _EncoderInfo(  # TODO No Torch
         torch_name="InceptionResNetV2", min_size=75, default_size=299, legacy_scaling=(-1, 1)),
-    "inception_v3": _EncoderInfo(  # TODO
-        torch_name="inception_v3", min_size=75, default_size=299, legacy_scaling=(-1, 1)),
-    "mobilenet": _EncoderInfo(  # TODO
+    "inception_v3": _EncoderInfo(torch_name="inception_v3",  # TODO has a flatten layer we cannot use this
+                                 default_size=299,
+                                 min_size=75,
+                                 last_layer="Mixed_7c",
+                                 legacy_scaling=(-1, 1)),
+    "mobilenet": _EncoderInfo(  # TODO No Torch
         torch_name="MobileNet", legacy_scaling=(-1, 1)),
-    "mobilenet_v2": _EncoderInfo(  # TODO
-        torch_name="MobileNetV2", legacy_scaling=(-1, 1)),
-    "mobilenet_v3_large": _EncoderInfo(  # TODO
-        torch_name="MobileNetV3Large", legacy_scaling=(-1, 1)),
-    "mobilenet_v3_small": _EncoderInfo(  # TODO
-        torch_name="MobileNetV3Small", legacy_scaling=(-1, 1)),
-    "nasnet_large": _EncoderInfo(  # TODO
-        torch_name="NASNetLarge",
-        default_size=331,
-        enforce_for_weights=True,
-        legacy_scaling=(-1, 1)),
-    "nasnet_mobile": _EncoderInfo(  # TODO
+    "mobilenet_v2": _EncoderInfo(torch_name="mobilenet_v2",
+                                 kwargs={"width_mult": cfg.mobilenet_width()},
+                                 legacy_scaling=(-1, 1)),
+    "mobilenet_v3_large": _EncoderInfo(torch_name="mobilenet_v3_large",
+                                       kwargs={"width_mult": cfg.mobilenet_width(),
+                                               "minimalist": cfg.mobilenet_minimalistic()},  # TODO not handled. Either remove or implement. Will need ported weights
+                                       legacy_scaling=(-1, 1)),
+    "mobilenet_v3_small": _EncoderInfo(torch_name="mobilenet_v3_small",
+                                       kwargs={"width_mult": cfg.mobilenet_width(),
+                                               "minimalist": cfg.mobilenet_minimalistic()},  # TODO not handled. Either remove or implement. Will need ported weights
+                                       legacy_scaling=(-1, 1)),
+    "nasnet_large": _EncoderInfo(torch_name="NASNetLarge",  # TODO No Torch
+                                 default_size=331,
+                                 enforce_for_weights=True,
+                                 legacy_scaling=(-1, 1)),
+    "nasnet_mobile": _EncoderInfo(  # TODO No Torch
         torch_name="NASNetMobile", enforce_for_weights=True, legacy_scaling=(-1, 1)),
+    "resnet18": _EncoderInfo(  # TODO
+        torch_name="resnet18"),
+    "resnet34": _EncoderInfo(  # TODO
+        torch_name="resnet34"),
     "resnet50": _EncoderInfo(  # TODO
-        torch_name="ResNet50", min_size=32, legacy_scaling=(-1, 1)),
-    "resnet50_v2": _EncoderInfo(  # TODO
+        torch_name="resnet50", legacy_scaling=(-1, 1)),
+    "resnet50_v2": _EncoderInfo(  # TODO No Torch.
         torch_name="ResNet50V2", legacy_scaling=(-1, 1)),
     "resnet101": _EncoderInfo(  # TODO
-        torch_name="ResNet101", legacy_scaling=(-1, 1)),
-    "resnet101_v2": _EncoderInfo(  # TODO
+        torch_name="resnet101", legacy_scaling=(-1, 1)),
+    "resnet101_v2": _EncoderInfo(  # TODO No Torch.
         torch_name="ResNet101V2", legacy_scaling=(-1, 1)),
     "resnet152": _EncoderInfo(  # TODO
-        torch_name="ResNet152", legacy_scaling=(-1, 1)),
-    "resnet152_v2": _EncoderInfo(  # TODO
+        torch_name="resnet152", legacy_scaling=(-1, 1)),
+    "resnet152_v2": _EncoderInfo(  # TODO No Torch
         torch_name="ResNet152V2", legacy_scaling=(-1, 1)),
-    "vgg16": _EncoderInfo(  # TODO
-        torch_name="VGG16", legacy_scaling=(0, 255), legacy_bgr=True),
-    "vgg19": _EncoderInfo(  # TODO
-        torch_name="VGG19", legacy_scaling=(0, 255), legacy_bgr=True),
-    "xception": _EncoderInfo(  # TODO
+    "vgg16": _EncoderInfo(torch_name="vgg16", legacy_scaling=(0, 255), legacy_bgr=True),
+    "vgg19": _EncoderInfo(torch_name="vgg19", legacy_scaling=(0, 255), legacy_bgr=True),
+    "xception": _EncoderInfo(  # TODO No Torch
         torch_name="Xception", min_size=71, default_size=299, legacy_scaling=(-1, 1)),
     "fs_original": _EncoderInfo(
         torch_name="", min_size=32, default_size=1024)}
@@ -581,11 +598,7 @@ class Encoder(nn.Module):
     """
     _model_kwargs = {"mobilenet": {"alpha": cfg.mobilenet_width(),
                                    "depth_multiplier": cfg.mobilenet_depth(),
-                                   "dropout": cfg.mobilenet_dropout()},
-                     "mobilenet_v2": {"alpha": cfg.mobilenet_width()},
-                     "mobilenet_v3": {"alpha": cfg.mobilenet_width(),
-                                      "minimalist": cfg.mobilenet_minimalistic(),
-                                      "include_preprocessing": False}}
+                                   "dropout": cfg.mobilenet_dropout()}}
     """ Configuration option for architecture mapped to optional kwargs. """
 
     def __init__(self,
@@ -598,19 +611,20 @@ class Encoder(nn.Module):
         mod_info = _MODEL_MAPPING[architecture]
         self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
         self.encoder = self._get_encoder(mod_info, input_size, is_legacy)
-        print(self.encoder)
+        print(self.encoder)  # TODO remove
         input_size = mod_info.default_size  # TODO remove
         output_shape = T.cast(tuple[int, int, int],
                               (self._get_output_shape(input_size) if mod_info.torch_name
                                else self.encoder.output_shape))
         # TODO remove
-        for sz in range(48, 257, 16):
-            self._get_output_shape(sz)
-
+        # for sz in range(32, 385, 16):
+        #     self._get_output_shape(sz)
+        # exit()
         self.bottleneck = None
         if bottleneck_args is not None:
             self.bottleneck = Bottleneck(output_shape, *bottleneck_args, is_legacy=is_legacy)
-        self.output_shape = output_shape if self.bottleneck is None else self.bottleneck.output_shape
+        self.output_shape = (output_shape if self.bottleneck is None
+                             else self.bottleneck.output_shape)
         """ The output shape from the encoder excluding batch dimension """
 
     def _get_encoder(self, mod_info: _EncoderInfo, input_size: int, is_legacy: bool) -> nn.Module:
@@ -622,10 +636,19 @@ class Encoder(nn.Module):
             is_local = mod_info.torch_name.startswith("~")
             name = mod_info.torch_name[1:] if is_local else mod_info.torch_name
             mod = sys.modules[__name__] if is_local else TVMods
-            encoder = getattr(mod, name)(weights="DEFAULT")
+            kwargs = mod_info.kwargs if mod_info.kwargs else {}
+            encoder: nn.Module | nn.Sequential = getattr(mod, name)(weights="DEFAULT", **kwargs)
+            if mod_info.last_layer:
+                last_seen = False
+                for key, _ in encoder.named_children():
+                    if last_seen:
+                        logger.info("[Encoder] Setting '%s' layer '%s' to nn.Identity", name, key)
+                        setattr(encoder, key, nn.Identity())
+                    last_seen = last_seen or key == mod_info.last_layer
+                return encoder
             if not mod_info.layer_append:
-                return encoder.features
-            retval = nn.Sequential(encoder.features)
+                return T.cast(nn.Sequential, encoder.features)
+            retval = nn.Sequential(T.cast(nn.Sequential, encoder.features))
             for layer, idx in mod_info.layer_append:
                 app_layer = getattr(encoder, layer)
                 if idx is not None:
@@ -642,9 +665,13 @@ class Encoder(nn.Module):
 
     def _get_output_shape(self, input_size: int) -> tuple[int, int, int]:
         """ Run a dummy tensor through the model to get the output shape """
+        is_train = self.encoder.training
+        self.encoder.eval()
         with torch.no_grad():
             input_ = torch.zeros(1, 3, input_size, input_size)
             retval = tuple(self.encoder(input_).shape[1:])
+        if is_train:
+            self.encoder.train()
         logger.info("[Encoder] Input size: %s, Output shape: %s", input_size, retval)
         return retval
 
@@ -1586,7 +1613,7 @@ if __name__ == "__main__":
     log_setup("DEBUG", "", "")
     load_config(None)
     INP_SIZE = 64
-    cfg.enc_architecture.set("efficientnet_v2_b3")
+    cfg.enc_architecture.set(sys.argv[1])
     # cfg.split_fc.set(True)
     # cfg.shared_fc.set("half")
     # cfg.fc_upsampler.set("subpixel")
