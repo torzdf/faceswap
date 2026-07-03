@@ -142,6 +142,8 @@ class KerasConfigParser:
             for arg in node["args"]:
                 tensors = arg if isinstance(arg, list) else [arg]  # Handle inconsistent arg types
                 for tensor in tensors:
+                    if not isinstance(tensor, dict):
+                        continue
                     producer = tensor["config"]["keras_history"][0]
                     in_shapes[mapping[producer]] = tensor["config"]["shape"][1:]
         return in_shapes
