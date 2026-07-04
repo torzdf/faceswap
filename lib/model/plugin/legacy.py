@@ -695,7 +695,9 @@ class KerasToTorch:
                 name = name.rsplit(".", maxsplit=1)[0]  # Strip .vars from the end
                 w_type = k_map[w_type]  # keras indexing to torch name
                 assert isinstance(weight, np.ndarray)
-                if weight.ndim == 4 and "separable_conv2d" in name and weight.shape[0] != 1:
+                if (weight.ndim == 4
+                        and any(x in name for x in ("separable_conv2d", "depthwise_conv2d"))
+                        and weight.shape[0] != 1):
                     new_shape = (weight.shape[2] * weight.shape[3], 1, *weight.shape[:2])
                     weight = weight.transpose(2, 3, 0, 1).reshape(new_shape)
                 elif weight.ndim == 4:
