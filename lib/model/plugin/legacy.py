@@ -64,16 +64,26 @@ class KerasConfigParser:
     def _map_sub_model_input(cls,
                              config: dict[str, T.Any],
                              mapping: dict[str, str],
-                             outputs: dict[str, str]) -> None:
+                             outputs: dict[str, str],
+                             is_sequential: bool) -> None:
         """ Map a sub-model's internal input layer name to whatever produces its input from the
         outer graph. """
-        in_layers = config["config"]["input_layers"]
-        in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
-        in_names = [i[0] for i in in_layers]
-        assert len(in_names) == 1  # TODO sub-models with multiple inputs
+        if is_sequential and config.get("inbound_nodes"):
+            return  # top-level Sequential with no outer context to resolve
+
         inbounds: list[str] = list({arg["config"]["keras_history"][0]
                                     for node in config["inbound_nodes"]
                                     for arg in node["args"]})
+
+        if is_sequential:
+            assert len(inbounds) == 1  # TODO sequential models with multiple inputs
+            in_names = inbounds
+        else:
+            in_layers = config["config"]["input_layers"]
+            in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
+            in_names = [i[0] for i in in_layers]
+            assert len(in_names) == 1  # TODO sub-models with multiple inputs
+
         # Resolve a keras inbound node name to its standardized label, redirecting through the sub-
         # model's recorded output if 'name' is itself a sub-model.  We only need first input if
         # multi for our purposes
@@ -111,16 +121,30 @@ class KerasConfigParser:
         {inbound_node: input_shape} for the sub-model
         """
         name = config.get("name")
+        is_sequential = config["class_name"] == "Sequential"
         if name:
             # Fallback (eg top-level concatenates referencing this model by name. Corrected to
             # real output layer name when known at the end of the function):
             mapping[config["name"]] = dst_label
-            outputs[name] = cls._sub_model_output_name(config)
-            cls._map_sub_model_input(config, mapping, outputs)
+            cls._map_sub_model_input(config, mapping, outputs, is_sequential)
 
         # If there is no "." in the label then this is the main parent model
         child_dst = dst_label if "." not in dst_label else f"{dst_label}.layers"
         retval = {}
+
+        if is_sequential:
+            assert name is not None
+            prev_label = mapping.get(name)
+            for layer in config["config"]["layers"]:
+                layer_result = cls.flatten(
+                    layer, child_dst, counters, mapping, outputs, prev_label)
+                retval |= layer_result
+                if layer_result:
+                    prev_label = next(reversed(layer_result))  # last inserted key
+            # Record true output (last real layer) for downstream consumers
+            if name and prev_label:
+                outputs[name] = prev_label
+
         for layer in config["config"]["layers"]:
             retval |= cls.flatten(layer, child_dst, counters, mapping, outputs)
 
@@ -134,9 +158,17 @@ class KerasConfigParser:
     @classmethod
     def _extract_input_shapes(cls,
                               config: dict[str, T.Any],
-                              mapping: dict[str, str]) -> dict[str, list[int]]:
+                              mapping: dict[str, str],
+                              prev_label: str | None) -> dict[str, list[int]]:
         """ Build {producer_label: input_shape} for a leaf layer from its inbound_nodes,
-        normalizing Keras' inconsistent arg structure. """
+        normalizing Keras' inconsistent arg structure. Falls back to build_config + prev_label for
+        Sequential models """
+        if "inbound_nodes" not in config:  # Sequential model. Name from build_config
+            if prev_label is None:
+                return {}
+            input_shape = config.get("build_config", {}).get("input_shape", [])
+            return {prev_label: list(input_shape[1:])} if len(input_shape) > 1 else {}
+
         in_shapes = {}
         for node in config["inbound_nodes"]:
             for arg in node["args"]:
@@ -154,7 +186,8 @@ class KerasConfigParser:
                 parent: str | None = None,
                 counters: dict[str, int] | None = None,
                 mapping: dict[str, str] | None = None,
-                outputs: dict[str, str] | None = None) -> dict[str, dict[str, list[int]]]:
+                outputs: dict[str, str] | None = None,
+                prev_label: str | None = None) -> dict[str, dict[str, list[int]]]:
         """ Recurse through the config.json file flattening to a matching format to the hdf weights
 
         Parameters
@@ -172,6 +205,9 @@ class KerasConfigParser:
         outputs
             Mapping of keras functional model names to their output layer names. Default: ``None``
             (first iteration)
+        prev_label
+            The dst_label of the preceding layer (used for Sequential models where inbound_nodes
+            are absent). Default: ``None``
 
         Returns
         -------
@@ -187,12 +223,12 @@ class KerasConfigParser:
         if "layers" in config["config"]:
             return cls._flatten_sub_model(config, dst_label, counters, mapping, outputs)
 
-        if not config["name"].startswith("input_layer"):  # input layers mapped at model level
+        if "name" in config and not config["name"].startswith("input_layer"):
             mapping[config["name"]] = dst_label
 
         logger.debug("[KerasConfigParser] mapped layer '%s' to weight '%s'",
-                     config["name"], dst_label)
-        return {dst_label: cls._extract_input_shapes(config, mapping)}
+                     config["name"] if "name" in config else config["class_name"], dst_label)
+        return {dst_label: cls._extract_input_shapes(config, mapping, prev_label)}
 
 
 class KerasModel:  # pylint:disable=too-few-public-methods
@@ -264,6 +300,14 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         The weights sorted into model creation order
         """
         lookup: dict[str, list[str]] = {}
+        # Remove normalization weights from the beginning of EffNet  # TODO may actually need to prepend norms for legacy torch
+        kap_enc_weights = [k for k in weights
+                           if k.startswith("layers.functional.layers.functional.layers.")]
+        for k in reversed(kap_enc_weights):
+            if ".layers.normalization.vars." not in k:  # Always at end of encoder list
+                break
+            logger.info("[KerasModel] Removing KApp normalization weights: '%s'", k)
+            del weights[k]
         for k in weights:
             lookup.setdefault(k.rsplit(".", maxsplit=2)[0], []).append(k)
         retval: dict[str, np.ndarray] = {}
@@ -704,15 +748,18 @@ class KerasToTorch:
                     weight = weight.transpose(3, 2, 0, 1)
                 elif weight.ndim == 2:
                     weight = weight.transpose(1, 0)
+                elif ".layer_scale" in name:  # ConvNeXt layer scale needs dims expanded:
+                    assert weight.ndim == 1, f"Keras layer_scale shape: {weight.shape}"
+                    weight = weight[:, None, None]
                 elif weight.ndim != 1:
                     raise RuntimeError(f"Unhandled weight shape {weight.shape} for layer: "
                                        f"'{weight}'")
-
+            w_type = "weight" if w_type == "layer_scale" else w_type  # ConvNext re-label in torch
             assert w_type in ("weight",
                               "bias",
                               "running_mean",
                               "running_var",
-                              "num_batches_tracked")
+                              "num_batches_tracked"), f"Unhandled weight type: {w_type}"
             retval[name] = retval.get(name, {}) | {w_type: weight}
         return retval
 
@@ -856,7 +903,7 @@ class KerasToTorch:
         # for (kn, kw), (tn, tw) in zip(*(keras_grouped.items(), torch_grouped.items())):
         #     k_shape = kw["weight"].shape
         #     t_shape = tw["weight"].cpu().numpy().shape
-        #     print(kn, "|", tn, "|", k_shape, t_shape, k_shape == t_shape)
+        #     print(kn, "@", tn, "@", k_shape, "@", t_shape, "@", k_shape == t_shape)
         # exit()
         if len(keras_grouped) != len(torch_grouped):
             raise RuntimeError(f"Keras weight count ({len(keras_grouped)}) does not match Torch "
