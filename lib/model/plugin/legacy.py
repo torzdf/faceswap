@@ -8,6 +8,8 @@ import logging
 import os
 import typing as T
 import zipfile
+from dataclasses import dataclass, field
+from collections import Counter
 
 import h5py
 import numpy as np
@@ -15,6 +17,7 @@ import torch
 
 from lib.logger import parse_class_init
 from lib.utils import camel_to_snake_case, get_module_objects
+from .legacy_build_order import inception_resnet_v2_reorder
 
 if T.TYPE_CHECKING:
     from .handler import FaceswapModel
@@ -22,9 +25,24 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class LayerInfo:
+    """ Holds information about a layer collected from keras config file """
+    layer_name: str
+    """ The name of the original layer in the keras config """
+    weights_name: str
+    """ The derived name of the corresponding layer in the weights file """
+    layer_type:  str
+    """ The type (ClassName) of the layer """
+    input_layers: list[str] = field(default_factory=list)
+    """ List of inbound nodes to the layer """
+    input_shapes: list[list[int]] = field(default_factory=list)
+    """ List of input shapes to the layer corresponding to input_layers """
+
+
 class KerasConfigParser:
     """ Parses a nested keras config dictionary to a flattened dictionary of standardized layer
-    names as stored within the hdf weights file, mapped to: {inbound_node: input_shape} """
+    names as stored within the hdf file in config file order, mapped to layer information """
 
     @classmethod
     def _next_label(cls, cls_name: str, dst_name: str | None, counters: dict[str, int]) -> str:
@@ -76,7 +94,7 @@ class KerasConfigParser:
                                     for arg in node["args"]})
 
         if is_sequential:
-            assert len(inbounds) == 1  # TODO sequential models with multiple inputs
+            assert len(inbounds) == 1  # Sequential models with multiple inputs not handled
             in_names = inbounds
         else:
             in_layers = config["config"]["input_layers"]
@@ -98,7 +116,7 @@ class KerasConfigParser:
                            dst_label: str,
                            counters: dict[str, int],
                            mapping: dict[str, str],
-                           outputs: dict[str, str]) -> dict[str, dict[str, list[int]]]:
+                           outputs: dict[str, str]) -> dict[str, LayerInfo]:
         """ Flatten a nested Functional/Model layer, registering its input/output name mappings via
         recursing into its children.
 
@@ -117,8 +135,7 @@ class KerasConfigParser:
 
         Returns
         -------
-        dict of standardized layer names in model creation order mapped to
-        {inbound_node: input_shape} for the sub-model
+        dict of derived weights layer names in graph parsing order mapped to layer information
         """
         name = config.get("name")
         is_sequential = config["class_name"] == "Sequential"
@@ -187,7 +204,7 @@ class KerasConfigParser:
                 counters: dict[str, int] | None = None,
                 mapping: dict[str, str] | None = None,
                 outputs: dict[str, str] | None = None,
-                prev_label: str | None = None) -> dict[str, dict[str, list[int]]]:
+                prev_label: str | None = None) -> dict[str, LayerInfo]:
         """ Recurse through the config.json file flattening to a matching format to the hdf weights
 
         Parameters
@@ -211,8 +228,7 @@ class KerasConfigParser:
 
         Returns
         -------
-        dict of standardized layer names in model creation order mapped to
-        {inbound_node: input_shape}
+        dict of derived weights layer names in graph parsing order mapped to layer information
         """
         counters = {} if counters is None else counters
         mapping = {} if mapping is None else mapping
@@ -226,9 +242,17 @@ class KerasConfigParser:
         if "name" in config and not config["name"].startswith("input_layer"):
             mapping[config["name"]] = dst_label
 
+        info = LayerInfo(config["name"] if "name" in config else config["class_name"],
+                         dst_label,
+                         config["class_name"])
+
         logger.debug("[KerasConfigParser] mapped layer '%s' to weight '%s'",
-                     config["name"] if "name" in config else config["class_name"], dst_label)
-        return {dst_label: cls._extract_input_shapes(config, mapping, prev_label)}
+                     info.layer_name, dst_label)
+
+        for k, v in cls._extract_input_shapes(config, mapping, prev_label).items():
+            info.input_layers.append(k)
+            info.input_shapes.append(v)
+        return {dst_label: info}
 
 
 class KerasModel:  # pylint:disable=too-few-public-methods
@@ -244,10 +268,10 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         self._model_path = model_path
         self.state = self._load_state_file()
         """ The keras model's state file """
-        self.layers: dict[str, dict[str, list[int]]] = {}
-        """ Flattened dict of standardized layer names within the model in creation order as
+        self.layers: dict[str, LayerInfo] = {}
+        """ Flattened dict of standardized layer names within the model in config file order as
         derived from the model's config.json, standardized to h5 file weights labels format mapped
-        to layer inbound nodes and shapes """
+        to layer information """
         self.weights = {}
         """ The stored layer name to numpy array for the loaded keras model in model creation
         order """
@@ -299,6 +323,10 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         -------
         The weights sorted into model creation order
         """
+        if (self.state["name"] == "phaze_a" and  # TODO standardize
+                self.state["config"]["enc_architecture"] in (["inception_resnet_v2"])):
+            self.layers = inception_resnet_v2_reorder(self.layers)
+
         lookup: dict[str, list[str]] = {}
         # Remove normalization weights from the beginning of EffNet  # TODO may actually need to prepend norms for legacy torch
         kap_enc_weights = [k for k in weights
@@ -350,10 +378,9 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             self.layers = KerasConfigParser.flatten(json.loads(z_file.read("config.json")))
             # TODO remove
             # for k, v in self.layers.items():
-            #     print(k)
-            #     print(k, v)
+            #    print(k, v)
             # exit()
-            logger.debug("[KerasModel] Standardized model layer names: %s", self.layers)
+            logger.debug("[KerasModel] Flattened model layers: %s", self.layers)
 
             weights = h5py.File(io.BytesIO(z_file.read("model.weights.h5")), "r")
             self.weights = self._sort_weights(self._get_weights(T.cast(h5py.Group,
@@ -381,8 +408,8 @@ class KerasToTorch:
         The fullpath to the keras model file
     """
     custom_mapping = {"iae": {"inter_side.0": "layers.functional_1",
-                              "inter_both": "layers.functional_2"}}
-    """ Mapping for instances where torch and keras build orders don't match up """
+                              "inter_both": "layers.functional_2"}}  # TODO move to legacy_build_order
+    """ Mapping for instances where keras graph and build orders don't match up """
 
     def __init__(self, torch_model: FaceswapModel, keras_file: str) -> None:
         logger.debug(parse_class_init(locals()))
@@ -394,7 +421,7 @@ class KerasToTorch:
 
         self._pixel_shuffler_convs = self._get_pixel_shuffler_convs(self._keras.layers)
         self._dense_reshapes = self._get_dense_reshapes(self._keras.layers)
-        self._mask_layers = self._get_mask_layers({k: list(v)
+        self._mask_layers = self._get_mask_layers({k: v.input_layers
                                                    for k, v in self._keras.layers.items()},
                                                   {k: v.shape
                                                    for k, v in self._keras.weights.items()
@@ -402,8 +429,7 @@ class KerasToTorch:
         self._state = self._get_state()
 
     @classmethod
-    def _get_pixel_shuffler_convs(cls, layers: dict[str, dict[str, list[int]]]
-                                  ) -> dict[str, int]:
+    def _get_pixel_shuffler_convs(cls, layers: dict[str, LayerInfo]) -> dict[str, int]:
         """ Obtain a list of convolutions that lead into pixel shuffler layers for channel re-
         ordering
 
@@ -419,12 +445,12 @@ class KerasToTorch:
         shuffler layer
         """
         retval: dict[str, int] = {}
-        for layer, inbound in layers.items():
+        for layer, info in layers.items():
             if not layer.rsplit(".", maxsplit=1)[-1].startswith("pixel_shuffler"):
                 continue
-            assert len(inbound) == 1  # FS never has more than 2 inputs into a PS
-            in_ = list(inbound)[0]
-            in_size = inbound[in_][0]
+            assert len(info.input_layers) == 1  # FS never has more than 2 inputs into a PS
+            in_ = info.input_layers[0]
+            in_size = info.input_shapes[0][0]
             in_conv = None
             while True:
                 if in_.rsplit(".", maxsplit=1)[-1].startswith("conv2d"):
@@ -435,15 +461,15 @@ class KerasToTorch:
 
                 logger.debug("[KerasToTorch] Skipping non-conv '%s' for pixel shuffler '%s'",
                              in_, layer)
-                next_in = layers[in_]
+                next_in = layers[in_].input_layers
                 assert len(next_in) == 1
-                in_ = list(next_in)[0]
+                in_ = next_in[0]
             assert in_conv is not None
 
             out_size = None
-            for in_layers in layers.values():
-                if layer in in_layers:
-                    out_sizes = set(x[0] for x in in_layers.values())
+            for info in layers.values():
+                if layer in info.input_layers:
+                    out_sizes = set(x[0] for x in info.input_shapes)
                     assert len(out_sizes) == 1
                     out_size = list(out_sizes)[0]
                     break
@@ -454,7 +480,7 @@ class KerasToTorch:
         return retval
 
     @classmethod
-    def _get_dense_reshapes(cls, layers: dict[str, dict[str, list[int]]]
+    def _get_dense_reshapes(cls, layers: dict[str, LayerInfo]
                             ) -> dict[str, tuple[bool, tuple[int, int, int]]]:
         """ Obtain the Dense layers that either follow a flatten or precede a reshape that require
         their weights reshaped for channel first ordering
@@ -470,24 +496,22 @@ class KerasToTorch:
         reshape out_channels, (shape of input/output tensor))
         """
         retval: dict[str, tuple[bool, tuple[int, int, int]]] = {}
-        reshapes: dict[str, list[int]] = {
-            key: val
-            for x in [v for v in layers.values()
-                      if any(k.rsplit(".", maxsplit=1)[-1].startswith("reshape") for k in v)]
-            for key, val in x.items()
-        }
-        for layer, inbound in layers.items():
+        reshapes = {lyr: shp
+                    for inf in layers.values()
+                    for lyr, shp in zip(inf.input_layers, inf.input_shapes)
+                    if lyr.rsplit(".", maxsplit=1)[-1].startswith("reshape")}
+        for layer, info in layers.items():
             name = layer.rsplit(".", maxsplit=1)[-1]
             if not name.startswith(("dense", "reshape")):
                 continue
             is_dense = name.startswith("dense")
 
             while True:
-                assert len(inbound) == 1  # FS never has more than 2 inputs into a PS
-                in_ = list(inbound)[0]
+                assert len(info.input_layers) == 1  # FS never has more than 2 inputs into a Dense
+                in_ = info.input_layers[0]
                 if in_.rsplit(".", maxsplit=1)[-1].startswith("dropout"):  # move up from dropout
                     logger.debug("[KerasToTorch] Getting input to '%s' for layer '%s'", in_, layer)
-                    inbound = layers[in_]
+                    info = layers[in_]
                     continue
                 break
 
@@ -497,9 +521,8 @@ class KerasToTorch:
                              layer, in_)
                 continue
             if is_dense:
-                flat_ins = layers[in_]
-                assert len(flat_ins) == 1
-                shape = tuple(list(flat_ins.values())[0])
+                assert len(layers[in_].input_layers) == 1
+                shape = tuple(layers[in_].input_shapes[0])
                 assert len(shape) == 3  # Must be H, W, C
                 retval[layer] = (True, shape)
                 logger.debug("[KerasToTorch] Collected in channel reshape for '%s': %s",
@@ -683,7 +706,9 @@ class KerasToTorch:
     def _prepare_keras_weights(cls, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         """ Some Keras weights need preparation for porting. Specifically:
 
-        SeparableConv2D split to 2x convs (replaced in original order)
+        - SeparableConv2D split to 2x convs (replaced in original order)
+        - BatchNorm2D with `scale=False` requires weights to be inserted initialized to 1.0 as this
+        configuration does not exist in torch.
 
         Parameters
         ----------
@@ -694,6 +719,25 @@ class KerasToTorch:
         -------
         The original keras weights with any processing applied.
         """
+        # BatchNorm
+        bn_count = Counter(k.rsplit(".", maxsplit=2)[0] for k in weights
+                           if "batch_normalization" in k)
+        bn_update = {k for k, v in bn_count.items() if v == 3}
+        if bn_update:
+            new_weights = {}
+            for k, v in weights.items():
+                prefix, w_idx = k.rsplit(".", maxsplit=1)
+                if prefix.rsplit(".", maxsplit=1)[0] not in bn_update:
+                    new_weights[k] = v
+                    continue
+                if w_idx == "0":
+                    new_weights[k] = np.ones_like(v)
+                new_weights[f"{k.rsplit('.', maxsplit=1)[0]}.{int(w_idx) + 1}"] = v
+            logger.debug("[KerasToTorch] Inserted 'weight' to %s BatchNorms for 'scale=False'",
+                         len(new_weights) - len(weights))
+            weights = new_weights
+
+        # SeparableConv2D
         src_weights = {k: v for k, v in weights.items() if "separable_conv2d" in k}
         if not src_weights:
             return weights
@@ -880,14 +924,14 @@ class KerasToTorch:
             for i in range(max(len(keras_weights), len(torch_filtered))):
                 if len(keras_weights) > i:
                     k_key = list(keras_weights)[i]
-                    out = k_key + "|" + str(keras_weights[k_key].shape) + "|"
+                    out = k_key + "@" + str(keras_weights[k_key].shape) + "@"
                 else:
-                    out = " | |"
+                    out = " @ @"
                 if len(torch_filtered) > i:
                     t_key = list(torch_filtered)[i]
-                    out += t_key + "|" + str(torch_filtered[t_key].cpu().numpy().shape) + "|"
+                    out += t_key + "@" + str(torch_filtered[t_key].cpu().numpy().shape) + "@"
                 else:
-                    out += " | |"
+                    out += " @ @"
                 print(out)
 
             raise RuntimeError(f"Keras weight count ({len(keras_weights)}) does not match Torch "
@@ -903,7 +947,7 @@ class KerasToTorch:
         # for (kn, kw), (tn, tw) in zip(*(keras_grouped.items(), torch_grouped.items())):
         #     k_shape = kw["weight"].shape
         #     t_shape = tw["weight"].cpu().numpy().shape
-        #     print(kn, "@", tn, "@", k_shape, "@", t_shape, "@", k_shape == t_shape)
+        #     print(tn, "@", t_shape, "@", kn, "@", k_shape, "@", k_shape == t_shape)
         # exit()
         if len(keras_grouped) != len(torch_grouped):
             raise RuntimeError(f"Keras weight count ({len(keras_grouped)}) does not match Torch "
@@ -918,6 +962,7 @@ class KerasToTorch:
         for lbl, weights in torch_grouped.items():
             try:
                 key = self._get_keras_key(lbl, weights["weight"].shape, keras_grouped)
+                print(f"{lbl}@{self._keras.layers[key].layer_name}@{key}@{tuple(weights['weight'].shape)}")
             except:  # TODO remove
                 print()
                 # print(self._mask_layers)
@@ -929,6 +974,7 @@ class KerasToTorch:
                     print("mask" not in lbl and k not in self._mask_layers)
                     print(v["weight"].shape == weights["weight"].shape)
                     print(list(v) == list(weights))
+                    exit()
                 raise
 
             val = keras_grouped.pop(key)
@@ -945,6 +991,7 @@ class KerasToTorch:
             for k, v in val.items():
                 mapped[f"{lbl}.{k}"] = torch.from_numpy(v)
 
+        # exit()
         retval = {k: mapped.get(k, v) for k, v in torch_weights.items()}  # Re-insert BN
         logger.debug("[KerasToTorch] Mapped weights: %s", len(retval))
         return retval
@@ -967,6 +1014,26 @@ class KerasToTorch:
         if not self._state_dict:
             self._build_state_dict()
         return self._state_dict
+
+
+def update_hyperparameters(model: torch.nn.Module) -> None:
+    """ Update the hyperparameters of specific layers from a Torch model to match their Keras
+    counterpart
+
+    Parameters
+    ----------
+    model
+        The loaded torch model to update the hyperparameters for
+    """
+    seen = set()
+    for name, module in model.named_modules():
+        seen.add(str(type(module)))
+        if isinstance(module, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d)):
+            logger.info("Updating legacy BatchNorm '%s' (eps: %s, momentum: %s)",
+                        name, 1.001e-5, 0.99)
+            module.eps = 1.001e-5  # TODO this is DenseNet value
+            module.momentum = 0.99
+    print(seen)
 
 
 __all__ = get_module_objects(__name__)
