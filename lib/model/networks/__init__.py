@@ -2,4 +2,5 @@
 """ Pre-defined networks for use in faceswap """
 from .clip import ViT, ViTConfig, TypeModels as TypeModelsViT
 from .inception_resnet_v2 import inception_resnet_v2
+from .mobilenet import mobilenet
 from .xception import xception
