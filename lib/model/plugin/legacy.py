@@ -17,7 +17,7 @@ import torch
 
 from lib.logger import parse_class_init
 from lib.utils import camel_to_snake_case, get_module_objects
-from .legacy_build_order import inception_resnet_v2_reorder
+from .legacy_build_order import reorder_layers
 
 if T.TYPE_CHECKING:
     from .handler import FaceswapModel
@@ -323,9 +323,9 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         -------
         The weights sorted into model creation order
         """
-        if (self.state["name"] == "phaze_a" and  # TODO standardize
-                self.state["config"]["enc_architecture"] in (["inception_resnet_v2"])):
-            self.layers = inception_resnet_v2_reorder(self.layers)
+        model = (self.state["config"]["enc_architecture"] if self.state["name"] == "phaze_a"
+                 else self.state["name"])
+        self.layers = reorder_layers(model, self.layers)
 
         lookup: dict[str, list[str]] = {}
         # Remove normalization weights from the beginning of EffNet  # TODO may actually need to prepend norms for legacy torch
@@ -962,19 +962,21 @@ class KerasToTorch:
         for lbl, weights in torch_grouped.items():
             try:
                 key = self._get_keras_key(lbl, weights["weight"].shape, keras_grouped)
-                print(f"{lbl}@{self._keras.layers[key].layer_name}@{key}@{tuple(weights['weight'].shape)}")
+                lkup = key if "separable_conv2d" not in key else key[:-2]
+                print(f"{lbl}@{self._keras.layers[lkup].layer_name}@{key}@{tuple(weights['weight'].shape)}")
             except:  # TODO remove
                 print()
                 # print(self._mask_layers)
                 print(lbl, weights["weight"].shape)
-                for k, v in keras_grouped.items():
+                for idx, (k, v) in enumerate(keras_grouped.items()):
                     print()
                     print(k, v["weight"].shape)
                     print("mask" in lbl and k in self._mask_layers)
                     print("mask" not in lbl and k not in self._mask_layers)
                     print(v["weight"].shape == weights["weight"].shape)
                     print(list(v) == list(weights))
-                    exit()
+                    if idx == 5:
+                        break
                 raise
 
             val = keras_grouped.pop(key)
@@ -991,7 +993,7 @@ class KerasToTorch:
             for k, v in val.items():
                 mapped[f"{lbl}.{k}"] = torch.from_numpy(v)
 
-        # exit()
+#        exit()
         retval = {k: mapped.get(k, v) for k, v in torch_weights.items()}  # Re-insert BN
         logger.debug("[KerasToTorch] Mapped weights: %s", len(retval))
         return retval
