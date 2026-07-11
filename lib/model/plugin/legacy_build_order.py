@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 _ENC_PREFIX = "layers.functional.layers.functional.layers."
 
 
-def _inception_resnet_v2_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-    """ Re-orders imported layer names from Keras Applications InceptionResNetV2 from graph order
-    to build order. Fairly straightforward as default naming is used for all problematic layers """
+def _inception_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+    """ Re-orders imported layer names from Keras Applications InceptionResNet models from graph
+    order to build order. Fairly straightforward as default naming is used for all problematic
+    layers """
     reorder = ["batch_normalization", "conv2d"]
     current = {"Conv2D": 0, "BatchNormalization": 0}
     backfill: dict[str, dict[int, LayerInfo]] = {"Conv2D": {}, "BatchNormalization": {}}
@@ -104,7 +105,8 @@ def reorder_layers(model: str, layers: dict[str, LayerInfo]) -> dict[str, LayerI
     -------
     The reordered layers
     """
-    functions = {"inception_resnet_v2": _inception_resnet_v2_reorder,
+    functions = {"inception_resnet_v2": _inception_reorder,
+                 "inception_v3": _inception_reorder,
                  "xception": _xception_reorder}
     if model not in functions:
         return layers

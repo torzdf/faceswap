@@ -1,6 +1,7 @@
 #! /usr/env/bin/python3
 """ InceptionResnet_v2 model adapted from timm:
 https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/inception_resnet_v2.py
+InceptionV3 override to make pooling layers compatible with Keras weights
 """
 from __future__ import annotations
 
@@ -9,6 +10,8 @@ import typing as T
 
 import torch
 from torch import nn
+from torch.nn import functional as F
+from torchvision.models import inception as tv_incept
 
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
@@ -49,7 +52,7 @@ class Conv2dBn(nn.Module):
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -81,7 +84,7 @@ class Mixed5b(nn.Module):
                                      Conv2dBn(192, 64, 1))
 
     def forward(self, inputs: torch.Tensor):
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -121,7 +124,7 @@ class Block35(nn.Module):
         self.act = nn.ReLU()
 
     def forward(self, inputs: torch.Tensor):
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -154,7 +157,7 @@ class Mixed6a(nn.Module):
         self.branch2 = nn.MaxPool2d(3, stride=2)
 
     def forward(self, inputs: torch.Tensor):
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -192,7 +195,7 @@ class Block17(nn.Module):
         self.act = nn.ReLU()
 
     def forward(self, inputs: torch.Tensor):
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -227,7 +230,7 @@ class Mixed7a(nn.Module):
         self.branch3 = nn.MaxPool2d(3, stride=2)
 
     def forward(self, inputs: torch.Tensor):
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -270,7 +273,7 @@ class Block8(nn.Module):
         self.relu = None if no_relu else nn.ReLU()
 
     def forward(self, inputs: torch.Tensor):
-        """ Forward pass through Block
+        """ Forward pass through the Block
 
         Parameters
         ----------
@@ -385,6 +388,85 @@ def inception_resnet_v2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T
     retval = InceptionResnetV2(**kwargs)
     # TODO port weights and load here
     return retval
+
+
+class InceptionA(tv_incept.InceptionA):
+    """ Override Inception3's A mixed _forward pass to exclude padding count from avg_pool2d """
+    def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        branch1x1 = self.branch1x1(x)
+        branch5x5 = self.branch5x5_2(self.branch5x5_1(x))
+        branch3x3dbl = self.branch3x3dbl_3(self.branch3x3dbl_2(self.branch3x3dbl_1(x)))
+        branch_pool = F.avg_pool2d(  # pylint:disable=not-callable
+            x, kernel_size=3, stride=1, padding=1, count_include_pad=False)
+        branch_pool = self.branch_pool(branch_pool)
+        return [branch1x1, branch5x5, branch3x3dbl, branch_pool]
+
+
+class InceptionC(tv_incept.InceptionC):
+    """ Override Inception3's C mixed _forward pass to exclude padding count from avg_pool2d """
+    def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        branch1x1 = self.branch1x1(x)
+        branch7x7 = self.branch7x7_3(self.branch7x7_2(self.branch7x7_1(x)))
+        branch7x7dbl = self.branch7x7dbl_3(self.branch7x7dbl_2(self.branch7x7dbl_1(x)))
+        branch7x7dbl = self.branch7x7dbl_5(self.branch7x7dbl_4(branch7x7dbl))
+        branch_pool = F.avg_pool2d(  # pylint:disable=not-callable
+            x, kernel_size=3, stride=1, padding=1, count_include_pad=False)
+        branch_pool = self.branch_pool(branch_pool)
+        return [branch1x1, branch7x7, branch7x7dbl, branch_pool]
+
+
+class InceptionE(tv_incept.InceptionE):
+    """ Override Inception3's E mixed _forward pass to exclude padding count from avg_pool2d """
+    def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        branch1x1 = self.branch1x1(x)
+        branch3x3 = self.branch3x3_1(x)
+        branch3x3 = torch.cat([self.branch3x3_2a(branch3x3), self.branch3x3_2b(branch3x3)], 1)
+        branch3x3dbl = self.branch3x3dbl_2(self.branch3x3dbl_1(x))
+        branch3x3dbl = torch.cat([self.branch3x3dbl_3a(branch3x3dbl),
+                                  self.branch3x3dbl_3b(branch3x3dbl)], 1)
+        branch_pool = F.avg_pool2d(  # pylint:disable=not-callable
+            x, kernel_size=3, stride=1, padding=1, count_include_pad=False)
+        branch_pool = self.branch_pool(branch_pool)
+        return [branch1x1, branch3x3, branch3x3dbl, branch_pool]
+
+
+class Inception3(tv_incept.Inception3):
+    """ Override Inception3's _forward pass to replace the functional flatten layer and fix
+    pooling """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.Mixed_5b = InceptionA(192, 32)
+        self.Mixed_5c = InceptionA(256, 64)
+        self.Mixed_5d = InceptionA(288, 64)
+        self.Mixed_6b = InceptionC(768, 128)
+        self.Mixed_6c = InceptionC(768, 160)
+        self.Mixed_6d = InceptionC(768, 160)
+        self.Mixed_6e = InceptionC(768, 192)
+        self.Mixed_7b = InceptionE(1280)
+        self.Mixed_7c = InceptionE(2048)
+
+        self.flatten = nn.Flatten()
+
+    def _forward(self, x: torch.Tensor) -> tuple[torch.Tensor, T.Optional[torch.Tensor]]:
+        """ Inception3 forward pass with flatten functional replaced with a module """
+
+        x = self.maxpool1(self.Conv2d_2b_3x3(self.Conv2d_2a_3x3(self.Conv2d_1a_3x3(x))))
+        x = self.maxpool2(self.Conv2d_4a_3x3(self.Conv2d_3b_1x1(x)))
+        x = self.Mixed_5d(self.Mixed_5c(self.Mixed_5b(x)))
+        x = self.Mixed_6e(self.Mixed_6d(self.Mixed_6c(self.Mixed_6b(self.Mixed_6a(x)))))
+        aux = None
+        if self.AuxLogits is not None and self.training:
+            aux = self.AuxLogits(x)
+        x = self.Mixed_7c(self.Mixed_7b(self.Mixed_7a(x)))
+        x = self.flatten(self.dropout(self.avgpool(x)))
+        x = self.fc(x)
+        return x, aux
+
+
+def override_inception3():
+    """ Monkey patch torchvision inception3 to load our compatible version """
+    logger.debug("Monkey patching Torch InceptionV3")
+    setattr(tv_incept, "Inception3", Inception3)
 
 
 __all__ = get_module_objects(__name__)
