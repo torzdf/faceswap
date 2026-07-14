@@ -115,6 +115,108 @@ class InstanceNormLegacy(nn.Module):
         return normed * self.weight + self.bias
 
 
+# TODO replace the SamePad2D calls with this layer instead
+class Conv2dLegacy(nn.Conv2d):
+    """ A Convolution2D Layer that applies padding in the same method as Keras
+
+    Parameters
+    ----------
+    in_channels
+        Number of channels in the input image
+    out_channels
+        Number of channels produced by the convolution
+    kernel_size
+        Size of the convolving kernel
+    stride
+        Stride of the convolution. Default: 1
+    padding
+         `"valid"` means no padding. `"same"` applies TensorFlow/Keras SAME padding semantics,
+         including asymmetric padding when required. Extra padding is applied to the bottom and
+         right sides. When `padding="same"` and `strides=1`, the output has the same size as
+         the input. Default: ``"valid"``
+    dilation
+        Spacing between kernel elements. Default: 1
+    groups
+        Number of blocked connections from input channels to output channels. Default: 1
+    bias
+        If ``True``, adds a learnable bias to the output. Default: ``True``
+    padding_mode
+        The padding mode applied by the explicit Keras-compatible padding operation.
+        Default: ``"zeros"``
+    """
+    def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
+                 in_channels: int,
+                 out_channels: int,
+                 kernel_size: int | tuple[int, int],
+                 stride: int | tuple[int, int] = 1,
+                 padding: T.Literal["same", "valid"] = "valid",
+                 dilation: int | tuple[int, int] = 1,
+                 groups: int = 1,
+                 bias: bool = True,
+                 padding_mode: T.Literal["zeros", "reflect", "replicate", "circular"] = "zeros",
+                 device=None,
+                 dtype=None) -> None:
+        logger.debug(parse_class_init(locals()))
+        assert padding in ("same", "valid")
+        assert isinstance(kernel_size, int) or len(kernel_size) == 2
+        assert isinstance(stride, int) or len(stride) == 2
+        assert isinstance(dilation, int) or len(dilation) == 2
+        self._legacy_padding = padding
+        self._legacy_padding_mode = "constant" if padding_mode == "zeros" else padding_mode
+        super().__init__(in_channels=in_channels,
+                         out_channels=out_channels,
+                         kernel_size=kernel_size,
+                         stride=stride,
+                         padding=0,
+                         dilation=dilation,
+                         groups=groups,
+                         bias=bias,
+                         padding_mode="zeros",
+                         device=device,
+                         dtype=dtype)
+
+    def pad(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Apply padding to the input Tensor
+
+        Parameters
+        ----------
+        inputs
+            The tensor to be padded
+
+        Returns
+        -------
+        The padded tensor
+        """
+        if self._legacy_padding == "valid":
+            return inputs
+        height, width = inputs.shape[-2:]
+        kernel_h, kernel_w = self.kernel_size
+        stride_h, stride_w = self.stride
+        dilation_h, dilation_w = self.dilation
+
+        effective_kernel_h = (kernel_h - 1) * dilation_h + 1
+        effective_kernel_w = (kernel_w - 1) * dilation_w + 1
+        pad_h = max((math.ceil(height / stride_h) - 1) * stride_h + effective_kernel_h - height, 0)
+        pad_w = max((math.ceil(width / stride_w) - 1) * stride_w + effective_kernel_w - width, 0)
+        return F.pad(inputs,
+                     (pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2),
+                     mode=self._legacy_padding_mode)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:  # pylint:disable=redefined-builtin
+        """ Forward pass through the legacy Conv2d block
+
+        Parameters
+        ----------
+        input
+            The input tensor to the block
+
+        Returns
+        -------
+        The output tensor for the block
+        """
+        return super().forward(self.pad(input))
+
+
 class SamePad2d(nn.Module):
     """Asymmetric padding to replicate Keras' padding='same' for backwards compatibility. This
     should not be used to new models. It exists purely to enable bit-accurate porting of Tensorflow
