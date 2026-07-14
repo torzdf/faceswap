@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
+from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import get_module_objects
 
 logger = logging.getLogger(__name__)
@@ -43,14 +44,13 @@ class DepthwiseConvBlock(nn.Module):
         super().__init__()
         assert stride in (1, 2)
         depth_channels = in_channels * depth_multiplier
-        self.pad = nn.ZeroPad2d((0, 1, 0, 1)) if stride == 2 else nn.Identity()
-        self.dw = nn.Conv2d(in_channels,
-                            depth_channels,
-                            3,
-                            stride=stride,
-                            padding=1 if stride == 1 else 0,
-                            groups=in_channels,
-                            bias=False)
+        self.dw = Conv2dLegacy(in_channels,
+                               depth_channels,
+                               3,
+                               stride=stride,
+                               padding="same",
+                               groups=in_channels,
+                               bias=False)
         self.dw_bn = nn.BatchNorm2d(depth_channels, eps=_BN_EPS, momentum=_BN_MOM)
         self.dw_act = nn.ReLU6(inplace=True)
         self.pw = nn.Conv2d(depth_channels, out_channels, 1, bias=False)
@@ -69,7 +69,7 @@ class DepthwiseConvBlock(nn.Module):
         -------
         The output tensor from the block
         """
-        x = self.dw_act(self.dw_bn(self.dw(self.pad(inputs))))  # Depthwise
+        x = self.dw_act(self.dw_bn(self.dw(inputs)))  # Depthwise
         return self.pw_act(self.pw_bn(self.pw(x)))  # Pointwise
 
 
