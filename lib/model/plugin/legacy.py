@@ -987,9 +987,10 @@ class KerasToTorch:
                 self._pixel_shuffle_reorder(T.cast(dict[T.Literal["weight", "bias"], np.ndarray],
                                                    val),
                                             self._pixel_shuffler_convs[key])
-
             logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
                          key, lbl, val["weight"].shape)
+            if key.rsplit(".", maxsplit=1)[-1].startswith("layer_scale"):  # Rename for ConvNext
+                val = {"layer_scale" if k == "weight" else k: v for k, v in val.items()}
             for k, v in val.items():
                 mapped[f"{lbl}.{k}"] = torch.from_numpy(v)
 
@@ -1016,26 +1017,6 @@ class KerasToTorch:
         if not self._state_dict:
             self._build_state_dict()
         return self._state_dict
-
-
-def update_hyperparameters(model: torch.nn.Module) -> None:
-    """ Update the hyperparameters of specific layers from a Torch model to match their Keras
-    counterpart
-
-    Parameters
-    ----------
-    model
-        The loaded torch model to update the hyperparameters for
-    """
-    seen = set()
-    for name, module in model.named_modules():
-        seen.add(str(type(module)))
-        if isinstance(module, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d)):
-            logger.info("Updating legacy BatchNorm '%s' (eps: %s, momentum: %s)",
-                        name, 1.001e-5, 0.99)
-            module.eps = 1.001e-5  # TODO this is DenseNet value
-            module.momentum = 0.99
-    print(seen)
 
 
 __all__ = get_module_objects(__name__)
