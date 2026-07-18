@@ -2,6 +2,7 @@
 """ The model build order for various Keras Application Encoders for porting weights """
 from __future__ import annotations
 import logging
+import re
 import typing as T
 
 from lib.utils import get_module_objects
@@ -47,6 +48,55 @@ def _inception_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
         backfill[v.layer_type][idx] = v
 
     assert len(retval) == len(layers), "Not all layers handled"
+    return retval
+
+
+def _nasnet_reorder(layers: dict[str, LayerInfo]  # pylint:disable=too-many-locals
+                    ) -> dict[str, LayerInfo]:
+    """ Re-orders imported layer names from Keras Applications NasNet from graph order to build
+    order. Some fairly arbitrary re-ordering occurs, but fortunately layer labelling makes this a
+    bit easier """
+    sep_match = re.compile(r"^(separable)_conv_(\d)(?:_.*?(left|right)(\d))?.*_(\d+)$")
+    adj_match = re.compile(r"^(adjust|reduction)_(conv|bn)_.*?(\d+)$")
+    reorder_types = {"BatchNormalization", "Conv2D", "SeparableConv2D"}
+    type_order = ["adjust", "reduction", "separable"]
+    conv_order = ["conv", "bn"]
+    side_order = ["left", "right"]
+
+    sort_keys = {}
+    for k, v in layers.items():
+        if (not k.startswith("layers.functional.layers.functional.layers.")
+                or v.layer_type not in reorder_types):
+            continue
+        lyr = v.layer_name
+        block_add = 0 if "stem" in lyr else 3  # Numbering resets after stem
+        match = next((m for m in (sep_match.match(lyr), adj_match.match(lyr)) if m), None)
+        if not match:
+            continue
+        groups = match.groups()
+        order = [int(groups[-1]) + block_add,   # Ensure blocks ordered
+                 type_order.index(groups[0])]   # Ensure adjust, reduce, separable order
+        if len(groups) == 3:  # adjust/reduce
+            order.extend([conv_order.index(groups[1]), 0, 0])
+        else:   # separable
+            order.extend([int(groups[3]), side_order.index(groups[2]), int(groups[1])])
+        sort_keys[k] = order
+    sorted_keys = [k for k, _ in sorted(sort_keys.items(), key=lambda item: item[1])]
+
+    retval: dict[str, LayerInfo] = {}
+    while layers:
+        k = list(layers)[0]
+        if k not in sorted_keys:
+            v = layers.pop(k)
+            logger.debug("Retaining layer '%s' ('%s')", k, v.layer_name)
+            retval[k] = v
+            continue
+        pos_idx = sorted_keys.index(k)
+        for _ in range(pos_idx + 1):
+            k = sorted_keys.pop(0)
+            v = layers.pop(k)
+            logger.debug("Reordering layer '%s' ('%s')", k, v.layer_name)
+            retval[k] = v
     return retval
 
 
@@ -107,7 +157,10 @@ def reorder_layers(model: str, layers: dict[str, LayerInfo]) -> dict[str, LayerI
     """
     functions = {"inception_resnet_v2": _inception_reorder,
                  "inception_v3": _inception_reorder,
+                 "nasnet_large": _nasnet_reorder,
+                 "nasnet_mobile": _nasnet_reorder,
                  "xception": _xception_reorder}
+
     if model not in functions:
         return layers
     logger.info("Re-ordering layers for '%s'", model)
