@@ -532,7 +532,7 @@ def camel_case_split(identifier: str) -> list[str]:
 
 
 def camel_to_snake_case(text: str) -> str:
-    """Convert CamelCase to snake_case
+    """Convert camelCase to snake_case
 
     Parameters
     ----------
@@ -546,6 +546,22 @@ def camel_to_snake_case(text: str) -> str:
     s1 = re.sub(r'(.)([A-Z][a-z0-9]+)', r'\1_\2', text)
     s2 = re.sub(r'([a-z])([A-Z])', r'\1_\2', s1)
     return s2.lower()
+
+
+def snake_to_camel_case(text: str) -> str:
+    """Convert snake_case to camelCase
+
+    Parameters
+    ----------
+    text
+        The snake case text to convert
+
+    Returns
+    -------
+    The text converted to camel case
+    """
+    split = text.split("_")
+    return split[0] + "".join(x.capitalize() for x in split[1:])
 
 
 def safe_shutdown(got_error: bool = False) -> None:

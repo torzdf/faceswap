@@ -2,6 +2,7 @@
 """ XceptionNet model adapted from timm:
 https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/xception.py
 """
+# pylint:disable=duplicate-code
 from __future__ import annotations
 
 import logging
@@ -277,7 +278,7 @@ class Xception(nn.Module):  # pylint: disable=too-many-instance-attributes
         -------
         The output tensor from XceptionNet
         """
-        x = inputs * 2. - 1.
+        x = inputs * 2. - 1.  # legacy Keras scaling
         x = self.forward_features(x)
         x = self.forward_head(x)
         return x

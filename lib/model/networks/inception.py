@@ -3,6 +3,7 @@
 https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/inception_resnet_v2.py
 InceptionV3 override to make pooling layers compatible with Keras weights
 """
+# pylint:disable=duplicate-code
 from __future__ import annotations
 
 import logging
@@ -432,7 +433,7 @@ class InceptionE(tv_incept.InceptionE):
 
 class Inception3(tv_incept.Inception3):
     """ Override Inception3's _forward pass to replace the functional flatten layer and fix
-    pooling """
+    pooling to be backwards compatible """
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.Mixed_5b = InceptionA(192, 32)

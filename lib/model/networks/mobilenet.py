@@ -143,7 +143,7 @@ class MobileNet(nn.Module):
         -------
         The output tensor from the MobileNet
         """
-        x = inputs * 2. - 1.
+        x = inputs * 2. - 1.  # Legacy Keras scaling
         x = self.dw(self.conv1(x))
         return self.classifier(x)
 
