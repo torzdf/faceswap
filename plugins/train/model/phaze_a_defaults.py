@@ -44,8 +44,8 @@ _ENCODERS: list[str] = sorted([
     "efficientnet_v2_b2", "efficientnet_v2_b3", "efficientnet_v2_l", "efficientnet_v2_m",
     "efficientnet_v2_s", "inception_resnet_v2", "inception_v3", "mobilenet", "mobilenet_v2",
     "mobilenet_v3_large", "mobilenet_v3_small", "nasnet_large", "nasnet_mobile", "resnet50",
-    "resnet50_v2", "resnet101", "resnet101_v2", "resnet152", "resnet152_v2", "vgg16", "vgg19",
-    "xception", "fs_original"])
+    "resnet50_v1_5", "resnet50_v2", "resnet101", "resnet101_v1_5", "resnet101_v2", "resnet152",
+    "resnet152_v1_5", "resnet152_v2", "vgg16", "vgg19", "xception", "fs_original"])
 
 
 # General
