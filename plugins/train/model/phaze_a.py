@@ -13,7 +13,7 @@ from torch import nn
 from torchvision import models as TVMods
 
 from lib.logger import parse_class_init
-from lib.model.layers_legacy import ConvBlockLegacy, InstanceNormLegacy, UpSampling2dLegacy
+from lib.model.layers_legacy import Conv2dLegacy, InstanceNormLegacy, UpSampling2dLegacy
 from lib.model.layers import (
     AdaIN, ChannelLayerNorm, ChannelRMSNorm, GaussianNoise, Reshape, ResidualBlock, UpscaleDNY,
     Upscale2xBlock, UpscaleResizeImages, UpscaleSubpixel
@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 # TODO error on too small input size
 # TODO weights initialization
+# TODO summaries instance counts + call per instance counts can be wrong
+# TODO check EncInfo kwargs load correctly when loading model. If not then use value() in build
 
 
 UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
@@ -385,7 +387,7 @@ def _get_upscale_layer(method: UpsampleT,
     return retval
 
 
-class _EncoderFaceswap(nn.Module):
+class _EncoderFaceswap(nn.Sequential):
     """ A configurable standard Faceswap encoder based off Original model.
 
     Parameters
@@ -398,8 +400,6 @@ class _EncoderFaceswap(nn.Module):
     max_filters
         The maximum number of filters to use for encoder convolutions. (i.e. the number of filters
         to use for the final encoder layer)
-    input_size
-        The pixel dimension of the input tensor
     use_alt
         Use a slightly alternate version of the Faceswap Encoder
     is_legacy
@@ -409,76 +409,37 @@ class _EncoderFaceswap(nn.Module):
                  depth: int,
                  min_filters: int,
                  max_filters: int,
-                 input_size: int,
                  use_alt: bool,
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         channels = [3] + [min(max_filters, min_filters * (2 ** i)) for i in range(depth)]
-        self.output_shape = self._get_output_shape(input_size, depth, channels[-1], use_alt)
-        """ The output shape from the encoder excluding batch dimension """
         if use_alt:
             start = channels[0]
             channels = channels[1:] + [channels[-1]]
-            self.down = nn.Sequential(
-                nn.Sequential(nn.Conv2d(start, channels[0], 1),
-                              nn.LeakyReLU(0.2, inplace=True)),
-                *(nn.Sequential(nn.Conv2d(channels[i], channels[i], 3, padding=1),
-                                nn.LeakyReLU(0.2, inplace=True),
-                                nn.Conv2d(channels[i],
-                                          channels[i + 1],
-                                          4 if i == depth - 1 else 3,
-                                          padding=0 if i == depth - 1 else 1),
-                                nn.LeakyReLU(0.2, inplace=True),
-                                nn.Identity() if i == depth - 1 else nn.MaxPool2d(2))
-                  for i in range(depth))
-            )
-        elif is_legacy:
-            self.down = nn.Sequential(*(
-                ConvBlockLegacy(
-                    channels[i], channels[i + 1], 5, stride=2, padding="same", leaky_slope=0.1
-                    )
-                for i in range(depth)
-                ))
-        else:
-            self.down = nn.Sequential(*(
-                nn.Sequential(nn.Conv2d(channels[i], channels[i + 1], 5, stride=2, padding=2),
-                              nn.LeakyReLU(0.1, inplace=True))
-                for i in range(depth)))
-
-    @classmethod
-    def _get_output_shape(cls, input_size: int, depth: int, final_channels: int, is_alt: bool
-                          ) -> tuple[int, int, int]:
-        """ Calculate the final output shape from the encoder """
-        size = input_size
-        if is_alt:
+            self.conv1 = nn.Conv2d(start, channels[0], 1)
+            self.act1 = nn.LeakyReLU(0.2, inplace=True)
             for i in range(depth):
-                if i == depth - 1:
-                    size = size - 3  # final 4x4 conv
-                else:
-                    size = size // 2  # MaxPool2D
+                kern = 4 if i == depth - 1 else 3
+                pad = 0 if i == depth - 1 else 1
+                self.add_module(f"conv{i + 2}", nn.Conv2d(channels[i], channels[i], 3, padding=1))
+                self.add_module(f"act{i + 2}", nn.LeakyReLU(0.2, inplace=True))
+                self.add_module(
+                    f"conv{i + 2}a", nn.Conv2d(channels[i], channels[i + 1], kern, padding=pad)
+                    )
+                self.add_module(f"act{i + 2}a", nn.LeakyReLU(0.2, inplace=True))
+                if i != depth - 1:
+                    self.add_module(f"pool{i + 2}", nn.MaxPool2d(2))
         else:
-            for _ in range(depth):
-                size = (size - 1) // 2 + 1  # k=5, stride=2, padding=2
-
-        return (final_channels, size, size)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Call the original Faceswap Encoder
-
-        Parameters
-        ----------
-        inputs
-            The input tensor to the Faceswap Encoder
-
-        Returns
-        -------
-        The output tensor from the Faceswap Encoder
-        """
-        return self.down(inputs)
+            conv = Conv2dLegacy if is_legacy else nn.Conv2d
+            padding = "same" if is_legacy else 2
+            for i in range(depth):
+                self.add_module(f"conv{i + 1}",
+                                conv(channels[i], channels[i + 1], 5, stride=2, padding=padding))
+                self.add_module(f"act{i + 1}",  nn.LeakyReLU(0.1, inplace=True))
 
 
-class Bottleneck(nn.Module):
+class Bottleneck(nn.Sequential):
     """ The bottleneck fully connected layer
 
     Parameters
@@ -503,38 +464,22 @@ class Bottleneck(nn.Module):
         logger.debug(parse_class_init(locals()))
         super().__init__()
         assert len(input_shape) == 3  # TODO remove after testing this holds true and then remove len check from nn.Flatten
-        layers = []
         if normalization and normalization != "none":
-            layers.append(_get_normalization(normalization, input_shape[0], is_legacy))
+            self.norm = _get_normalization(normalization, input_shape[0], is_legacy)
         if len(input_shape) > 1 and bottleneck in ("dense", "flatten"):
-            layers.append(nn.Flatten())
+            self.flat = nn.Flatten()
 
         output_shape = (input_shape[0], )
         if bottleneck == "dense":
-            layers.append(nn.Linear(int(np.prod(input_shape)), size))
+            self.fc = nn.Linear(int(np.prod(input_shape)), size)
             output_shape = (size, )
         elif bottleneck in ("average_pooling", "max_pooling"):
             lyr = nn.MaxPool2d if bottleneck == "max_pooling" else nn.AvgPool2d
-            layers.append(lyr(input_shape[1]))
-            layers.append(nn.Flatten())  # Flatten prior to fc layers
+            self.pool = lyr(input_shape[1])
+            self.flat = nn.Flatten()  # Flatten prior to fc layers
 
-        self.lyr = nn.Sequential(*layers) if len(layers) > 1 else layers[0]
         self.output_shape = output_shape
         """ The output shape from the bottleneck excluding batch dimension """
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward through the bottleneck
-
-        Parameters
-        ----------
-        inputs
-            The input tensor to the Phaze-A bottleneck
-
-        Returns
-        -------
-        The output tensor from the Phaze-A bottleneck
-        """
-        return self.lyr(inputs)
 
 
 class Encoder(nn.Sequential):
@@ -563,9 +508,7 @@ class Encoder(nn.Sequential):
         mod_info = _MODEL_MAPPING[architecture]
         self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
         setattr(self, self._name, self._get_encoder(mod_info, input_size, is_legacy))
-        out_shape = T.cast(tuple[int, int, int],
-                           (self._get_output_shape(input_size) if mod_info.torch_name
-                            else self._backbone.output_shape))
+        out_shape = self._get_output_shape(input_size)
         self.bottleneck = None if bottleneck_args is None else Bottleneck(out_shape,
                                                                           *bottleneck_args,
                                                                           is_legacy=is_legacy)
@@ -639,10 +582,9 @@ class Encoder(nn.Sequential):
             retval = self._select_layers(backbone, mod_info)
             return retval
 
-        return _EncoderFaceswap(cfg.fs_original_depth(),
+        return _EncoderFaceswap(cfg.fs_original_depth(),  # Move config to EncInfo Kwargs
                                 cfg.fs_original_min_filters(),
                                 cfg.fs_original_max_filters(),
-                                input_size,
                                 cfg.fs_original_use_alt(),
                                 is_legacy)
 
