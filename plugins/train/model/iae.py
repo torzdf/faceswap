@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-import typing as T
 
 import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import UpscaleSubpixel
-from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.layers import Reshape, UpscaleSubpixel
+from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Encoder(nn.Module):
+class Encoder(nn.Sequential):
     """ The IAE Encoder
 
     Parameters
@@ -32,64 +31,29 @@ class Encoder(nn.Module):
     def __init__(self, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        if is_legacy:
-            self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
-            self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
-            self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
-            self.conv4 = ConvBlockLegacy(512, 1024, 5, stride=2, padding="same")
-        else:
-            self.conv1 = nn.Sequential(nn.Conv2d(3, 128, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv2 = nn.Sequential(nn.Conv2d(128, 256, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv3 = nn.Sequential(nn.Conv2d(256, 512, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv4 = nn.Sequential(nn.Conv2d(512, 1024, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
+
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
+
+        self.conv1 = conv(3, 128, 5, stride=2, padding=padding)
+        self.act1 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = conv(128, 256, 5, stride=2, padding=padding)
+        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv3 = conv(256, 512, 5, stride=2, padding=padding)
+        self.act3 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv4 = conv(512, 1024, 5, stride=2, padding=padding)
+        self.act4 = nn.LeakyReLU(0.1, inplace=True)
         self.flatten = nn.Flatten(start_dim=1)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the IAE encoder
 
-        Parameters
-        ----------
-        inputs
-            The input to the encoder
-
-        Returns
-        -------
-        The output from the encoder
-        """
-        x = self.conv1(inputs)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        return self.flatten(x)
-
-
-class Intermediate(nn.Module):
+class Intermediate(nn.Sequential):
     """ The IAE Intermediate Network """
     def __init__(self) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.dense1 = nn.Linear(1024 * 4 * 4, 1024)
         self.dense2 = nn.Linear(1024, 512 * 4 * 4)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the IAE Intermediate layer
-
-        Parameters
-        ----------
-        inputs
-            The input to the intermediate layer
-
-        Returns
-        -------
-        The output from the intermediate layer
-        """
-        x = self.dense1(inputs)
-        x = T.cast(torch.Tensor, self.dense2(x))
-        return x.view(x.shape[0], 512, 4, 4)
+        self.reshape = Reshape((512, 4, 4), is_contiguous=True)
 
 
 class Decoder(nn.Module):

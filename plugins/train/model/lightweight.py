@@ -7,14 +7,13 @@
 from __future__ import annotations
 
 import logging
-import typing as T
 
 import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import UpscaleSubpixel
-from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.layers import Reshape, UpscaleSubpixel
+from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -25,7 +24,7 @@ from .base import ModelPlugin
 logger = logging.getLogger(__name__)
 
 
-class Encoder(nn.Module):
+class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
     """ The lightweight Encoder
 
     Parameters
@@ -36,40 +35,23 @@ class Encoder(nn.Module):
     def __init__(self, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        if is_legacy:
-            self.conv1 = ConvBlockLegacy(3, 128, 5, stride=2, padding="same")
-            self.conv2 = ConvBlockLegacy(128, 256, 5, stride=2, padding="same")
-            self.conv3 = ConvBlockLegacy(256, 512, 5, stride=2, padding="same")
-        else:
-            self.conv1 = nn.Sequential(nn.Conv2d(3, 128, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv2 = nn.Sequential(nn.Conv2d(128, 256, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv3 = nn.Sequential(nn.Conv2d(256, 512, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
+
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
+
+        self.conv1 = conv(3, 128, 5, stride=2, padding=padding)
+        self.act1 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = conv(128, 256, 5, stride=2, padding=padding)
+        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv3 = conv(256, 512, 5, stride=2, padding=padding)
+        self.act3 = nn.LeakyReLU(0.1, inplace=True)
+
+        self.flatten = nn.Flatten()
         self.dense1 = nn.Linear(512 * 8 * 8, 512)
         self.dense2 = nn.Linear(512, 512 * 4 * 4)
+        self.reshape = Reshape((512, 4, 4), is_contiguous=True)
+
         self.up = UpscaleSubpixel(512, 256)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the Lightweight encoder
-
-        Parameters
-        ----------
-        inputs
-            The input to the encoder
-
-        Returns
-        -------
-        The output from the encoder
-        """
-        x = self.conv1(inputs)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.dense1(x.flatten(start_dim=1))
-        x = T.cast(torch.Tensor, self.dense2(x))
-        x = x.view(x.shape[0], 512, 4, 4)
-        return self.up(x)
 
 
 class Decoder(nn.Module):

@@ -16,7 +16,7 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.layers import ResidualBlock, UpscaleSubpixel
-from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Encoder(nn.Module):
+class Encoder(nn.Sequential):
     """ The RealFace Encoder
 
     Parameters
@@ -45,47 +45,27 @@ class Encoder(nn.Module):
         super().__init__()
 
         channels = [3] + [complexity * 2 ** i for i in range(num_downscale)]
-        if is_legacy:
-            blocks: list[nn.Module] = [
-                nn.Sequential(ConvBlockLegacy(channels[i], channels[i + 1], 5,
-                                              stride=2,
-                                              padding="same",
-                                              leaky_slope=0.2),
-                              ResidualBlock(channels[i + 1], bias=True),
-                              ResidualBlock(channels[i + 1], bias=True))
-                for i in range(num_downscale - 1)
-                ]
-            blocks.append(ConvBlockLegacy(channels[-2], channels[-1], 5,
-                                          stride=2,
-                                          padding="same",
-                                          leaky_slope=0.1))
-        else:
-            blocks = [nn.Sequential(nn.Conv2d(channels[i], channels[i + 1], 5,
-                                              stride=2,
-                                              padding=2),
-                                    nn.LeakyReLU(0.2, inplace=True),
-                                    ResidualBlock(channels[i + 1], bias=True),
-                                    ResidualBlock(channels[i + 1], bias=True))
-                      for i in range(num_downscale - 1)]
-            blocks.extend([nn.Conv2d(channels[-2], channels[-1], 5,
-                                     stride=2,
-                                     padding=2),
-                           nn.LeakyReLU(0.1, inplace=True)])
-        self.down = nn.Sequential(*blocks)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the Original encoder
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
 
-        Parameters
-        ----------
-        inputs
-            The input to the encoder
+        for i in range(num_downscale - 1):
+            self.add_module(f"conv{i + 1}", conv(channels[i],
+                                                 channels[i + 1],
+                                                 5,
+                                                 stride=2,
+                                                 padding=padding))
+            self.add_module(f"act{i + 1}", nn.LeakyReLU(0.2, inplace=True))
+            self.add_module(f"res{i + 1}",
+                            nn.Sequential(ResidualBlock(channels[i + 1], bias=True),
+                                          ResidualBlock(channels[i + 1], bias=True)))
 
-        Returns
-        -------
-        The output from the encoder
-        """
-        return self.down(inputs)
+        self.add_module(f"conv{num_downscale}", conv(channels[-2],
+                                                     channels[-1],
+                                                     5,
+                                                     stride=2,
+                                                     padding=padding))
+        self.add_module(f"act{num_downscale}", nn.LeakyReLU(0.1, inplace=True))
 
 
 class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes

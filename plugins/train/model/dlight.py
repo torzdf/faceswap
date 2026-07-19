@@ -18,7 +18,7 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.layers import ResidualBlock, UpscaleSubpixel, Upscale2xBlock
-from lib.model.layers_legacy import ConvBlockLegacy, UpSampling2dLegacy
+from lib.model.layers_legacy import Conv2dLegacy, UpSampling2dLegacy
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -44,58 +44,41 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
     def __init__(self, encoder_filters: int, encoder_dim: int, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-
         in_chan = 3
         out_chan = encoder_filters // 2
-        if is_legacy:
-            self.conv1 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
-        else:
-            self.conv1 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
 
+        self.conv1 = nn.Sequential(conv(in_chan, out_chan, 5, stride=2, padding=padding),
+                                   nn.LeakyReLU(0.1, inplace=True))
         self.pool1 = nn.AvgPool2d((2, 2))
         self.leaky1 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        if is_legacy:
-            self.conv2 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
-        else:
-            self.conv2 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-
+        self.conv2 = nn.Sequential(conv(in_chan, out_chan, 5, stride=2, padding=padding),
+                                   nn.LeakyReLU(0.1, inplace=True))
         self.pool2 = nn.AvgPool2d((2, 2))
         self.leaky2 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        if is_legacy:
-            self.conv3 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
-        else:
-            self.conv3 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-
+        self.conv3 = nn.Sequential(conv(in_chan, out_chan, 5, stride=2, padding=padding),
+                                   nn.LeakyReLU(0.1, inplace=True))
         self.pool3 = nn.AvgPool2d((2, 2))
         self.leaky3 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        if is_legacy:
-            self.conv4 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
-        else:
-            self.conv4 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-
+        self.conv4 = nn.Sequential(conv(in_chan, out_chan, 5, stride=2, padding=padding),
+                                   nn.LeakyReLU(0.1, inplace=True))
         self.pool4 = nn.AvgPool2d((2, 2))
         self.leaky4 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
         in_chan += out_chan
         out_chan *= 2
-        if is_legacy:
-            self.conv5 = ConvBlockLegacy(in_chan, out_chan, 5, stride=2, padding="same")
-        else:
-            self.conv5 = nn.Sequential(nn.Conv2d(in_chan, out_chan, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
+        self.conv5 = nn.Sequential(conv(in_chan, out_chan, 5, stride=2, padding=padding),
+                                   nn.LeakyReLU(0.1, inplace=True))
 
         self.pool5 = nn.AvgPool2d((2, 2))
         self.leaky5 = nn.LeakyReLU(negative_slope=0.1, inplace=True)

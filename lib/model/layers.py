@@ -11,7 +11,7 @@ from torch import nn
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from .layers_legacy import SamePad2d, UpSampling2dLegacy
+from .layers_legacy import Conv2dLegacy, UpSampling2dLegacy
 
 logger = logging.getLogger(__name__)
 
@@ -296,26 +296,24 @@ class SeparableConv2d(nn.Module):
                  out_channels: int,
                  kernel_size: int,
                  stride: int = 1,
-                 padding: int = 0,
+                 padding: T.Literal["same", "valid"] | int = 0,
                  dilation: int = 1,
                  bias: bool = True,
                  depth_multiplier: int = 1,
                  is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.is_legacy = is_legacy
         if is_legacy:
-            assert kernel_size > 3 and stride > 1 and padding > 0
-            self.pad = SamePad2d(kernel_size, stride=stride)
-            padding = 0
-        self.depthwise = nn.Conv2d(in_channels,
-                                   in_channels * depth_multiplier,
-                                   kernel_size=kernel_size,
-                                   stride=stride,
-                                   padding=padding,
-                                   dilation=dilation,
-                                   groups=in_channels,  # ← one filter per input channel
-                                   bias=False)
+            assert kernel_size > 3 and stride > 1 and padding == "same"
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        self.depthwise = conv(in_channels,
+                              in_channels * depth_multiplier,
+                              kernel_size=kernel_size,
+                              stride=stride,
+                              padding=padding,
+                              dilation=dilation,
+                              groups=in_channels,  # ← one filter per input channel
+                              bias=False)
         self.pointwise = nn.Conv2d(in_channels * depth_multiplier,
                                    out_channels,
                                    kernel_size=1,
@@ -334,8 +332,6 @@ class SeparableConv2d(nn.Module):
         The output from the SeparableConv2d layer
         """
         x = inputs
-        if self.is_legacy:
-            x = self.pad(x)
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x

@@ -10,8 +10,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import ResidualBlock, UpscaleSubpixel
-from lib.model.layers_legacy import ConvBlockLegacy, InstanceNormLegacy
+from lib.model.layers import Reshape, ResidualBlock, UpscaleSubpixel
+from lib.model.layers_legacy import Conv2dLegacy, InstanceNormLegacy
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 from .base import ModelPlugin
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
+class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
     """ The Unbalanced Encoder
 
     Parameters
@@ -47,73 +47,41 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.dense_dim = dense_dim
-        self.dense_width = input_size // 16
-        half_width = self.dense_width // 2
+        dense_width = input_size // 16
+        half_width = dense_width // 2
 
-        if is_legacy:
-            self.down1 = ConvBlockLegacy(3, complexity, 5, stride=2, leaky_slope=-1.)
-            self.norm1 = InstanceNormLegacy()
-        else:
-            self.down1 = nn.Conv2d(3, complexity, 5, stride=2, padding=2)
-            self.norm1 = nn.InstanceNorm2d(complexity, affine=True)
-        self.leaky1 = nn.LeakyReLU(0.1, inplace=True)
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
 
-        if is_legacy:
-            self.down2 = ConvBlockLegacy(complexity, complexity * 2, 5, stride=2, leaky_slope=-1.)
-            self.norm2 = InstanceNormLegacy()
-        else:
-            self.down2 = nn.Conv2d(complexity, complexity * 2, 5, stride=2, padding=2)
-            self.norm2 = nn.InstanceNorm2d(complexity * 2, affine=True)
-        self.leaky2 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv1 = conv(3, complexity, 5, stride=2, padding=padding)
+        self.norm1 = self._get_instance_norm(is_legacy, complexity)
+        self.act1 = nn.LeakyReLU(0.1, inplace=True)
 
-        if is_legacy:
-            self.down3 = ConvBlockLegacy(complexity * 2, complexity * 4, 5, stride=2)
-            self.down4 = ConvBlockLegacy(complexity * 4, complexity * 6, 5, stride=2)
-            self.down5 = ConvBlockLegacy(complexity * 6, complexity * 8, 5, stride=2)
-        else:
-            self.down3 = nn.Sequential(
-                nn.Conv2d(complexity * 2, complexity * 4, 5, stride=2, padding=2),
-                nn.LeakyReLU(0.1, inplace=True)
-            )
-            self.down4 = nn.Sequential(
-                nn.Conv2d(complexity * 4, complexity * 6, 5, stride=2, padding=2),
-                nn.LeakyReLU(0.1, inplace=True)
-            )
-            self.down5 = nn.Sequential(
-                nn.Conv2d(complexity * 6, complexity * 8, 5, stride=2, padding=2),
-                nn.LeakyReLU(0.1, inplace=True)
-            )
+        self.conv2 = conv(complexity, complexity * 2, 5, stride=2, padding=padding)
+        self.norm2 = self._get_instance_norm(is_legacy, complexity * 2)
+        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+
+        self.conv3 = conv(complexity * 2, complexity * 4, 5, stride=2, padding=padding)
+        self.act3 = nn.LeakyReLU(0.1, inplace=True)
+
+        self.conv4 = conv(complexity * 4, complexity * 6, 5, stride=2, padding=padding)
+        self.act4 = nn.LeakyReLU(0.1, inplace=True)
+
+        self.conv5 = conv(complexity * 6, complexity * 8, 5, stride=2, padding=padding)
+        self.act5 = nn.LeakyReLU(0.1, inplace=True)
 
         self.flatten = nn.Flatten(start_dim=1)
         self.dense1 = nn.Linear(complexity * 8 * half_width * half_width, bottleneck)
-        self.dense2 = nn.Linear(bottleneck, self.dense_dim * self.dense_width * self.dense_width)
+        self.dense2 = nn.Linear(bottleneck, dense_dim * dense_width * dense_width)
+        self.reshape = Reshape((dense_dim, dense_width, dense_width), is_contiguous=True)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the Original encoder
-
-        Parameters
-        ----------
-        inputs
-            The input to the encoder
-
-        Returns
-        -------
-        The output from the encoder
-        """
-        x = self.down1(inputs)
-        x = self.norm1(x)
-        x = self.leaky1(x)
-        x = self.down2(x)
-        x = self.norm2(x)
-        x = self.leaky2(x)
-        x = self.down3(x)
-        x = self.down4(x)
-        x = self.down5(x)
-        x = self.flatten(x)
-        x = self.dense1(x)
-        x: torch.Tensor = self.dense2(x)
-        return x.view(x.shape[0], self.dense_dim, self.dense_width, self.dense_width)
+    @classmethod
+    def _get_instance_norm(cls, is_legacy: bool, num_feats: int
+                           ) -> InstanceNormLegacy | nn.InstanceNorm2d:
+        """ Get the Torch or Legacy Instance Normalization layer """
+        if is_legacy:
+            return InstanceNormLegacy()
+        return nn.InstanceNorm2d(num_feats, affine=True)
 
 
 class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes

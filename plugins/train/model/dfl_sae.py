@@ -8,8 +8,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.model.layers import ResidualBlock, UpscaleSubpixel
-from lib.model.layers_legacy import ConvBlockLegacy
+from lib.model.layers import Reshape, ResidualBlock, UpscaleSubpixel
+from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import FaceswapError, get_module_objects
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code
 
 
-class EncoderDF(nn.Module):
+class EncoderDF(nn.Sequential):  # pylint:disable=too-many-instance-attributes
     """ The DeepFaceLab SAE-DF Encoder
 
     Parameters
@@ -45,54 +45,28 @@ class EncoderDF(nn.Module):
 
         channels, res = input_shape[:2]
         dims = channels * encoder_dim
-        self._lowest_res = res // 16
-        self._ae_dims = ae_dims
+        lowest_res = res // 16
 
-        if is_legacy:
-            self.conv1 = ConvBlockLegacy(channels, dims, 5, stride=2, padding="same")
-            self.conv2 = ConvBlockLegacy(dims, dims * 2, 5, stride=2, padding="same")
-            self.conv3 = ConvBlockLegacy(dims * 2, dims * 4, 5, stride=2, padding="same")
-            self.conv4 = ConvBlockLegacy(dims * 4, dims * 8, 5, stride=2, padding="same")
-        else:
-            self.conv1 = nn.Sequential(nn.Conv2d(channels, dims, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv2 = nn.Sequential(nn.Conv2d(dims, dims * 2, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv3 = nn.Sequential(nn.Conv2d(dims * 2, dims * 4, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv4 = nn.Sequential(nn.Conv2d(dims * 4, dims * 8, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
+
+        self.conv1 = conv(channels, dims, 5, stride=2, padding=padding)
+        self.act1 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = conv(dims, dims * 2, 5, stride=2, padding=padding)
+        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv3 = conv(dims * 2, dims * 4, 5, stride=2, padding=padding)
+        self.act3 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv4 = conv(dims * 4, dims * 8, 5, stride=2, padding=padding)
+        self.act4 = nn.LeakyReLU(0.1, inplace=True)
 
         self.flatten = nn.Flatten(start_dim=1)
-        self.dense1 = nn.Linear(dims * 8 * self._lowest_res * self._lowest_res, self._ae_dims)
-        self.dense2 = nn.Linear(self._ae_dims, self._ae_dims * self._lowest_res * self._lowest_res)
-        self.up = UpscaleSubpixel(self._ae_dims, self._ae_dims)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the DeepFaceLab SAE-DF encoder
-
-        Parameters
-        ----------
-        inputs
-            The input to the encoder
-
-        Returns
-        -------
-        The output from the encoder
-        """
-        x: torch.Tensor = self.conv1(inputs)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-
-        x = self.flatten(x)
-        x = self.dense1(x)
-        x = self.dense2(x)
-        x = x.view(x.shape[0], self._ae_dims, self._lowest_res, self._lowest_res)
-        return self.up(x)
+        self.dense1 = nn.Linear(dims * 8 * lowest_res * lowest_res, ae_dims)
+        self.dense2 = nn.Linear(ae_dims, ae_dims * lowest_res * lowest_res)
+        self.reshape = Reshape((ae_dims, lowest_res, lowest_res), is_contiguous=True)
+        self.up = UpscaleSubpixel(ae_dims, ae_dims)
 
 
-class EncoderLIAE(nn.Module):
+class EncoderLIAE(nn.Sequential):
     """ The DeepFaceLab SAE-LIAE Encoder
 
     Parameters
@@ -114,42 +88,21 @@ class EncoderLIAE(nn.Module):
         channels = input_shape[0]
         dims = channels * encoder_dim
 
-        if is_legacy:
-            self.conv1 = ConvBlockLegacy(channels, dims, 5, stride=2, padding="same")
-            self.conv2 = ConvBlockLegacy(dims, dims * 2, 5, stride=2, padding="same")
-            self.conv3 = ConvBlockLegacy(dims * 2, dims * 4, 5, stride=2, padding="same")
-            self.conv4 = ConvBlockLegacy(dims * 4, dims * 8, 5, stride=2, padding="same")
-        else:
-            self.conv1 = nn.Sequential(nn.Conv2d(channels, dims, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv2 = nn.Sequential(nn.Conv2d(dims, dims * 2, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv3 = nn.Sequential(nn.Conv2d(dims * 2, dims * 4, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
-            self.conv4 = nn.Sequential(nn.Conv2d(dims * 4, dims * 8, 5, stride=2, padding=2),
-                                       nn.LeakyReLU(0.1, inplace=True))
+        conv = Conv2dLegacy if is_legacy else nn.Conv2d
+        padding = "same" if is_legacy else 2
+
+        self.conv1 = conv(channels, dims, 5, stride=2, padding=padding)
+        self.act1 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = conv(dims, dims * 2, 5, stride=2, padding=padding)
+        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv3 = conv(dims * 2, dims * 4, 5, stride=2, padding=padding)
+        self.act3 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv4 = conv(dims * 4, dims * 8, 5, stride=2, padding=padding)
+        self.act4 = nn.LeakyReLU(0.1, inplace=True)
         self.flatten = nn.Flatten(start_dim=1)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the DeepFaceLab SAE-LIAE encoder
 
-        Parameters
-        ----------
-        inputs
-            The input to the encoder
-
-        Returns
-        -------
-        The output from the encoder
-        """
-        x: torch.Tensor = self.conv1(inputs)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        return self.flatten(x)
-
-
-class InterLIAE(nn.Module):
+class InterLIAE(nn.Sequential):
     """ The DeepFaceLab SAE-LIAE Intermediate layer
 
     Parameters
@@ -165,31 +118,10 @@ class InterLIAE(nn.Module):
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
-        self._ae_dims = ae_dims
-        self._input_size = input_size
-        self.dense1 = nn.Linear(self._input_size[0] * self._input_size[1] * self._input_size[1],
-                                self._ae_dims)
-        self.dense2 = nn.Linear(self._ae_dims,
-                                self._ae_dims * 2 * self._input_size[1] * self._input_size[1])
-        self.up = UpscaleSubpixel(self._ae_dims * 2, self._ae_dims * 2)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the DeepFaceLab SAE-LIAE Intermediate layer
-
-        Parameters
-        ----------
-        inputs
-            The input to the inter layer
-
-        Returns
-        -------
-        The output from the inter layer
-        """
-        x: torch.Tensor = self.dense1(inputs)
-        x = self.dense2(x)
-        x = x.view(x.shape[0], self._ae_dims * 2, self._input_size[1], self._input_size[1])
-        x = self.up(x)
-        return x
+        self.dense1 = nn.Linear(input_size[0] * input_size[1] * input_size[1], ae_dims)
+        self.dense2 = nn.Linear(ae_dims, ae_dims * 2 * input_size[1] * input_size[1])
+        self.reshape = Reshape((ae_dims * 2, input_size[1], input_size[1]), is_contiguous=True)
+        self.up = UpscaleSubpixel(ae_dims * 2, ae_dims * 2)
 
 
 class Decoder(nn.Module):  # pylint:disable=too-many-instance-attributes
