@@ -185,7 +185,12 @@ class Reshape(nn.Module):
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.shape = shape
+        self.contiguous = is_contiguous
         self.reshape = torch.Tensor.view if is_contiguous else torch.reshape
+
+    def __repr__(self) -> str:
+        """ Debug printing """
+        return f"{self.__class__.__name__}(shape={self.shape}, is_contiguous={self.contiguous})"
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Call the Reshape layer
@@ -261,7 +266,7 @@ class ResidualBlock(nn.Module):
         return self.leaky2(x)
 
 
-class SeparableConv2d(nn.Module):
+class SeparableConv2d(nn.Sequential):
     """SeparableConv2D Layer that mimics Keras' implementation in Torch
 
     Parameters
@@ -318,23 +323,6 @@ class SeparableConv2d(nn.Module):
                                    out_channels,
                                    kernel_size=1,
                                    bias=bias)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the SeparableConv2d layer
-
-        Parameters
-        ----------
-        inputs
-            The input to the SeparableConv2d layer
-
-        Returns
-        -------
-        The output from the SeparableConv2d layer
-        """
-        x = inputs
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        return x
 
 
 class Upscale2xBlock(nn.Module):
@@ -420,7 +408,7 @@ class Upscale2xBlock(nn.Module):
         return x
 
 
-class UpscaleDNY(nn.Module):
+class UpscaleDNY(nn.Sequential):
     """ Upscale block that implements methodology similar to the Disney Research Paper using an
     upsampling2D block and 2 x convolutions
 
@@ -458,24 +446,10 @@ class UpscaleDNY(nn.Module):
             self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor)
         else:
             self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
-        self.convs = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, padding=1),
-                                   nn.LeakyReLU(0.2, inplace=True),
-                                   nn.Conv2d(out_channels, out_channels, 3, padding=1),
-                                   nn.LeakyReLU(0.2, inplace=True))
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward through the UpscaleDNY block
-
-        Parameters
-        ----------
-        inputs
-            The input to the block
-
-        Returns
-        -------
-        The output from the block
-        """
-        return self.convs(self.upsample(inputs))
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.act1 = nn.LeakyReLU(0.2, inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.act2 = nn.LeakyReLU(0.2, inplace=True)
 
 
 class UpscaleResizeImages(nn.Module):
@@ -530,7 +504,7 @@ class UpscaleResizeImages(nn.Module):
         return self.act(x_sr + x_us)
 
 
-class UpscaleSubpixel(nn.Module):
+class UpscaleSubpixel(nn.Sequential):
     """ An upscale layer for sub-pixel up-scaling.
 
     Parameters
@@ -565,26 +539,9 @@ class UpscaleSubpixel(nn.Module):
                               kernel_size,
                               stride=1,
                               padding=padding)
-        if self.activate:
-            self.leaky = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
-        self.pixel_shuffle = nn.PixelShuffle(scale_factor)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Call the Upscale Subpixel Layer.
-
-        Parameters
-        ----------
-        inputs
-            The input to the Upscale Subpixel layer
-
-        Returns
-        -------
-        The output tensor from the Upscale Subpixel Layer
-        """
-        x = self.conv(inputs)
-        if self.activate:
-            x = self.leaky(x)
-        return self.pixel_shuffle(x)
+        if leaky_slope >= 0.0:
+            self.act = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
+        self.shuffle = nn.PixelShuffle(scale_factor)
 
 
 __all__ = get_module_objects(__name__)
