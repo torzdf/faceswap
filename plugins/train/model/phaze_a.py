@@ -804,7 +804,7 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         self._calculate_reshape(input_shape)
         self._calculate_filters(input_shape)
 
-    def __call__(self, layer_indices: tuple[int, int] | None = None) -> nn.ModuleList:
+    def __call__(self, layer_indices: tuple[int, int] | None = None) -> nn.ModuleDict:
         """ Obtain the upscaling layers
 
         Parameters
@@ -843,9 +843,9 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
             if self._learn_mask:
                 mask_layers[f"{self._method}{i + 1}"] = self._upscale_block(i, is_mask=True)
 
-        retval = nn.ModuleList([nn.Sequential(OrderedDict(layers))])
+        retval = nn.ModuleDict({"face": nn.Sequential(OrderedDict(layers))})
         if self._learn_mask:
-            retval.append(nn.Sequential(OrderedDict(mask_layers)))
+            retval["mask"] = nn.Sequential(OrderedDict(mask_layers))
         return retval
 
 
@@ -968,7 +968,7 @@ class FullyConnected(nn.Module):
             inputs = module(inputs)
         if not self.up:
             return inputs
-        out = [up(inputs) for up in self.up]
+        out = [up(inputs) for up in self.up.values()]
         return out[0] if len(out) == 1 else tuple(out)
 
 
@@ -1082,12 +1082,12 @@ class Inter(nn.ModuleDict):
         if split:
             for i in range(num_identities):
                 lbl = get_label(i, num_identities)
-                lbl = f"shared{lbl}" if i == 0 and shared == "half" else lbl
+                lbl = f"{lbl}|share" if i == 0 and shared == "half" else lbl
                 self.add_module(lbl, FullyConnected(*fc_args))
         else:
             self.add_module("all", FullyConnected(*fc_args))
         if shared == "full":
-            self.add_module("shared", FullyConnected(*fc_args))
+            self.add_module("share", FullyConnected(*fc_args))
 
         self._share_key = list(self)[0 if shared == "half" else -1]
 
@@ -1144,7 +1144,7 @@ class Inter(nn.ModuleDict):
                     for x in inputs]
 
         return [torch.concat([inter(x), self[self._share_key](x)], dim=1)  # Split + Shared
-                for inter, x in zip([v for k, v in self.items() if k != "shared"], inputs)]
+                for inter, x in zip([v for k, v in self.items() if k != "share"], inputs)]
 
 
 class GBlock(nn.Module):
@@ -1244,30 +1244,27 @@ class Decoder(nn.Module):
                  output_kernel: int) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-
+        self.split = split
         num_decoders = num_identities if split else 1
         indices = (upscales_in_fc, -1) if upscales_in_fc else None
-        upscales = [upscale_blocks(indices) for _ in range(num_decoders)]
+        self.up = nn.ModuleDict({
+            get_label(i, num_decoders) if num_decoders > 1 else "share": upscale_blocks(indices)
+            for i in range(num_decoders)
+            })
 
-        self.split = split
-        self.learn_mask = len(upscales[0]) == 2
-        self.up = nn.ModuleList(up[0] for up in upscales)
-        self.conv = nn.ModuleList(nn.Sequential(nn.Conv2d(upscale_blocks.out_channels,
-                                                          3,
-                                                          output_kernel,
-                                                          padding=2),
-                                  nn.Sigmoid())
-                                  for _ in range(num_decoders))
-        if self.learn_mask:
-            self.mask_up = nn.ModuleList(up[1] for up in upscales)
-            self.mask_conv = nn.ModuleList(nn.Sequential(nn.Conv2d(upscale_blocks.out_channels,
-                                                                   1,
+        self._mapping: dict[int, str] = {}
+        for idx, (path, up) in enumerate(self.up.items()):
+            assert isinstance(up, nn.ModuleDict)
+            self._mapping[idx] = path
+            for key in list(up):
+                out_channels = 3 if key == "face" else 1
+                up[key].add_module("conv", nn.Sequential(nn.Conv2d(upscale_blocks.out_channels,
+                                                                   out_channels,
                                                                    output_kernel,
                                                                    padding=2),
-                                                         nn.Sigmoid())
-                                           for _ in range(num_decoders))
+                                                         nn.Sigmoid()))
 
-    def forward(self, inputs: list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...], ...]:
+    def forward(self, inputs: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         """ Call the Phaze-A Decoder(s)
 
         Parameters
@@ -1279,14 +1276,9 @@ class Decoder(nn.Module):
         -------
         The output tensors from the Phaze-A Decoder(s)
         """
-        out: list[tuple[torch.Tensor]] = []
-        for idx, inp in enumerate(inputs):
-            mod_idx = idx if self.split else 0
-            side = [self.conv[mod_idx](self.up[mod_idx](inp))]
-            if self.learn_mask:
-                side.append(self.mask_conv[mod_idx](self.mask_up[mod_idx](inp)))
-            out.append(tuple(side))
-        return tuple(out)
+        return tuple([up(inp)
+                     for idx, inp in enumerate(inputs)
+                     for up in self.up[self._mapping[idx if self.split else 0]].values()])
 
 
 # TODO make sure dropouts are done (needed custom handling in keras)
@@ -1373,6 +1365,7 @@ class PhazeA(ModelPlugin):
                                         for _ in range(num_identities
                                                        if cfg.split_gblock() else 1))
 
+        # TODO change this so decoder is a separate module list for each for better summary
         self.decoder = Decoder(self.num_identities,
                                cfg.split_decoders(),
                                cfg.dec_upscales_in_fc(),
@@ -1452,7 +1445,7 @@ class PhazeA(ModelPlugin):
             layers.append(nn.Linear(feats[i], out_feats))
         return nn.Sequential(*layers)
 
-    def forward(self, inputs:  list[torch.Tensor]) -> tuple[tuple[torch.Tensor, ...], ...]:
+    def forward(self, inputs:  list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         """ Forward pass through the Phaze-A model
 
         Parameters
