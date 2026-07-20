@@ -532,9 +532,9 @@ class Encoder(nn.Sequential):
 
         is_local = mod_info.torch_name.startswith("~")
         name = mod_info.torch_name[1:] if is_local else mod_info.torch_name
-        mod = sys.modules[__name__] if is_local else TVMods
+        module = sys.modules[__name__] if is_local else TVMods
         kwargs = mod_info.kwargs if mod_info.kwargs else {}
-        retval: nn.Module = getattr(mod, name)(weights=None, **kwargs)  # TODO load weights optional
+        retval: nn.Module = getattr(module, name)(weights=None, **kwargs)  # TODO load weights optional
 
         if is_legacy and (mod_info.legacy_same_pad
                           or mod_info.legacy_bn_eps is not None
@@ -804,7 +804,7 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         self._calculate_reshape(input_shape)
         self._calculate_filters(input_shape)
 
-    def __call__(self, layer_indices: tuple[int, int] | None = None) -> nn.ModuleDict:
+    def __call__(self, layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
         """ Obtain the upscaling layers
 
         Parameters
@@ -839,11 +839,11 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
                 self._dny_entry(mask_layers)
 
         for i in range(start_idx, end_idx):
-            layers[f"block{i + 1}"] = self._upscale_block(i)
+            layers[f"up{i + 1}"] = self._upscale_block(i)
             if self._learn_mask:
                 mask_layers[f"{self._method}{i + 1}"] = self._upscale_block(i, is_mask=True)
 
-        retval = nn.ModuleDict({"face": nn.Sequential(OrderedDict(layers))})
+        retval = {"face": nn.Sequential(OrderedDict(layers))}
         if self._learn_mask:
             retval["mask"] = nn.Sequential(OrderedDict(mask_layers))
         return retval
@@ -880,7 +880,7 @@ class FullyConnected(nn.Module):
     is_legacy
         ``True`` if the model was originally created in Keras
     """
-    def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments,too-many-locals
+    def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments,too-many-locals  # noqa:E501
                  input_shape: tuple[int, int, int] | tuple[int],
                  feats: list[int],
                  dim: int,
@@ -918,7 +918,7 @@ class FullyConnected(nn.Module):
                 ).items():
             self.add_module(k, v)
 
-        self.up = upscale_blocks((0, upscales)) if upscales else None
+        self.up = nn.ModuleDict(upscale_blocks((0, upscales))) if upscales else None
 
     def _get_upsamples(self,
                        upsampler: UpsampleT,
@@ -1220,51 +1220,34 @@ class GBlock(nn.Module):
         return x
 
 
-class Decoder(nn.Module):
+class Decoder(nn.ModuleDict):
     """ The Decoder(s) for Phaze-A
 
     Parameters
     ----------
-    num_identities
-        The number of identities the model is training on
-    split
-        ``True`` if the decoders should be split. ``False`` if it is shared
-    upscales_in_fc
-        The number of upscales placed within the FC layers
     upscale_blocks
-        The object that builds the upscale blocks
+        A sequence of upscale blocks to use in the decoder
+    in_channels
+        The number of input channels to the final conv layer
     output_kernel
         The size of the kernel for the final conv layer
     """
     def __init__(self,
-                 num_identities: int,
-                 split: bool,
-                 upscales_in_fc: int,
-                 upscale_blocks: UpscaleBlocks,
+                 upscale_blocks: dict[str, nn.Sequential],
+                 in_channels: int,
                  output_kernel: int) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self.split = split
-        num_decoders = num_identities if split else 1
-        indices = (upscales_in_fc, -1) if upscales_in_fc else None
-        self.up = nn.ModuleDict({
-            get_label(i, num_decoders) if num_decoders > 1 else "share": upscale_blocks(indices)
-            for i in range(num_decoders)
-            })
+        self.learn_mask = False
+        for key, up in upscale_blocks.items():
+            out_channels = 3 if key == "face" else 1
+            if key == "mask":
+                self.learn_mask = True
+            up.add_module("conv", nn.Conv2d(in_channels, out_channels, output_kernel, padding=2))
+            up.add_module("act", nn.Sigmoid())
+            self.add_module(key, up)
 
-        self._mapping: dict[int, str] = {}
-        for idx, (path, up) in enumerate(self.up.items()):
-            assert isinstance(up, nn.ModuleDict)
-            self._mapping[idx] = path
-            for key in list(up):
-                out_channels = 3 if key == "face" else 1
-                up[key].add_module("conv", nn.Sequential(nn.Conv2d(upscale_blocks.out_channels,
-                                                                   out_channels,
-                                                                   output_kernel,
-                                                                   padding=2),
-                                                         nn.Sigmoid()))
-
-    def forward(self, inputs: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """ Call the Phaze-A Decoder(s)
 
         Parameters
@@ -1276,9 +1259,7 @@ class Decoder(nn.Module):
         -------
         The output tensors from the Phaze-A Decoder(s)
         """
-        return tuple([up(inp)
-                     for idx, inp in enumerate(inputs)
-                     for up in self.up[self._mapping[idx if self.split else 0]].values()])
+        return tuple(module(inputs) for module in self.values())
 
 
 # TODO make sure dropouts are done (needed custom handling in keras)
@@ -1330,6 +1311,7 @@ class PhazeA(ModelPlugin):
             self.is_legacy
             )
 
+        up_in_fc = cfg.dec_upscales_in_fc()
         self.inter = Inter(self.num_identities,
                            self.encoder.output_shape,
                            cfg.output_size(),
@@ -1344,7 +1326,7 @@ class PhazeA(ModelPlugin):
                            T.cast(UpsampleT, cfg.fc_upsampler()),
                            cfg.fc_upsamples(),
                            cfg.fc_upsample_filters(),
-                           cfg.dec_upscales_in_fc(),
+                           up_in_fc,
                            up_blocks,
                            None if bottleneck_in_enc else bottleneck_args,
                            self.is_legacy)
@@ -1366,11 +1348,12 @@ class PhazeA(ModelPlugin):
                                                        if cfg.split_gblock() else 1))
 
         # TODO change this so decoder is a separate module list for each for better summary
-        self.decoder = Decoder(self.num_identities,
-                               cfg.split_decoders(),
-                               cfg.dec_upscales_in_fc(),
-                               up_blocks,
-                               cfg.dec_output_kernel())
+        self.decoder = nn.ModuleList((
+            Decoder(up_blocks((up_in_fc, -1) if up_in_fc else None),
+                    up_blocks.out_channels,
+                    cfg.dec_output_kernel())
+            for _ in range(num_identities if cfg.split_decoders() else 1)
+            ))
 
     # TODO these 2 properties are hangovers from old system. Revisit when implemented
     @property
@@ -1467,6 +1450,8 @@ class PhazeA(ModelPlugin):
             else:
                 x = [gblock(content, style)
                      for gblock, content, style in zip(x, self.gblock, styles)]
+
+        return tuple(self.decoder[i if len(self.decoder) > 1 else 0](y) for i, y in enumerate(x))
 
         return self.decoder(x)
 
