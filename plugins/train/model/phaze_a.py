@@ -804,6 +804,21 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         self._calculate_reshape(input_shape)
         self._calculate_filters(input_shape)
 
+    def update_filters(self, upscales_in_fc) -> None:
+        """ When upscales are in fully connected layers and there are shared fully connected layers
+        the first filter for the decoder upscale requires doubling for the concatenated output.
+
+        NOTE: This unnecessarily blows out filters, but is a legacy hangover. Halving filters for
+        shared upscales in fc would make sense, but as putting upscales in FC for shared FC doesn't
+        make a lot of sense, it's probably not worth handling """
+        if upscales_in_fc < 1:
+            return
+        idx = upscales_in_fc - 1
+        filters = self._filters[idx] * 2
+        logger.info("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
+                    idx, self._filters[idx], filters, upscales_in_fc)
+        self._filters[idx] = filters
+
     def __call__(self, layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
         """ Obtain the upscaling layers
 
@@ -921,6 +936,7 @@ class FullyConnected(nn.Module):
         self._up_layers: dict[str, nn.Sequential] = {}
         if upscales is not None:
             for k, v in upscale_blocks((0, upscales)).items():
+                v = self._fix_legacy_upscale(v) if is_legacy else v
                 self.add_module(k, v)
                 self._up_layers[k] = v
 
@@ -951,6 +967,23 @@ class FullyConnected(nn.Module):
             retval["act"] = nn.LeakyReLU(0.1, inplace=True)
         logger.debug("[FullyConnected] Upsamples: %s", retval)
         return retval
+
+    @classmethod
+    def _fix_legacy_upscale(cls, upscale: nn.Sequential) -> nn.Sequential:
+        """ Legacy models have a bug where Residuals are skipped from the final upscale in the
+        FC upscales if dec_skip_last_residual is selected """
+        if not cfg.dec_skip_last_residual() or not cfg.dec_res_blocks():
+            return upscale
+        logger.debug("[FullyConnected] Stripping last upscale residual for legacy bug")
+        new = OrderedDict()
+        for i, (key, val) in enumerate(upscale.named_children()):
+            if i != len(upscale) - 1:
+                new[key] = val
+                continue
+            new[key] = nn.Sequential(OrderedDict({k: v for k, v in val.named_children()
+                                                  if not k.startswith("res")}))
+        del upscale
+        return nn.Sequential(new)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """ Call the Phaze-A Fully Connected layer
@@ -987,9 +1020,9 @@ class Inter():
         The input shape to the FC layers
     model_output_size
         The final pixel output size from the Phaze-A model
-    split_inters
+    split
         ``True`` To use separate FC layers for each side
-    shared_inter
+    shared
         Whether to have a shared FC layer. ``Full`` has a fully shared layer. ``Half`` places the
         shared data into identity 0's FC layer
     min_filters
@@ -1069,10 +1102,7 @@ class Inter():
         """ The output shape from each of the inter layers """
         # TODO output shape leading into G-Block may be incorrect with dec_up_in_fc or, more likely
         # we will need an FC output prior to dec upscales
-        # TODO upscale block not setting correct input shape when shared:
-        #   fc_out_shape is correct when up_in_fc, but when Decoder calls remaining layers, previous upscales have been concatenated, so becomes incorrect
-        #   fc_out_shape is incorrect when no up_in_fc because the concatenated output size is what is required
-        upscale_blocks.set_input_shape(fc_out_shape)
+        upscale_blocks.set_input_shape(fc_out_shape if upscales else self.output_shape)
 
         fc_args = (input_shape,
                    filters,
@@ -1099,6 +1129,8 @@ class Inter():
             self.module["share"] = FullyConnected(*fc_args)
 
         self._share_key = list(self.module)[0 if shared == "half" else -1]
+        if self._has_shared and upscales:
+            upscale_blocks.update_filters(upscales)
 
     @classmethod
     def _scale_filters(cls, original_filters: int, final_dim: int, output_size: int) -> int:
