@@ -11,7 +11,6 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.initializers import icnr, ConvolutionAware
-from lib.model.layers import SamePad2d
 from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
@@ -194,24 +193,6 @@ class TrainConfigure:
                 if v.bias is not None:
                     nn.init.zeros_(v.bias)
 
-    def _apply_reflect_padding_pad(self, parent: nn.Module, qual_name="") -> None:
-        """Recurse through the modules to switch padding on legacy SamePad2d layers
-
-        Parameters
-        ----------
-        parent
-            The parent module to evaluate for SamePad2d layers
-        """
-        for name, module in parent.named_children():
-            if isinstance(module, SamePad2d):
-                logger.debug("[TrainConfigure] Reflect pad SamePad2D '%s.%s'. kernel: %s, "
-                             "stride: %s, original mode: %s",
-                             qual_name, name, module.kernel, module.stride, module.mode)
-                setattr(parent, name, SamePad2d(module.kernel, module.stride, mode="reflect"))
-            else:
-                qual_name = ".".join(x for x in (qual_name, name) if x)
-                self._apply_reflect_padding_pad(module, qual_name)
-
     def _apply_reflect_padding(self, model: ModelPlugin) -> None:
         """Apply reflect padding on qualifying convolution layers
 
@@ -223,7 +204,6 @@ class TrainConfigure:
         if not self._reflect_padding:
             logger.debug("[TrainConfigure] No reflect padding to apply")
             return
-        self._apply_reflect_padding_pad(model)
         for name, module in model.named_modules():
             if not isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
                 continue

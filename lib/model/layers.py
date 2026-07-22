@@ -45,7 +45,9 @@ class AdaIN(nn.Module):
         self.style_strength = style_strength
         self.epsilon = epsilon
 
-    def forward(self, content: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                content: torch.Tensor,
+                style: torch.Tensor | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """ Apply Adaptive Instance Normalization
 
         Parameters
@@ -53,19 +55,21 @@ class AdaIN(nn.Module):
         content
             The content image tensor
         style
-            The style image Tensor
+            The style image Tensor or a tuple of (beta, gamma) tensors
 
         Returns
         -------
         The content with Adaptive Instance Normalization applied
         """
         reduction_axes = list(range(1, len(content.shape)))
-
         if self.dim is not None:
             del reduction_axes[self.dim - 1]
 
         content_std, content_mean = torch.std_mean(content, dim=reduction_axes, keepdim=True)
-        style_std, style_mean = torch.std_mean(style, dim=reduction_axes, keepdim=True)
+        if isinstance(style, (tuple, list)):
+            style_std, style_mean = style
+        else:
+            style_std, style_mean = torch.std_mean(style, dim=reduction_axes, keepdim=True)
 
         normed = (content - content_mean) / (content_std + self.epsilon)
         stylized = normed * style_std + style_mean

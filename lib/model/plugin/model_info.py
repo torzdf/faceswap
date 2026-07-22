@@ -185,7 +185,11 @@ class _Structure:
         -------
         The forward hook function
         """
-        def hook_fn(module: nn.Module, inputs: torch.Tensor, outputs: torch.Tensor) -> None:
+        def hook_fn(module: nn.Module,
+                    inputs: torch.Tensor | list[torch.Tensor | T.Any],
+                    outputs: torch.Tensor) -> None:
+            if not isinstance(inputs, torch.Tensor):  # Strip non-tensor inputs
+                inputs = [i for i in inputs if isinstance(i, torch.Tensor)]
             layer = summary.get(
                 name,
                 Layer(name=name,

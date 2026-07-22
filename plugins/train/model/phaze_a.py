@@ -1189,77 +1189,152 @@ class Inter():
                 for inter, x in zip([v for k, v in self.module.items() if k != "share"], inputs)]
 
 
-class GBlock(nn.Module):
+class GBlock():
     """ G-Block model, borrowing from Adain StyleGAN.
 
     Parameters
     ----------
     in_channels
-        The number of channels input to the G-Block from each side's fully connected
-    style_channels
-        The number of nodes output from combined 'style' fc_gblock
+        The number of input channels to the linear layers feeding the G-Block
+    fc_depth
+        The number of consecutive linear layers feeding the G-Block
+    fc_min_nodes
+        The number of filters within the initial linear layer feeding the G-Block
+    fc_max_nodes
+        The number of filters within the final linear layer feeding the G-Block
+    fc_slope
+        The filter slope for the linear layers feeding the G-Block
+    fc_dropout
+        The dropout to apply to the linear layers feeding the G-Block
+    bottleneck_args
+        The positional args for creating the bottleneck if to be placed outside the encoder or
+        ``None`` if it is placed in the encoder
+    num_units
+        The number of G-Blocks to create
+    g_block_recursions
+        The number of recursions to perform within the G-Block. Default: 2
+    is_legacy
+        ``True`` if the model was originally created in Keras. Default: ``False``
     """
-    def __init__(self, in_channels: int, style_channels: int) -> None:
+    def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments
+                 input_shape: tuple[int, int, int] | tuple[int],
+                 fc_depth: int,
+                 fc_min_nodes: int,
+                 fc_max_nodes: int,
+                 fc_slope: float,
+                 fc_dropout: float,
+                 bottleneck_args: tuple[str, int, str] | None,
+                 num_units: int,
+                 g_block_recursions: int = 2,
+                 is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+        self._gblock_recursions = g_block_recursions
 
-        self.dense = nn.Sequential(
-            *(nn.Sequential(nn.Linear(style_channels if i == 0 else 512, 512),
-                            nn.LeakyReLU(0.1, inplace=True) if i == 2 else nn.Identity())
-              for i in range(3))
-            )
-        self.conv = nn.Conv2d(in_channels, in_channels, 3, padding=1)
-        self.noise = GaussianNoise(1.0)
+        in_channels, self.inter = self._build_inter(input_shape,
+                                                    fc_depth,
+                                                    fc_min_nodes,
+                                                    fc_max_nodes,
+                                                    fc_slope,
+                                                    fc_dropout,
+                                                    bottleneck_args,
+                                                    is_legacy)
+        self.gblock = self._build_gblock(in_channels, fc_max_nodes, num_units)
 
-        self.g_block_recursions = 2
+    @classmethod
+    def _build_inter(cls,
+                     input_shape: tuple[int, int, int] | tuple[int],
+                     fc_depth: int,
+                     fc_min_nodes: int,
+                     fc_max_nodes: int,
+                     fc_slope: float,
+                     fc_dropout: float,
+                     bottleneck_args: tuple[str, int, str] | None,
+                     is_legacy: bool) -> tuple[int, nn.Sequential]:
+        """ Build the G-Block intermediate layer """
+        in_channels = input_shape[0]
+        fc_layers = OrderedDict()
+        if bottleneck_args is not None:
+            assert len(input_shape) == 3
+            b_neck = Bottleneck(input_shape, *bottleneck_args, is_legacy=is_legacy)
+            fc_layers["bottleneck"] = b_neck
+            in_channels = b_neck.output_shape[0]
 
-        # TODO this will need revisiting. Original impl created pseudo mean/std by generating 2 inp
-        # I don't like it, so test new way
-        # self.styles = nn.ModuleList(
-        #     nn.Sequential(*(nn.Sequential(nn.Linear(in_channels, in_channels),
-        #                                   Reshape((in_channels, 1, 1), is_contiguous=True))
-        #                     for _ in range(2)))
-        #     for _ in range(self.g_block_recursions)
+        fc_feats = _get_curve(fc_min_nodes, fc_max_nodes, fc_depth, fc_slope)
+        for i, feats in enumerate(fc_feats):
+            if fc_dropout > 0.:
+                fc_layers[f"drop{i}"] = nn.Dropout(fc_dropout, inplace=True)
+            fc_layers[f"fc{i}"] = nn.Linear(in_channels if i == 0 else fc_feats[i - 1], feats)
+        return in_channels, nn.Sequential(fc_layers)
 
-        # Using in_channels * 4 just to make it work for now. This is wrong
-        self.style = nn.ModuleList(nn.Sequential(nn.Linear(style_channels, in_channels * 4),
-                                                 Reshape((in_channels, 2, 2), is_contiguous=True))
-                                   for _ in range(self.g_block_recursions))
-        self.g_noise = nn.ModuleList((nn.Sequential(GaussianNoise(1.0),
-                                                    nn.Conv2d(in_channels, in_channels, 1))
-                                     for _ in range(self.g_block_recursions)))
-        self.g_conv = nn.Conv2d(in_channels, in_channels, 3, padding=1)
-        self.norm = nn.ModuleList(AdaIN(dim=1) for _ in range(self.g_block_recursions))
-        self.act = nn.ModuleList((nn.LeakyReLU(0.2, inplace=True)
-                                  for _ in range(self.g_block_recursions)))
+    def _build_gblock(self,
+                      content_channels: int,
+                      style_channels: int,
+                      num_units: int,
+                      style_recursions: int = 3,
+                      style_nodes: int = 512) -> nn.ModuleList:
+        """ Build the G-Block """
+        retval = nn.ModuleList()
+        for _ in range(num_units):
+            block = {}
+            block["style"] = nn.Sequential()
+            for i in range(style_recursions):
+                block["style"].append(nn.Linear(style_channels if i == 0 else style_nodes,
+                                                style_nodes))
+                if i != style_recursions - 1:
+                    block["style"].append(nn.LeakyReLU(0.1, inplace=True))
+            block["cont"] = nn.Sequential(
+                nn.Conv2d(content_channels, content_channels, 3, padding=1),
+                GaussianNoise(1.0)
+                )
+            block["gblock"] = nn.ModuleList()
+            for i in range(self._gblock_recursions):
+                gblock = nn.ModuleDict()
+                gblock["style"] = nn.ModuleList((
+                    nn.Sequential(nn.Linear(style_channels, content_channels),
+                                  Reshape((content_channels, 1, 1), is_contiguous=True))
+                    for _ in range(2)))
+                gblock["cont"] = nn.Sequential(
+                    GaussianNoise(1.0),
+                    nn.Conv2d(content_channels, content_channels, 3, padding=1)
+                    )
+                if i == self._gblock_recursions - 1:
+                    gblock["conv"] = nn.Conv2d(content_channels, content_channels, 3, padding=1)
+                gblock["norm"] = AdaIN(dim=1)
+                gblock["act"] = nn.LeakyReLU(0.2, inplace=True)
+                block["gblock"].append(gblock)
+            retval.append(nn.ModuleDict(block))
+        return retval
 
-    def forward(self, content: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+    def __call__(self, styles: list[torch.Tensor], contents: list[torch.Tensor]
+                 ) -> list[torch.Tensor]:
         """ Forward pass through the G-Block
+
         Parameters
         ----------
-        content
-            The input from the Intermediate layers
-        style
-            The input from the G-Block intermediate layer
+        styles
+            The output from the Phaze-A Encoder
+        contents
+            The outputs from the Phaze-A Intermediate layers
 
         Returns
         -------
-        The output tensor from the G-Block
+        The output tensors from the G-Block for each side of the model
         """
-        style = self.dense(style)
-        x = self.noise(self.conv(content))
-
-        for i, (styles, noise, norm, act) in enumerate(zip(self.style,
-                                                           self.g_noise,
-                                                           self.norm,
-                                                           self.act)):
-            s = styles(style)
-            n = noise(x)
-            if i == self.g_block_recursions - 1:
-                x = self.conv(x)
-            x = norm(x, s)
-            x = act(x + n)
-        return x
+        styles = [self.inter(inp) for inp in styles]
+        retval: list[torch.Tensor] = []
+        for style, content, block in zip(styles, contents, T.cast(list[nn.ModuleDict],
+                                                                  self.gblock)):
+            style = block["style"](style)
+            x = block["cont"](content)
+            for idx, gblock in enumerate(T.cast(list[nn.ModuleDict], block["gblock"])):
+                stats = tuple(x(style) for x in T.cast(nn.ModuleList, gblock["style"]))
+                if idx == self._gblock_recursions - 1:
+                    x = gblock["conv"](x)
+                x = gblock["norm"](x, stats) + gblock["cont"](x)
+                x = gblock["act"](x)
+            retval.append(x)
+        return retval
 
 
 class Decoder(nn.ModuleDict):
@@ -1375,24 +1450,20 @@ class PhazeA(ModelPlugin):
                                     self.is_legacy)
         self.inter = self._inter_handler.module  # Register with main model
 
-        self.fc_gblock = None
-        self.gblock = None
+        self._gblock_handler = None
         if cfg.enable_gblock():
-            self.fc_gblock = self._get_gblock_inters(
-                _get_curve(cfg.fc_gblock_min_nodes(),
-                           cfg.fc_gblock_max_nodes(),
-                           cfg.fc_gblock_depth(),
-                           cfg.fc_gblock_filter_slope()),
-                cfg.fc_gblock_dropout(),
-                None if bottleneck_in_enc else bottleneck_args
-                )
-            # TODO make GBlocks module?
-            self.gblock = nn.ModuleList(GBlock(self._inter_handler.output_shape[0],
-                                               cfg.fc_gblock_max_nodes())
-                                        for _ in range(num_identities
-                                                       if cfg.split_gblock() else 1))
+            self._gblock_handler = GBlock(self.encoder.output_shape,
+                                          cfg.fc_gblock_depth(),
+                                          cfg.fc_gblock_min_nodes(),
+                                          cfg.fc_gblock_max_nodes(),
+                                          cfg.fc_gblock_filter_slope(),
+                                          cfg.fc_dropout(),
+                                          None if bottleneck_in_enc else bottleneck_args,
+                                          num_identities if cfg.split_gblock() else 1,
+                                          is_legacy=is_legacy)
+            self.gblock_inter = self._gblock_handler.inter  # Register with main model
+            self.gblock = self._gblock_handler.gblock  # Register with main model
 
-        # TODO change this so decoder is a separate module list for each for better summary
         self.decoder = nn.ModuleList((
             Decoder(up_blocks((up_in_fc, -1) if up_in_fc else None),
                     up_blocks.out_channels,
@@ -1456,23 +1527,6 @@ class PhazeA(ModelPlugin):
         # TODO keras version tracking removed from here. Delete this when confirmed models are all
         # in valid torch versions
 
-    def _get_gblock_inters(self,
-                           feats: list[int],
-                           dropout: float,
-                           bottleneck_args: tuple[str, int, str] | None) -> nn.Sequential:
-        """ obtain the gblock intermediate layers """
-        layers = []
-        if bottleneck_args:
-            assert len(self.encoder.output_shape) == 3
-            layers.append(Bottleneck(self.encoder.output_shape, *bottleneck_args, False))
-        feats = [self.encoder.output_shape[0] if bottleneck_args is None
-                 else layers[-1].output_shape[0]] + feats
-        for i, out_feats in enumerate(feats[1:]):
-            if dropout > 0.:
-                layers.append(nn.Dropout(dropout, inplace=True))
-            layers.append(nn.Linear(feats[i], out_feats))
-        return nn.Sequential(*layers)
-
     def forward(self, inputs:  list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         """ Forward pass through the Phaze-A model
 
@@ -1488,14 +1542,8 @@ class PhazeA(ModelPlugin):
         """
         encoded = [self.encoder(x) for x in inputs]
         x = self._inter_handler(encoded)
-        if self.fc_gblock is not None and self.gblock is not None:
-            styles = [self.fc_gblock(enc) for enc in encoded]
-            if len(self.gblock) == 1:
-                x = [self.gblock[0](content, style) for content, style in zip(x, styles)]
-            else:
-                x = [gblock(content, style)
-                     for gblock, content, style in zip(x, self.gblock, styles)]
-
+        if self._gblock_handler is not None:
+            x = self._gblock_handler(encoded, x)
         return tuple(self.decoder[i if len(self.decoder) > 1 else 0](y) for i, y in enumerate(x))
 
     # TODO this is a c+p. Needs revisiting when load/freeze weights implemented
