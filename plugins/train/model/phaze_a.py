@@ -26,7 +26,6 @@ from lib.model.networks import (  # pylint:disable=unused-import  # noqa:F401
     patch_legacy
 )
 
-from lib.training.data import get_label
 from lib.utils import FaceswapError, get_module_objects, snake_to_camel_case
 from plugins.train.train_config import Loss as cfg_loss
 
@@ -800,6 +799,8 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
             The shape of the Tensor feeding the Upscale Blocks (output from Inter or output from
             each fc if upscales in fc)
         """
+        if self._filters:  # input shape already set
+            return
         logger.debug("[UpscaleBlocks] Setting input_shape: %s", input_shape)
         self._calculate_reshape(input_shape)
         self._calculate_filters(input_shape)
@@ -891,7 +892,6 @@ class FullyConnected(nn.Module):
         The number of decoder upscales that should be placed within the fully connected block
     upscale_blocks
         The object that builds the upscale blocks
-
     is_legacy
         ``True`` if the model was originally created in Keras
     """
@@ -1009,19 +1009,15 @@ class FullyConnected(nn.Module):
         return out[0] if len(out) == 1 else tuple(out)
 
 
-class Inter():
-    """ Handles the Fully Connected layers for Phaze-A
+class Inter(nn.Module):
+    """ Builds the Fully Connected layers for Phaze-A
 
     Parameters
     ----------
-    num_identities
-        The number of identities the model is training on
     input_shape
         The input shape to the FC layers
     model_output_size
         The final pixel output size from the Phaze-A model
-    split
-        ``True`` To use separate FC layers for each side
     shared
         Whether to have a shared FC layer. ``Full`` has a fully shared layer. ``Half`` places the
         shared data into identity 0's FC layer
@@ -1052,12 +1048,13 @@ class Inter():
         ``None`` if it is placed in the encoder
     is_legacy
         ``True`` if the model was originally created in Keras
+    shared_inter
+        The shared intermediate layer to use if required and not the first Inter instance being
+        created otherwise ``None``
     """
     def __init__(self,  # pylint:disable=too-many-locals,too-many-positional-arguments,too-many-arguments  # noqa[E501]
-                 num_identities: int,
                  input_shape: tuple[int, int, int] | tuple[int],
                  model_output_size: int,
-                 split: bool,
                  shared: T.Literal["none", "full", "half"],
                  min_filters: int,
                  max_filters: int,
@@ -1071,20 +1068,14 @@ class Inter():
                  upscales: int,
                  upscale_blocks: UpscaleBlocks,
                  bottleneck_args: tuple[str, int, str] | None,
-                 is_legacy: bool) -> None:
+                 is_legacy: bool,
+                 shared_inter: FullyConnected | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        if num_identities > 2 and shared == "half":
-            raise FaceswapError("half shared FC layer is not compatible with more than 2"
-                                "identities")
-        if not is_legacy and not split and shared != "none":
-            raise FaceswapError("Shared FC layer is only compatible with split FC layers")
+        super().__init__()
         # TODO legacy handling. final dim should not actually be required for filter scaling as
         # assumption was made during original implementation that upscale filters also need scaling
         # (they should not). This leads to excess filter adjustments when not necessary. Use
         # original dim instead
-        self._is_split = split
-        self._has_shared = shared != "none" and shared is not None
-
         final_dim = dim * (upsamples + 1)
         filters = _get_curve(
             self._scale_filters(min_filters, final_dim, model_output_size) * dim ** 2,
@@ -1095,14 +1086,11 @@ class Inter():
 
         out_filters = (upsample_filters if upsamples > 0 and upsampler != "upsample2d"
                        else filters[-1] // (final_dim * 2))
-
         fc_out_shape = (out_filters, final_dim, final_dim)
-        self.output_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if self._has_shared
-                             else fc_out_shape)
-        """ The output shape from each of the inter layers """
-        # TODO output shape leading into G-Block may be incorrect with dec_up_in_fc or, more likely
-        # we will need an FC output prior to dec upscales
-        upscale_blocks.set_input_shape(fc_out_shape if upscales else self.output_shape)
+        self.out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
+                          else fc_out_shape)
+        """ The output shape from the inter layer """
+        upscale_blocks.set_input_shape(fc_out_shape if upscales else self.out_shape)
 
         fc_args = (input_shape,
                    filters,
@@ -1110,27 +1098,18 @@ class Inter():
                    dropout,
                    upsampler,
                    upsamples,
-                   self._scale_filters(upsample_filters, final_dim, model_output_size),  # TODO see above.
+                   self._scale_filters(upsample_filters, final_dim, model_output_size),
                    upscales,
                    upscale_blocks,
                    bottleneck_args,
                    is_legacy)
 
-        self.module = nn.ModuleDict()
-        """ The intermediate layer module dict """
-        if split:
-            for i in range(num_identities):
-                lbl = get_label(i, num_identities)
-                lbl = f"{lbl}|share" if i == 0 and shared == "half" else lbl
-                self.module[lbl] = FullyConnected(*fc_args)
-        else:
-            self.module["all"] = FullyConnected(*fc_args)
-        if shared == "full":
-            self.module["share"] = FullyConnected(*fc_args)
-
-        self._share_key = list(self.module)[0 if shared == "half" else -1]
-        if self._has_shared and upscales:
-            upscale_blocks.update_filters(upscales)
+        self.fc = FullyConnected(*fc_args)
+        self.shared = shared_inter
+        if self.shared is None and shared == "full":
+            self.shared = FullyConnected(*fc_args)
+        if self.shared is None and shared == "half":
+            self.shared = self.fc
 
     @classmethod
     def _scale_filters(cls, original_filters: int, final_dim: int, output_size: int) -> int:
@@ -1162,40 +1141,31 @@ class Inter():
         logger.debug("original_filters: %s, scaled_filters: %s", original_filters, retval)
         return retval
 
-    def __call__(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
-        """ Call the Phaze-A Intermediate layers
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ Forward pass through the intermediate layer
 
         Parameters
         ----------
         inputs
-            The input tensors to the Phaze-A Intermediate layers for each side of the model
+            The input tensor to the Intermediate layer
 
         Returns
         -------
-        The output tensors from the Phaze-A Intermediate layers for each side of the model
+        The output tensor from the Intermediate layer
         """
-        if len(self.module) == 1:  # Not split or legacy error case where non-split + half shared
-            return [list(self.module.values())[0](x) for x in inputs]
-
-        if not self._has_shared:  # Split inters no shared inter
-            return [inter(x) for inter, x in zip(self.module.values(), inputs)]
-
-        if not self._is_split:  # Legacy error case where non-split + full shared
-
-            return [torch.concat([self.module["all"](x), self.module[self._share_key](x)], dim=1)
-                    for x in inputs]
-
-        return [torch.concat([inter(x), self.module[self._share_key](x)], dim=1)  # Split + Shared
-                for inter, x in zip([v for k, v in self.module.items() if k != "share"], inputs)]
+        x = self.fc(inputs)
+        if self.shared is None:
+            return x
+        return torch.concat([self.shared(inputs), x], dim=1)
 
 
-class GBlock():
-    """ G-Block model, borrowing from Adain StyleGAN.
+class InterGBlock(nn.Sequential):
+    """ Intermediate block that feeds the Style part of G-Block
 
     Parameters
     ----------
-    in_channels
-        The number of input channels to the linear layers feeding the G-Block
+    input_shape
+        The input shape to the linear layers feeding the G-Block
     fc_depth
         The number of consecutive linear layers feeding the G-Block
     fc_min_nodes
@@ -1209,14 +1179,10 @@ class GBlock():
     bottleneck_args
         The positional args for creating the bottleneck if to be placed outside the encoder or
         ``None`` if it is placed in the encoder
-    num_units
-        The number of G-Blocks to create
-    g_block_recursions
-        The number of recursions to perform within the G-Block. Default: 2
     is_legacy
-        ``True`` if the model was originally created in Keras. Default: ``False``
+        ``True`` if the model was originally created in Keras
     """
-    def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments
+    def __init__(self,
                  input_shape: tuple[int, int, int] | tuple[int],
                  fc_depth: int,
                  fc_min_nodes: int,
@@ -1224,22 +1190,49 @@ class GBlock():
                  fc_slope: float,
                  fc_dropout: float,
                  bottleneck_args: tuple[str, int, str] | None,
+                 is_legacy: bool) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        in_channels = input_shape[0]
+        if bottleneck_args is not None:
+            assert len(input_shape) == 3
+            bottleneck = Bottleneck(input_shape, *bottleneck_args, is_legacy=is_legacy)
+            self.add_module("bottleneck", bottleneck)
+            in_channels = bottleneck.output_shape[0]
+
+        fc_feats = _get_curve(fc_min_nodes, fc_max_nodes, fc_depth, fc_slope)
+        for i, feats in enumerate(fc_feats):
+            if fc_dropout > 0.:
+                self.add_module(f"drop{i}", nn.Dropout(fc_dropout, inplace=True))
+            self.add_module(f"fc{i}", nn.Linear(in_channels if i == 0 else fc_feats[i - 1], feats))
+
+        self.in_channels = in_channels
+        """ The number of output channels from the encoder + bottleneck """
+
+
+class GBlock():
+    """ G-Block model, borrowing from Adain StyleGAN.
+
+    Parameters
+    ----------
+    content_channels
+        The number of channels feeding the content part of G-Block
+    style_channels
+            The number of channels feeding the style part of G-Block
+    num_units
+        The number of G-Blocks to create
+    g_block_recursions
+        The number of recursions to perform within the G-Block. Default: 2
+    """
+    def __init__(self,
+                 content_channels: int,
+                 style_channels: int,
                  num_units: int,
-                 g_block_recursions: int = 2,
-                 is_legacy: bool = False) -> None:
+                 g_block_recursions: int = 2) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self._gblock_recursions = g_block_recursions
-
-        in_channels, self.inter = self._build_inter(input_shape,
-                                                    fc_depth,
-                                                    fc_min_nodes,
-                                                    fc_max_nodes,
-                                                    fc_slope,
-                                                    fc_dropout,
-                                                    bottleneck_args,
-                                                    is_legacy)
-        self.gblock = self._build_gblock(in_channels, fc_max_nodes, num_units)
+        self.gblock = self._build_gblock(content_channels, style_channels, num_units)
 
     @classmethod
     def _build_inter(cls,
@@ -1313,7 +1306,7 @@ class GBlock():
         Parameters
         ----------
         styles
-            The output from the Phaze-A Encoder
+            The output from inter_gblock
         contents
             The outputs from the Phaze-A Intermediate layers
 
@@ -1321,7 +1314,6 @@ class GBlock():
         -------
         The output tensors from the G-Block for each side of the model
         """
-        styles = [self.inter(inp) for inp in styles]
         retval: list[torch.Tensor] = []
         for style, content, block in zip(styles, contents, T.cast(list[nn.ModuleDict],
                                                                   self.gblock)):
@@ -1396,7 +1388,11 @@ class PhazeA(ModelPlugin):
         logger.debug(parse_class_init(locals()))
         if cfg.output_size() % 16 != 0:
             raise FaceswapError("Phaze-A output shape must be a multiple of 16")
+
         self._validate_encoder_architecture()
+        self._split_fc = cfg.split_fc()
+        self._shared_fc = cfg.shared_fc() != "none"
+
         input_size = self._get_input_size(is_legacy)
         is_bgr = cfg.enc_architecture() == "fs_original" or (
             is_legacy and _MODEL_MAPPING[cfg.enc_architecture()].legacy_bgr
@@ -1428,44 +1424,25 @@ class PhazeA(ModelPlugin):
             self.is_legacy
             )
 
-        up_in_fc = cfg.dec_upscales_in_fc()
-
-        self._inter_handler = Inter(self.num_identities,
-                                    self.encoder.output_shape,
-                                    cfg.output_size(),
-                                    cfg.split_fc(),
-                                    T.cast(T.Literal["none", "full", "half"], cfg.shared_fc()),
-                                    cfg.fc_min_filters(),
-                                    cfg.fc_max_filters(),
-                                    cfg.fc_depth(),
-                                    cfg.fc_filter_slope(),
-                                    cfg.fc_dimensions(),
-                                    cfg.fc_dropout(),
-                                    T.cast(UpsampleT, cfg.fc_upsampler()),
-                                    cfg.fc_upsamples(),
-                                    cfg.fc_upsample_filters(),
-                                    up_in_fc,
-                                    up_blocks,
-                                    None if bottleneck_in_enc else bottleneck_args,
-                                    self.is_legacy)
-        self.inter = self._inter_handler.module  # Register with main model
-
-        self._gblock_handler = None
+        self.inter = self._build_inter(up_blocks, None if bottleneck_in_enc else bottleneck_args)
+        self._gblock_handler = self.inter_gblock = None
         if cfg.enable_gblock():
-            self._gblock_handler = GBlock(self.encoder.output_shape,
-                                          cfg.fc_gblock_depth(),
-                                          cfg.fc_gblock_min_nodes(),
+            self.inter_gblock = InterGBlock(self.encoder.output_shape,
+                                            cfg.fc_gblock_depth(),
+                                            cfg.fc_gblock_min_nodes(),
+                                            cfg.fc_gblock_max_nodes(),
+                                            cfg.fc_gblock_filter_slope(),
+                                            cfg.fc_dropout(),
+                                            None if bottleneck_in_enc else bottleneck_args,
+                                            is_legacy)
+            self._gblock_handler = GBlock(self.inter_gblock.in_channels,
                                           cfg.fc_gblock_max_nodes(),
-                                          cfg.fc_gblock_filter_slope(),
-                                          cfg.fc_dropout(),
-                                          None if bottleneck_in_enc else bottleneck_args,
-                                          num_identities if cfg.split_gblock() else 1,
-                                          is_legacy=is_legacy)
-            self.gblock_inter = self._gblock_handler.inter  # Register with main model
+                                          num_identities if cfg.split_gblock() else 1)
             self.gblock = self._gblock_handler.gblock  # Register with main model
 
         self.decoder = nn.ModuleList((
-            Decoder(up_blocks((up_in_fc, -1) if up_in_fc else None),
+            Decoder(up_blocks((cfg.dec_upscales_in_fc(), -1)
+                              if cfg.dec_upscales_in_fc() else None),
                     up_blocks.out_channels,
                     cfg.dec_output_kernel())
             for _ in range(num_identities if cfg.split_decoders() else 1)
@@ -1527,6 +1504,45 @@ class PhazeA(ModelPlugin):
         # TODO keras version tracking removed from here. Delete this when confirmed models are all
         # in valid torch versions
 
+    def _build_inter(self,
+                     upscale_blocks: UpscaleBlocks,
+                     bottleneck_args: tuple[str, int, str] | None) -> Inter | nn.ModuleList:
+        """ Build the intermediate layers """
+        shared = T.cast(T.Literal["none", "full", "half"], cfg.shared_fc())
+        upscales_in_fc = cfg.dec_upscales_in_fc()
+
+        if self.num_identities > 2 and shared == "half":
+            raise FaceswapError("half shared FC layer is not compatible with more than 2"
+                                "identities")
+        if not self.is_legacy and not self._split_fc and shared != "none":
+            raise FaceswapError("Shared FC layer is only compatible with split FC layers")
+        inter_args = (self.encoder.output_shape,
+                      cfg.output_size(),
+                      shared,
+                      cfg.fc_min_filters(),
+                      cfg.fc_max_filters(),
+                      cfg.fc_depth(),
+                      cfg.fc_filter_slope(),
+                      cfg.fc_dimensions(),
+                      cfg.fc_dropout(),
+                      T.cast(UpsampleT, cfg.fc_upsampler()),
+                      cfg.fc_upsamples(),
+                      cfg.fc_upsample_filters(),
+                      upscales_in_fc,
+                      upscale_blocks,
+                      bottleneck_args,
+                      self.is_legacy)
+        inter0 = Inter(*inter_args)
+
+        if not self._split_fc:
+            retval = inter0
+        else:
+            retval = nn.ModuleList([inter0] + [Inter(*inter_args, shared_inter=inter0.shared)
+                                   for _ in range(self.num_identities - 1)])
+        if shared != "none" and upscales_in_fc:
+            upscale_blocks.update_filters(upscales_in_fc)
+        return retval
+
     def forward(self, inputs:  list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         """ Forward pass through the Phaze-A model
 
@@ -1541,9 +1557,16 @@ class PhazeA(ModelPlugin):
         The output for each identity training through the model
         """
         encoded = [self.encoder(x) for x in inputs]
-        x = self._inter_handler(encoded)
-        if self._gblock_handler is not None:
-            x = self._gblock_handler(encoded, x)
+
+        if not self._split_fc and not self._shared_fc:
+            x = [self.inter(enc) for enc in encoded]
+        else:
+            x = [inter(enc) for inter, enc in zip(T.cast(nn.ModuleList, self.inter), encoded)]
+
+        if self.inter_gblock is not None:
+            styles = [self.inter_gblock(enc) for enc in encoded]
+            if self._gblock_handler is not None:
+                x = self._gblock_handler(styles, x)
         return tuple(self.decoder[i if len(self.decoder) > 1 else 0](y) for i, y in enumerate(x))
 
     # TODO this is a c+p. Needs revisiting when load/freeze weights implemented
