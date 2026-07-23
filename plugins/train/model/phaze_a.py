@@ -689,12 +689,12 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
 
         self._in_channels = -1
         self._reshape_shape: tuple[int, int, int] | None = None
-        self._filters: list[int] = []
+        self.filters: list[int] = []
 
     @property
     def out_channels(self) -> int:
         """ The number of filters from the final upscale layer """
-        return self._filters[-1]
+        return self.filters[-1]
 
     def _calculate_reshape(self, input_shape: tuple[int, int, int]) -> None:
         """ Calculate whether the input needs reshaping for the chosen model output size and set to
@@ -727,8 +727,8 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         dim = input_shape[-1] if self._reshape_shape is None else self._reshape_shape[-1]
         min_flt, max_flt, slope_mode, slope = self._filter_args
         upscales = int(np.log2(self._output_size / dim))
-        self._filters = _get_curve(max_flt, min_flt, upscales, slope, mode=slope_mode)
-        logger.debug("[UpscaleBlocks] Set filters: %s)", self._filters)
+        self.filters = _get_curve(max_flt, min_flt, upscales, slope, mode=slope_mode)
+        logger.debug("[UpscaleBlocks] Set filters: %s)", self.filters)
 
     def _dny_entry(self, layers: dict[str, nn.Module]) -> None:
         """ Entry convolutions for using the upscale_dny method.
@@ -742,9 +742,9 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
             return
         logger.debug("[UpscaleBlocks] Adding DNY entry layers")
         layers["dny"] = nn.Sequential(
-            nn.Conv2d(self._in_channels, self._filters[0], 4, padding="same"),
+            nn.Conv2d(self._in_channels, self.filters[0], 4, padding="same"),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(self._filters[0], self._filters[0], 3, padding=1),
+            nn.Conv2d(self.filters[0], self.filters[0], 3, padding=1),
             nn.LeakyReLU(0.2, inplace=True))
 
     def _upscale_block(self,
@@ -765,11 +765,11 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         -------
         The sequential model for an upscale layer tensor from the upscale block
         """
-        filters_ = self._filters[index]
+        filters_ = self.filters[index]
         layers: dict[str, nn.Module] = {}
         layers[self._method] = _get_upscale_layer(self._method,
                                                   (self._in_channels if index == 0
-                                                   else self._filters[index - 1]),
+                                                   else self.filters[index - 1]),
                                                   filters_,
                                                   upsamples=2,
                                                   is_legacy=self._is_legacy)
@@ -780,7 +780,7 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
                                                 filters_,
                                                 is_legacy=self._is_legacy)
 
-        skip_res = self._skip_last_res and index == len(self._filters) - 1
+        skip_res = self._skip_last_res and index == len(self.filters) - 1
         if not is_mask and self._res_blocks and not skip_res:
             layers["act"] = nn.LeakyReLU(0.2, inplace=True)
             for i in range(self._res_blocks):
@@ -799,7 +799,7 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
             The shape of the Tensor feeding the Upscale Blocks (output from Inter or output from
             each fc if upscales in fc)
         """
-        if self._filters:  # input shape already set
+        if self.filters:  # input shape already set
             return
         logger.debug("[UpscaleBlocks] Setting input_shape: %s", input_shape)
         self._calculate_reshape(input_shape)
@@ -815,10 +815,10 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         if upscales_in_fc < 1:
             return
         idx = upscales_in_fc - 1
-        filters = self._filters[idx] * 2
+        filters = self.filters[idx] * 2
         logger.info("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
-                    idx, self._filters[idx], filters, upscales_in_fc)
-        self._filters[idx] = filters
+                    idx, self.filters[idx], filters, upscales_in_fc)
+        self.filters[idx] = filters
 
     def __call__(self, layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
         """ Obtain the upscaling layers
@@ -837,9 +837,9 @@ class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
         The upscale layers for the selected layer indices and the upscale layers for the mask
         path if learn_mask is selected
         """
-        assert self._in_channels > 0 and self._filters, "Input size must be set before calling"
+        assert self._in_channels > 0 and self.filters, "Input size must be set before calling"
         start_idx, end_idx = (0, -1) if layer_indices is None else layer_indices
-        end_idx = len(self._filters) if end_idx == -1 else end_idx
+        end_idx = len(self.filters) if end_idx == -1 else end_idx
 
         layers: dict[str, nn.Module] = {}
         mask_layers: dict[str, nn.Module] = {}
@@ -1084,13 +1084,15 @@ class Inter(nn.Module):
             slope
             )
 
-        out_filters = (upsample_filters if upsamples > 0 and upsampler != "upsample2d"
-                       else filters[-1] // (final_dim * 2))
-        fc_out_shape = (out_filters, final_dim, final_dim)
-        self.out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
-                          else fc_out_shape)
-        """ The output shape from the inter layer """
-        upscale_blocks.set_input_shape(fc_out_shape if upscales else self.out_shape)
+        out_channels = (upsample_filters if upsamples > 0 and upsampler != "upsample2d"
+                        else filters[-1] // (final_dim * 2))
+        fc_out_shape = (out_channels, final_dim, final_dim)
+        out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
+                     else fc_out_shape)
+        upscale_blocks.set_input_shape(fc_out_shape if upscales else out_shape)
+        out_channels = out_channels if not upscales else upscale_blocks.filters[upscales - 1]
+        self.out_channels = out_channels * 2 if shared != "none" else out_channels
+        """ The number of output channels from the inter layer """
 
         fc_args = (input_shape,
                    filters,
@@ -1210,7 +1212,83 @@ class InterGBlock(nn.Sequential):
         """ The number of output channels from the encoder + bottleneck """
 
 
-class GBlock():
+class GBlock(nn.Module):
+    """ G-Block model, borrowing from Adain StyleGAN.
+
+    Parameters
+    ----------
+    style_channels
+        The number of channels feeding the style part of G-Block
+    content_channels
+        The number of channels feeding the content part of G-Block
+    style_recursions
+        The number of recursions for the style Linear layers
+    style_nodes
+        The number of channels in each style Linear layer
+    g_block_recursions
+        The number of recursions to perform within the G-Block. Default: 2
+    """
+    def __init__(self,
+                 style_channels: int,
+                 content_channels: int,
+                 style_recursions: int = 2,
+                 style_nodes: int = 512,
+                 g_block_recursions: int = 2) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self._gblock_recursions = g_block_recursions
+        style = []
+        for i in range(style_recursions):
+            style.append(nn.Linear(style_channels if i == 0 else style_nodes, style_nodes))
+            if i != style_recursions - 1:
+                style.append(nn.LeakyReLU(0.1, inplace=True))
+        self.style = nn.Sequential(*style)
+        self.content = nn.Sequential(nn.Conv2d(content_channels, content_channels, 3, padding=1),
+                                     GaussianNoise(1.0))
+        self.gblock = nn.ModuleList()
+        for i in range(self._gblock_recursions):
+            gblock = nn.ModuleDict()
+            gblock["style"] = nn.ModuleList((
+                nn.Sequential(nn.Linear(style_channels, content_channels),
+                              Reshape((content_channels, 1, 1), is_contiguous=True))
+                for _ in range(2)))
+            gblock["noise"] = nn.Sequential(
+                GaussianNoise(1.0),
+                nn.Conv2d(content_channels, content_channels, 3, padding=1)
+                )
+            if i == self._gblock_recursions - 1:
+                gblock["conv"] = nn.Conv2d(content_channels, content_channels, 3, padding=1)
+            gblock["norm"] = AdaIN(dim=1)
+            gblock["act"] = nn.LeakyReLU(0.2, inplace=True)
+            self.gblock.append(gblock)
+
+    def forward(self, style: torch.Tensor, content: torch.Tensor) -> torch.Tensor:
+        """ Forward pass through the G-Block
+
+        Parameters
+        ----------
+        style
+            The output from inter_gblock
+        content
+            The outputs from the Phaze-A Intermediate layer
+
+        Returns
+        -------
+        The output tensor from the G-Block
+        """
+        style = self.style(style)
+        x = self.content(content)
+        for idx, gblock in enumerate(T.cast(list[nn.ModuleDict], self.gblock)):
+            styles = tuple(s(style) for s in T.cast(nn.ModuleList, gblock["style"]))
+            noise = gblock["noise"](x)
+            if idx == self._gblock_recursions - 1:
+                x = gblock["conv"](x)
+            norm = gblock["norm"](x, styles)
+            x = norm + noise
+        return x
+
+
+class GBlockO():
     """ G-Block model, borrowing from Adain StyleGAN.
 
     Parameters
@@ -1392,6 +1470,7 @@ class PhazeA(ModelPlugin):
         self._validate_encoder_architecture()
         self._split_fc = cfg.split_fc()
         self._shared_fc = cfg.shared_fc() != "none"
+        self._split_gblock = cfg.split_gblock()
 
         input_size = self._get_input_size(is_legacy)
         is_bgr = cfg.enc_architecture() == "fs_original" or (
@@ -1425,7 +1504,7 @@ class PhazeA(ModelPlugin):
             )
 
         self.inter = self._build_inter(up_blocks, None if bottleneck_in_enc else bottleneck_args)
-        self._gblock_handler = self.inter_gblock = None
+        self.inter_gblock = self.gblock = None
         if cfg.enable_gblock():
             self.inter_gblock = InterGBlock(self.encoder.output_shape,
                                             cfg.fc_gblock_depth(),
@@ -1435,11 +1514,14 @@ class PhazeA(ModelPlugin):
                                             cfg.fc_dropout(),
                                             None if bottleneck_in_enc else bottleneck_args,
                                             is_legacy)
-            self._gblock_handler = GBlock(self.inter_gblock.in_channels,
-                                          cfg.fc_gblock_max_nodes(),
-                                          num_identities if cfg.split_gblock() else 1)
-            self.gblock = self._gblock_handler.gblock  # Register with main model
-
+            content_channels = (T.cast(int, self.inter[0].out_channels)
+                                if isinstance(self.inter, nn.ModuleList)
+                                else self.inter.out_channels)
+            if not self._split_gblock:
+                self.gblock = GBlock(cfg.fc_gblock_max_nodes(), content_channels)
+            else:
+                self.gblock = nn.ModuleList([GBlock(cfg.fc_gblock_max_nodes(), content_channels)
+                                             for _ in range(num_identities)])
         self.decoder = nn.ModuleList((
             Decoder(up_blocks((cfg.dec_upscales_in_fc(), -1)
                               if cfg.dec_upscales_in_fc() else None),
@@ -1558,15 +1640,18 @@ class PhazeA(ModelPlugin):
         """
         encoded = [self.encoder(x) for x in inputs]
 
-        if not self._split_fc and not self._shared_fc:
-            x = [self.inter(enc) for enc in encoded]
-        else:
+        if self._split_fc:
             x = [inter(enc) for inter, enc in zip(T.cast(nn.ModuleList, self.inter), encoded)]
+        else:
+            x = [self.inter(enc) for enc in encoded]
 
-        if self.inter_gblock is not None:
+        if self.inter_gblock is not None and self.gblock is not None:
             styles = [self.inter_gblock(enc) for enc in encoded]
-            if self._gblock_handler is not None:
-                x = self._gblock_handler(styles, x)
+            if self._split_gblock:
+                x = [g(s, c) for g, s, c in zip(T.cast(nn.ModuleList, self.gblock), styles, x)]
+            else:
+                x = [self.gblock(s, c) for s, c in zip(styles, x)]
+
         return tuple(self.decoder[i if len(self.decoder) > 1 else 0](y) for i, y in enumerate(x))
 
     # TODO this is a c+p. Needs revisiting when load/freeze weights implemented
