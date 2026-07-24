@@ -289,11 +289,10 @@ def _get_normalization(normalization: str,
     -------
     The configured normalization layer
     """
-    # TODO other normalizations
     if normalization == "batch":
         retval = nn.BatchNorm2d(in_channels, eps=0.001, momentum=0.01)
     elif normalization == "group":
-        retval = nn.GroupNorm(32, in_channels, eps=1e-6)  # TODO check if needs legacy
+        retval = nn.GroupNorm(32, in_channels, eps=1e-6)
     elif is_legacy and normalization == "instance":
         retval = InstanceNormLegacy()
     elif normalization == "instance":
@@ -492,6 +491,8 @@ class Encoder(nn.Sequential):
         The selected encoder architecture
     input_size
         The pixel dimension of the encoder input
+    load_imagenet_weights
+        ``True`` to load imagenet weights for compatible models
     bottleneck_args
         The positional args for creating the bottleneck if to be placed in the encoder or ``None``
         if it is not
@@ -501,14 +502,23 @@ class Encoder(nn.Sequential):
     def __init__(self,
                  architecture: str,
                  input_size: int,
+                 load_imagenet_weights: bool,
                  bottleneck_args: tuple[str, int, str] | None,
                  is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self._name = snake_to_camel_case(architecture)
         mod_info = _MODEL_MAPPING[architecture]
+
+        if is_legacy:  # No need to load weights if we are bringing in a legacy trained model
+            load_imagenet_weights = False
+        if load_imagenet_weights and not mod_info.torch_name:
+            logger.warning("Loading ImageNet weights is not supported for '%s'. "
+                           "Weights will be randomly initialized", self._name)
+            load_imagenet_weights = False
+
         self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
-        setattr(self, self._name, self._get_encoder(mod_info, is_legacy))
+        setattr(self, self._name, self._get_encoder(mod_info, load_imagenet_weights, is_legacy))
         out_shape = self._get_output_shape(input_size)
         self.bottleneck = None if bottleneck_args is None else Bottleneck(out_shape,
                                                                           *bottleneck_args,
@@ -521,7 +531,8 @@ class Encoder(nn.Sequential):
         """ The encoder backbone """
         return getattr(self, self._name)
 
-    def _get_backbone(self, mod_info: _EncoderInfo, is_legacy: bool) -> nn.Module:
+    def _get_backbone(self, mod_info: _EncoderInfo, load_weights: bool, is_legacy: bool
+                      ) -> nn.Module:
         """ Load an encoder backbone defined within the Faceswap Repo or in TorchVision """
         if mod_info.torch_name == "inception_v3":
             override_inception3()
@@ -530,7 +541,8 @@ class Encoder(nn.Sequential):
         name = mod_info.torch_name[1:] if is_local else mod_info.torch_name
         module = sys.modules[__name__] if is_local else TVMods
         kwargs = mod_info.kwargs if mod_info.kwargs else {}
-        retval: nn.Module = getattr(module, name)(weights=None, **kwargs)  # TODO load weights optional
+        weights = "DEFAULT" if load_weights else None
+        retval: nn.Module = getattr(module, name)(weights=weights, **kwargs)
 
         if is_legacy and (mod_info.legacy_same_pad
                           or mod_info.legacy_bn_eps is not None
@@ -572,14 +584,15 @@ class Encoder(nn.Sequential):
 
         return retval
 
-    def _get_encoder(self, mod_info: _EncoderInfo, is_legacy: bool) -> nn.Module:
+    def _get_encoder(self, mod_info: _EncoderInfo, load_weights: bool, is_legacy: bool
+                     ) -> nn.Module:
         """ Obtain the torch Module for the specified encoder architecture """
         logger.debug("[Encoder] Loading encoder: '%s'", mod_info)
         if mod_info.torch_name.startswith("clipv_"):
             raise NotImplementedError  # TODO
 
         if mod_info.torch_name:
-            backbone = self._get_backbone(mod_info, is_legacy)
+            backbone = self._get_backbone(mod_info, load_weights, is_legacy)
             retval = self._select_layers(backbone, mod_info)
             return retval
 
@@ -1481,6 +1494,7 @@ class PhazeA(ModelPlugin):
         bottleneck_args = (cfg.bottleneck_type(), cfg.bottleneck_size(), cfg.bottleneck_norm())
         self.encoder = Encoder(cfg.enc_architecture(),
                                self.input_shape[1],
+                               cfg.enc_load_weights(),
                                bottleneck_args if cfg.bottleneck_in_encoder() else None,
                                self.is_legacy)
         if cfg.bottleneck_in_encoder():
