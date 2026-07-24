@@ -10,6 +10,8 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
+import torchvision.models.mobilenetv3 as TVMobile
+from torchvision.models.mobilenetv3 import InvertedResidualConfig as IRS
 
 from lib.logger import parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy
@@ -159,6 +161,68 @@ def mobilenet(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> M
     retval = MobileNet(**kwargs)
     # TODO port weights and load here
     return retval
+
+
+def mobilenet_v3_small(weights: TVMobile.MobileNet_V3_Small_Weights | None = None,
+                       progress: bool = True,
+                       **kwargs: T.Any) -> TVMobile.MobileNetV3:
+    """ Override TorchVision MobileNetV3 - Small to handle minimilist variant """
+    minimalist = kwargs.pop("minimalist", False)
+    if not minimalist:
+        return TVMobile.mobilenet_v3_small(weights=weights, progress=progress, **kwargs)
+
+    width_mult = kwargs.pop("width_mult", 1.0)
+    if weights is not None and width_mult != 1.0:  # TODO confirm
+        raise ValueError("ImageNet weights can only be loaded when mobilenet_width is set to 1.0")
+
+    inverted_residual_setting = [IRS(16, 3, 16, 16, False, "RE", 2, 1, width_mult),  # C1
+                                 IRS(16, 3, 72, 24, False, "RE", 2, 1, width_mult),  # C2
+                                 IRS(24, 3, 88, 24, False, "RE", 1, 1, width_mult),
+                                 IRS(24, 3, 96, 40, False, "RE", 2, 1, width_mult),  # C3
+                                 IRS(40, 3, 240, 40, False, "RE", 1, 1, width_mult),
+                                 IRS(40, 3, 240, 40, False, "RE", 1, 1, width_mult),
+                                 IRS(40, 3, 120, 48, False, "RE", 1, 1, width_mult),
+                                 IRS(48, 3, 144, 48, False, "RE", 1, 1, width_mult),
+                                 IRS(48, 3, 288, 96, False, "RE", 2, 1, width_mult),  # C4
+                                 IRS(96, 3, 576, 96, False, "RE", 1, 1, width_mult),
+                                 IRS(96, 3, 576, 96, False, "RE", 1, 1, width_mult)]
+    last_channel = IRS.adjust_channels(1024, width_mult)  # C5
+    model = TVMobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    # TODO load weights here
+    return model
+
+
+def mobilenet_v3_large(weights: TVMobile.MobileNet_V3_Large_Weights | None = None,
+                       progress: bool = True,
+                       **kwargs: T.Any) -> TVMobile.MobileNetV3:
+    """ Override TorchVision MobileNetV3 - Large to handle minimilist variant """
+    minimalist = kwargs.pop("minimalist", False)
+    if not minimalist:
+        return TVMobile.mobilenet_v3_large(weights=weights, progress=progress, **kwargs)
+
+    width_mult = kwargs.pop("width_mult", 1.0)
+    if weights is not None and width_mult != 1.0:  # TODO confirm
+        raise ValueError("ImageNet weights can only be loaded when mobilenet_width is set to 1.0")
+
+    inverted_residual_setting = [IRS(16, 3, 16, 16, False, "RE", 1, 1, width_mult),
+                                 IRS(16, 3, 64, 24, False, "RE", 2, 1, width_mult),  # C1
+                                 IRS(24, 3, 72, 24, False, "RE", 1, 1, width_mult),
+                                 IRS(24, 3, 72, 40, False, "RE", 2, 1, width_mult),  # C2
+                                 IRS(40, 3, 120, 40, False, "RE", 1, 1, width_mult),
+                                 IRS(40, 3, 120, 40, False, "RE", 1, 1, width_mult),
+                                 IRS(40, 3, 240, 80, False, "RE", 2, 1, width_mult),  # C3
+                                 IRS(80, 3, 200, 80, False, "RE", 1, 1, width_mult),
+                                 IRS(80, 3, 184, 80, False, "RE", 1, 1, width_mult),
+                                 IRS(80, 3, 184, 80, False, "RE", 1, 1, width_mult),
+                                 IRS(80, 3, 480, 112, False, "RE", 1, 1, width_mult),
+                                 IRS(112, 3, 672, 112, False, "RE", 1, 1, width_mult),
+                                 IRS(112, 3, 672, 160, False, "RE", 2, 1, width_mult),  # C4
+                                 IRS(160, 3, 960, 160, False, "RE", 1, 1, width_mult),
+                                 IRS(160, 3, 960, 160, False, "RE", 1, 1, width_mult)]
+    last_channel = IRS.adjust_channels(1280, width_mult)  # C5
+    model = TVMobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    # TODO load weights here
+    return model
 
 
 __all__ = get_module_objects(__name__)

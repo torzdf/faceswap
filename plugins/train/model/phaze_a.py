@@ -21,9 +21,9 @@ from lib.model.layers import (
 )
 from lib.model.networks import (  # pylint:disable=unused-import  # noqa:F401
     convnext_xlarge, efficientnet_v2_b0, efficientnet_v2_b1, efficientnet_v2_b2,
-    efficientnet_v2_b3, inception_resnet_v2, mobilenet, nasnet_mobile, nasnet_large, resnet50,
-    resnet50_v2, resnet101, resnet101_v2, resnet152, resnet152_v2, xception, override_inception3,
-    patch_legacy
+    efficientnet_v2_b3, inception_resnet_v2, mobilenet, mobilenet_v3_small, mobilenet_v3_large,
+    nasnet_mobile, nasnet_large, resnet50, resnet50_v2, resnet101, resnet101_v2, resnet152,
+    resnet152_v2, xception, override_inception3, patch_legacy
 )
 
 from lib.utils import FaceswapError, get_module_objects, snake_to_camel_case
@@ -36,8 +36,6 @@ from . import phaze_a_defaults as cfg
 logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code,too-many-lines
 
-# TODO error on too small input size
-# TODO weights initialization
 # TODO summaries instance counts + call per instance counts can be wrong
 # TODO check EncInfo kwargs load correctly when loading model. If not then use value() in build
 
@@ -167,13 +165,13 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "mobilenet_v2": _EncoderInfo(torch_name="mobilenet_v2",
                                  kwargs={"width_mult": cfg.mobilenet_width()},
                                  legacy_scaling=(-1, 1)),
-    "mobilenet_v3_large": _EncoderInfo(torch_name="mobilenet_v3_large",
+    "mobilenet_v3_large": _EncoderInfo(torch_name="~mobilenet_v3_large",
                                        kwargs={"width_mult": cfg.mobilenet_width(),
-                                               "minimalist": cfg.mobilenet_minimalistic()},  # TODO not handled. Either remove or implement. Will need ported weights
+                                               "minimalist": cfg.mobilenet_minimalistic()},
                                        legacy_scaling=(-1, 1)),
-    "mobilenet_v3_small": _EncoderInfo(torch_name="mobilenet_v3_small",
+    "mobilenet_v3_small": _EncoderInfo(torch_name="~mobilenet_v3_small",
                                        kwargs={"width_mult": cfg.mobilenet_width(),
-                                               "minimalist": cfg.mobilenet_minimalistic()},  # TODO not handled. Either remove or implement. Will need ported weights
+                                               "minimalist": cfg.mobilenet_minimalistic()},
                                        legacy_scaling=(-1, 1)),
     "nasnet_large": _EncoderInfo(torch_name="~nasnet_large",
                                  kwargs={"include_top": False},
@@ -467,7 +465,6 @@ class Bottleneck(nn.Sequential):
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        assert len(input_shape) == 3  # TODO remove after testing this holds true and then remove len check from nn.Flatten
         if normalization and normalization != "none":
             self.norm = _get_normalization(normalization, input_shape[0], is_legacy)
         if len(input_shape) > 1 and bottleneck in ("dense", "flatten"):
