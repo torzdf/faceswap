@@ -1471,6 +1471,7 @@ class PhazeA(ModelPlugin):
         self._split_fc = cfg.split_fc()
         self._shared_fc = cfg.shared_fc() != "none"
         self._split_gblock = cfg.split_gblock()
+        self._split_decoders = cfg.split_decoders()
 
         input_size = self._get_input_size(is_legacy)
         is_bgr = cfg.enc_architecture() == "fs_original" or (
@@ -1481,11 +1482,12 @@ class PhazeA(ModelPlugin):
                          is_rgb=not is_bgr,
                          is_legacy=is_legacy)
         bottleneck_args = (cfg.bottleneck_type(), cfg.bottleneck_size(), cfg.bottleneck_norm())
-        bottleneck_in_enc = cfg.bottleneck_in_encoder()
         self.encoder = Encoder(cfg.enc_architecture(),
                                self.input_shape[1],
-                               bottleneck_args if bottleneck_in_enc else None,
+                               bottleneck_args if cfg.bottleneck_in_encoder() else None,
                                self.is_legacy)
+        if cfg.bottleneck_in_encoder():
+            bottleneck_args = None
 
         up_blocks = UpscaleBlocks(
             cfg.output_size(),
@@ -1503,32 +1505,9 @@ class PhazeA(ModelPlugin):
             self.is_legacy
             )
 
-        self.inter = self._build_inter(up_blocks, None if bottleneck_in_enc else bottleneck_args)
-        self.inter_gblock = self.gblock = None
-        if cfg.enable_gblock():
-            self.inter_gblock = InterGBlock(self.encoder.output_shape,
-                                            cfg.fc_gblock_depth(),
-                                            cfg.fc_gblock_min_nodes(),
-                                            cfg.fc_gblock_max_nodes(),
-                                            cfg.fc_gblock_filter_slope(),
-                                            cfg.fc_dropout(),
-                                            None if bottleneck_in_enc else bottleneck_args,
-                                            is_legacy)
-            content_channels = (T.cast(int, self.inter[0].out_channels)
-                                if isinstance(self.inter, nn.ModuleList)
-                                else self.inter.out_channels)
-            if not self._split_gblock:
-                self.gblock = GBlock(cfg.fc_gblock_max_nodes(), content_channels)
-            else:
-                self.gblock = nn.ModuleList([GBlock(cfg.fc_gblock_max_nodes(), content_channels)
-                                             for _ in range(num_identities)])
-        self.decoder = nn.ModuleList((
-            Decoder(up_blocks((cfg.dec_upscales_in_fc(), -1)
-                              if cfg.dec_upscales_in_fc() else None),
-                    up_blocks.out_channels,
-                    cfg.dec_output_kernel())
-            for _ in range(num_identities if cfg.split_decoders() else 1)
-            ))
+        self.inter = self._build_inter(up_blocks, bottleneck_args)
+        self.inter_gblock, self.gblock = self._build_gblock(bottleneck_args)
+        self.decoder = self._build_decoder(up_blocks)
 
     # TODO these 2 properties are hangovers from old system. Revisit when implemented
     @property
@@ -1625,6 +1604,40 @@ class PhazeA(ModelPlugin):
             upscale_blocks.update_filters(upscales_in_fc)
         return retval
 
+    def _build_gblock(self, bottleneck_args: tuple[str, int, str] | None
+                      ) -> tuple[InterGBlock, GBlock | nn.ModuleList] | tuple[None, None]:
+        """ Build the gblock """
+        if not cfg.enable_gblock():
+            return None, None
+
+        inter = InterGBlock(self.encoder.output_shape,
+                            cfg.fc_gblock_depth(),
+                            cfg.fc_gblock_min_nodes(),
+                            cfg.fc_gblock_max_nodes(),
+                            cfg.fc_gblock_filter_slope(),
+                            cfg.fc_dropout(),
+                            bottleneck_args,
+                            self.is_legacy)
+        content_channels = (T.cast(int, self.inter[0].out_channels)
+                            if isinstance(self.inter, nn.ModuleList)
+                            else self.inter.out_channels)
+        if not self._split_gblock:
+            gblock = GBlock(cfg.fc_gblock_max_nodes(), content_channels)
+        else:
+            gblock = nn.ModuleList([GBlock(cfg.fc_gblock_max_nodes(), content_channels)
+                                    for _ in range(self.num_identities)])
+        return inter, gblock
+
+    def _build_decoder(self, upscale_blocks: UpscaleBlocks) -> Decoder | nn.ModuleList:
+        """ Build the Phaze-A decoder """
+        args = (upscale_blocks((cfg.dec_upscales_in_fc(), -1) if cfg.dec_upscales_in_fc()
+                               else None),
+                upscale_blocks.out_channels,
+                cfg.dec_output_kernel())
+        if self._split_decoders:
+            return nn.ModuleList([Decoder(*args) for _ in range(self.num_identities)])
+        return Decoder(*args)
+
     def forward(self, inputs:  list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         """ Forward pass through the Phaze-A model
 
@@ -1652,7 +1665,12 @@ class PhazeA(ModelPlugin):
             else:
                 x = [self.gblock(s, c) for s, c in zip(styles, x)]
 
-        return tuple(self.decoder[i if len(self.decoder) > 1 else 0](y) for i, y in enumerate(x))
+        if self._split_decoders:
+            out = [dec(y) for dec, y in zip(T.cast(nn.ModuleList, self.decoder), x)]
+        else:
+            out = [self.decoder(y) for y in x]
+
+        return tuple(out)
 
     # TODO this is a c+p. Needs revisiting when load/freeze weights implemented
     def _select_real_layers(self, layers: list[str]) -> list[str]:
@@ -1682,25 +1700,3 @@ class PhazeA(ModelPlugin):
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    from lib.logger import log_setup
-    from plugins.train.train_config import load_config
-    log_setup("DEBUG", "", "")
-    load_config(None)
-    INP_SIZE = 64
-    cfg.enc_architecture.set(sys.argv[1])
-    # cfg.split_fc.set(True)
-    # cfg.shared_fc.set("half")
-    # cfg.fc_upsampler.set("subpixel")
-    mod = PhazeA(2, True)
-    print(mod)
-    exit()
-
-    inps = [torch.rand((1, 3, INP_SIZE, INP_SIZE)), torch.rand((1, 3, INP_SIZE, INP_SIZE))]
-    outs = mod(inps)
-    if isinstance(outs[0], tuple):
-        print([[x.shape for x in y] for y in outs])
-    else:
-        print([x.shape for x in outs])
