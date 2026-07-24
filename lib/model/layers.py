@@ -470,15 +470,21 @@ class UpscaleResizeImages(nn.Module):
         The amount to upscale the image. Default: `2`
     interpolation: ["nearest", "bilinear"], optional
         Interpolation to use for up-sampling. Default: "bilinear"
+    is_legacy
+        Used to correctly upsample legacy models that used this layer. Should not be used for new
+        models. Default: ``False``
     """
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
                  scale_factor: int = 2,
-                 interpolation: T.Literal["nearest", "bilinear"] = "bilinear") -> None:
+                 interpolation: T.Literal["nearest", "bilinear"] = "bilinear",
+                 is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        if interpolation == "nearest":
+        if is_legacy:
+            self.upsample = UpSampling2dLegacy(size=scale_factor, interpolation=interpolation)
+        elif interpolation == "nearest":
             self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor)
         else:
             self.upsample = nn.UpsamplingBilinear2d(scale_factor=scale_factor)
@@ -488,7 +494,8 @@ class UpscaleResizeImages(nn.Module):
                                              out_channels,
                                              3,
                                              stride=2,
-                                             padding=2)  # TODO CONFIRM PADDING + IN-PADDING VS OUT_PADDING + REFLECT PADDING GETS ADDED
+                                             padding=1,
+                                             output_padding=1)  # TODO CONFIRM REFLECT PADDING GETS ADDED
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
