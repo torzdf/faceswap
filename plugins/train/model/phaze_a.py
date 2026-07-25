@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torchvision import models as TVMods
 
-from lib.logger import locals_strip, parse_class_init
+from lib.logger import parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy, InstanceNormLegacy, UpSampling2dLegacy
 from lib.model.layers import (
     AdaIN, ChannelLayerNorm, ChannelRMSNorm, GaussianNoise, Reshape, ResidualBlock, UpscaleDNY,
@@ -23,7 +23,8 @@ from lib.model.networks import (  # pylint:disable=unused-import  # noqa:F401
     convnext_xlarge, efficientnet_v2_b0, efficientnet_v2_b1, efficientnet_v2_b2,
     efficientnet_v2_b3, inception_resnet_v2, mobilenet, mobilenet_v3_small, mobilenet_v3_large,
     nasnet_mobile, nasnet_large, resnet50, resnet50_v2, resnet101, resnet101_v2, resnet152,
-    resnet152_v2, xception, override_inception3, patch_legacy
+    resnet152_v2, xception, override_inception3, patch_legacy, vit_b_16, vit_b_32, vit_l_14,
+    vit_l_14_336px
 )
 
 from lib.utils import FaceswapError, get_module_objects, snake_to_camel_case
@@ -101,12 +102,12 @@ _CONVNEXT_APPEND = (("classifier", 0), )
 _EFF_NET_LEGACY = {"legacy_same_pad": True, "legacy_bn_eps": 1e-3, "legacy_bn_momentum": 0.01}
 _EFF_NET_V2_LEGACY = {"legacy_scaling": (-1, 1), "legacy_same_pad": True, "legacy_bn_eps": 1e-3}
 _MODEL_MAPPING: dict[str, _EncoderInfo] = {
-    "clipv_farl-b-16-16": _EncoderInfo(torch_name="FaRL-B-16-16"),  # TODO
-    "clipv_farl-b-16-64": _EncoderInfo(torch_name="FaRL-B-16-64"),  # TODO
-    "clipv_vit-b-16": _EncoderInfo(torch_name="ViT-B-16"),  # TODO
-    "clipv_vit-b-32": _EncoderInfo(torch_name="ViT-B-32"),  # TODO
-    "clipv_vit-l-14": _EncoderInfo(torch_name="ViT-L-14"),  # TODO
-    "clipv_vit-l-14-336px": _EncoderInfo(torch_name="ViT-L-14-336px", default_size=336),  # TODO
+    "clipv_farl-b-16-16": _EncoderInfo(torch_name="~vit_b_16", kwargs={"weights": "FaRL-B-16-16"}),
+    "clipv_farl-b-16-64": _EncoderInfo(torch_name="~vit_b_16", kwargs={"weights": "FaRL-B-16-64"}),
+    "clipv_vit-b-16": _EncoderInfo(torch_name="~vit_b_16"),
+    "clipv_vit-b-32": _EncoderInfo(torch_name="~vit_b_32"),
+    "clipv_vit-l-14": _EncoderInfo(torch_name="~vit_l_14"),
+    "clipv_vit-l-14-336px": _EncoderInfo(torch_name="~vit_l_14_336px", default_size=336),
     "convnext_tiny": _EncoderInfo(
         torch_name="convnext_tiny", layer_append=_CONVNEXT_APPEND, legacy_scaling=(0, 255)),
     "convnext_small": _EncoderInfo(
@@ -783,7 +784,9 @@ class Encoder(nn.Sequential):
             load_imagenet_weights = False
 
         self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
-        setattr(self, self._name, self._get_encoder(mod_info, load_imagenet_weights, is_legacy))
+        setattr(self,
+                self._name,
+                self._get_encoder(mod_info, load_imagenet_weights, input_size, is_legacy))
         out_shape = self._get_output_shape(input_size)
         self.bottleneck = BOTTLENECK_GETTER(out_shape) if include_bottleneck else None
         self.output_shape = out_shape if self.bottleneck is None else self.bottleneck.output_shape
@@ -794,7 +797,11 @@ class Encoder(nn.Sequential):
         """ The encoder backbone """
         return getattr(self, self._name)
 
-    def _get_backbone(self, mod_info: _EncoderInfo, load_weights: bool, is_legacy: bool
+    def _get_backbone(self,
+                      mod_info: _EncoderInfo,
+                      load_weights: bool,
+                      input_size: int,
+                      is_legacy: bool
                       ) -> nn.Module:
         """ Load an encoder backbone defined within the Faceswap Repo or in TorchVision """
         if mod_info.torch_name == "inception_v3":
@@ -804,8 +811,10 @@ class Encoder(nn.Sequential):
         name = mod_info.torch_name[1:] if is_local else mod_info.torch_name
         module = sys.modules[__name__] if is_local else TVMods
         kwargs = mod_info.kwargs if mod_info.kwargs else {}
-        weights = "DEFAULT" if load_weights else None
-        retval: nn.Module = getattr(module, name)(weights=weights, **kwargs)
+        kwargs["weights"] = kwargs.get("weights", "DEFAULT") if load_weights else None
+        if self._name.startswith("clipvVit"):
+            kwargs["input_size"] = input_size
+        retval: nn.Module = getattr(module, name)(**kwargs)
 
         if is_legacy and (mod_info.legacy_same_pad
                           or mod_info.legacy_bn_eps is not None
@@ -847,15 +856,15 @@ class Encoder(nn.Sequential):
 
         return retval
 
-    def _get_encoder(self, mod_info: _EncoderInfo, load_weights: bool, is_legacy: bool
-                     ) -> nn.Module:
+    def _get_encoder(self,
+                     mod_info: _EncoderInfo,
+                     load_weights: bool,
+                     input_size: int,
+                     is_legacy: bool) -> nn.Module:
         """ Obtain the torch Module for the specified encoder architecture """
         logger.debug("[Encoder] Loading encoder: '%s'", mod_info)
-        if mod_info.torch_name.startswith("clipv_"):
-            raise NotImplementedError  # TODO
-
         if mod_info.torch_name:
-            backbone = self._get_backbone(mod_info, load_weights, is_legacy)
+            backbone = self._get_backbone(mod_info, load_weights, input_size, is_legacy)
             retval = self._select_layers(backbone, mod_info)
             return retval
 
@@ -975,7 +984,8 @@ class FullyConnected(nn.Module):
                        out_channels: int,
                        is_legacy: bool) -> dict[str, nn.Module]:
         """ Obtain the upscale layers if requested """
-        logger.debug("[FullyConnected] Getting upsamples: %s", locals_strip(locals()))
+        logger.debug("[FullyConnected] Getting upsamples: %s",
+                     {k: v for k, v in locals().items() if k != "self"})
         retval = {}
         if not upsamples:
             if is_legacy and upsampler == "upsample2d":  # Bug in keras code

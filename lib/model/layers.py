@@ -174,6 +174,23 @@ class GaussianNoise(nn.Module):
         return inputs + x
 
 
+class QuickGELU(nn.Module):
+    """ Applies GELU approximation that is fast but somewhat inaccurate. """
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """ forward pass through the QuickGELU layer
+
+        Parameters
+        ----------
+        inputs
+            The input Tensor to the QuickGELU layer
+
+        Returns
+        -------
+        The output Tensor from the QuickGELU layer
+        """
+        return inputs * torch.sigmoid(1.702 * inputs)
+
+
 class Reshape(nn.Module):
     """ Convenience layer for defining reshapes within module's __init__
 
