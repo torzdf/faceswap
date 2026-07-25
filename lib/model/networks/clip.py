@@ -107,7 +107,8 @@ class ResidualAttentionBlock(nn.Module):
         -------
         The output tensor from the layer
         """
-        attn = self.attn(inputs, inputs, inputs, need_weights=False, attn_mask=self.attn_mask)[0]
+        x = self.ln_1(inputs)
+        attn = self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
         x = inputs + attn
         x = x + self.mlp(self.ln_2(x))
         return x
