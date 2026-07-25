@@ -371,6 +371,7 @@ class Upscale2xBlock(nn.Module):
         self.fast = fast
         self.out_channels = (out_channels if fast
                              else out_channels - int(out_channels * sr_ratio))
+        """ The number of output channels from the layer """
 
         self.upscale = UpscaleSubpixel(in_channels,
                                        self.out_channels,

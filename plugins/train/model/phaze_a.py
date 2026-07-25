@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torchvision import models as TVMods
 
-from lib.logger import parse_class_init
+from lib.logger import locals_strip, parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy, InstanceNormLegacy, UpSampling2dLegacy
 from lib.model.layers import (
     AdaIN, ChannelLayerNorm, ChannelRMSNorm, GaussianNoise, Reshape, ResidualBlock, UpscaleDNY,
@@ -482,6 +482,272 @@ class Bottleneck(nn.Sequential):
         """ The output shape from the bottleneck excluding batch dimension """
 
 
+class _BottleneckGetter:
+    """ Handles returning a BottleNeck instance from the calling module """
+    bottleneck = cfg.bottleneck_type()
+    size = cfg.bottleneck_size()
+    normalization = cfg.bottleneck_norm()
+    is_legacy: bool | None = None
+
+    @classmethod
+    def configure(cls, is_legacy: bool) -> None:
+        """ Configure the bottleneck
+
+        Parameters
+        ----------
+        is_legacy
+            ``True`` if the model was originally created in Keras
+        """
+        cls.is_legacy = is_legacy
+
+    @classmethod
+    def __call__(cls, input_shape: tuple[int, int, int]) -> Bottleneck:
+        """ Obtain a BottleNeck instance
+
+        Parameters
+        ----------
+        input_shape
+            The input shape to the bottleneck, excluding batch dimension
+        """
+        assert cls.is_legacy is not None
+        return Bottleneck(input_shape,
+                          cls.bottleneck,
+                          cls.size,
+                          cls.normalization,
+                          cls.is_legacy)
+
+
+BOTTLENECK_GETTER = _BottleneckGetter()
+""" Handles returning a BottleNeck instance from the calling module """
+
+
+class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
+    """ Obtain a block of upscalers.
+
+    This class exists outside of the :class:`Decoder` model, as it is possible to place some of
+    the upscalers at the end of the Fully Connected Layers, so the upscale chain needs to be able
+    to be calculated by both the Fully Connected Layers and by the Decoder if required.
+
+    For this reason, the Upscale Filter list is created early for reference by either the Decoder
+    or Fully Connected models
+    """
+    output_size = cfg.output_size()
+    min_filters = cfg.dec_min_filters()
+    max_filters = cfg.dec_max_filters()
+    slope_mode = cfg.dec_slope_mode()
+    slope = cfg.dec_filter_slope()
+    method: UpsampleT = T.cast(UpsampleT, cfg.dec_upscale_method())
+    gaussian = cfg.dec_gaussian()
+    normalization = cfg.dec_norm()
+    res_blocks = cfg.dec_res_blocks()
+    skip_last_residual = cfg.dec_skip_last_residual()
+    learn_mask = cfg_loss.learn_mask()
+
+    _is_dny = method.lower() == "upscale_dny"
+    _needs_act = method.lower() in ("subpixel", "upscale_fast", "upscale_hybrid")
+    _in_channels = -1
+    _reshape_shape: tuple[int, int, int] | None = None
+
+    is_legacy: bool | None = None
+    input_shape: tuple[int, int, int] | None = None
+
+    _filters: list[int] = []
+
+    @property
+    def out_channels(self) -> int:
+        """ The number of filters from the final upscale layer """
+        return self._filters[-1]
+
+    @classmethod
+    def _calculate_reshape(cls, input_shape: tuple[int, int, int]) -> None:
+        """ Calculate whether the input needs reshaping for the chosen model output size and set to
+        :attr:`_in_channels` and :attr:`_reshape_shape`
+
+        Parameters
+        ----------
+        input_shape
+            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
+        """
+        old_dim = input_shape[-1]
+        new_dim = _scale_dim(cls.output_size, old_dim)
+
+        if new_dim == old_dim:
+            cls._in_channels = input_shape[0]
+        else:
+            cls._in_channels = int(np.prod(input_shape) // new_dim ** 2)
+            cls._reshape_shape = (cls._in_channels, new_dim, new_dim)
+        logger.debug("[UpscaleBlocks] Set in_channels: %s and reshape_shape: %s",
+                     cls._in_channels, cls._reshape_shape)
+
+    @classmethod
+    def _calculate_filters(cls, input_shape: tuple[int, int, int]) -> None:
+        """ Generate the filter curve
+
+        Parameters
+        ----------
+        input_shape
+            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
+        """
+        dim = input_shape[-1] if cls._reshape_shape is None else cls._reshape_shape[-1]
+        upscales = int(np.log2(cls.output_size / dim))
+        cls._filters = _get_curve(cls.max_filters,
+                                  cls.min_filters,
+                                  upscales,
+                                  cls.slope,
+                                  mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
+                                              cls.slope_mode))
+        logger.debug("[UpscaleBlocks] Set filters: %s)", cls._filters)
+
+    @classmethod
+    def configure(cls, input_shape: tuple[int, int, int], is_legacy: bool) -> None:
+        """ Configure the upscale getter
+
+        Parameters
+        ----------
+        input_shape
+            The shape of the Tensor feeding the Upscale Blocks (output from Inter or output from
+            each fc if upscales in fc)
+        is_legacy
+            ``True`` if the model was originally created in Keras
+        """
+        if cls.input_shape is not None and cls.is_legacy is not None:
+            return
+        logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, is_legacy: %s)",
+                     input_shape, is_legacy)
+        cls.is_legacy = is_legacy
+        cls._calculate_reshape(input_shape)
+        cls._calculate_filters(input_shape)
+
+    @classmethod
+    def update_filters(cls, upscales_in_fc) -> None:
+        """ When upscales are in fully connected layers and there are shared fully connected layers
+        the first filter for the decoder upscale requires doubling for the concatenated output.
+
+        NOTE: This unnecessarily blows out filters, but is a legacy hangover. Halving filters for
+        shared upscales in fc would make sense, but as putting upscales in FC for shared FC doesn't
+        make a lot of sense, it's probably not worth handling """
+        if upscales_in_fc < 1:
+            return
+        idx = upscales_in_fc - 1
+        filters = cls._filters[idx] * 2
+        logger.info("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
+                    idx, cls._filters[idx], filters, upscales_in_fc)
+        cls._filters[idx] = filters
+
+    def _dny_entry(self, layers: dict[str, nn.Module]) -> None:
+        """ Entry convolutions for using the upscale_dny method.
+
+        Parameters
+        ----------
+        layers
+            The currently building dict of layers to add the dny entry convs to, if required
+        """
+        if not self._is_dny:
+            return
+        logger.debug("[UpscaleBlocks] Adding DNY entry layers")
+        layers["dny"] = nn.Sequential(
+            nn.Conv2d(self._in_channels, self._filters[0], 4, padding="same"),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self._filters[0], self._filters[0], 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True))
+
+    def _upscale_block(self,
+                       index: int,
+                       is_mask: bool = False) -> nn.Sequential:
+        """ Upscale block for Phaze-A Decoder.
+
+        Uses requested upscale method, adds requested regularization and activation function.
+
+        Parameters
+        ----------
+        index
+            The filter index for the upscale
+        is_mask
+            ``True`` if the input is a mask. ``False`` if the input is a face. Default: ``False``
+
+        Returns
+        -------
+        The sequential model for an upscale layer tensor from the upscale block
+        """
+        assert self.is_legacy is not None
+        filters_ = self._filters[index]
+        layers: dict[str, nn.Module] = {}
+        if index == 0:
+            in_channels = self._filters[0] if self._is_dny else self._in_channels
+        else:
+            in_channels = self._filters[index - 1]
+        up = _get_upscale_layer(self.method,
+                                in_channels,
+                                filters_,
+                                upsamples=2,
+                                is_legacy=self.is_legacy)
+        layers[self.method] = up
+        if not is_mask and self.gaussian:
+            layers["noise"] = GaussianNoise(1.0)
+        if self.normalization and self.normalization != "none":
+            layers["norm"] = _get_normalization(self.normalization,
+                                                filters_,
+                                                is_legacy=self.is_legacy)
+
+        skip_res = self.skip_last_residual and index == len(self._filters) - 1
+        if not is_mask and self.res_blocks and not skip_res:
+            layers["act"] = nn.LeakyReLU(0.2, inplace=True)
+            for i in range(self.res_blocks):
+                lbl = str(i + 1) if self.res_blocks > 1 else ""
+                layers[f"res{lbl}"] = ResidualBlock(filters_)
+        elif self._needs_act:
+            layers["act"] = nn.LeakyReLU(0.2, inplace=True)
+        return nn.Sequential(OrderedDict(layers))
+
+    def __call__(self, layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
+        """ Obtain the upscaling layers
+
+        Parameters
+        ----------
+        layer_indices
+            The tuple indices indicating the starting layer index and the ending layer index to
+            generate upscales for. Used for when splitting upscales between the Fully Connected
+            Layers and the Decoder. ``None`` will generate the full Upscale chain. An end index of
+            -1 will generate the layers from the starting index to the final upscale.
+            Default: ``None``
+
+        Returns
+        -------
+        The upscale layers for the selected layer indices and the upscale layers for the mask
+        path if learn_mask is selected
+        """
+        assert self._in_channels > 0 and self._filters, "Input size must be set before calling"
+        start_idx, end_idx = (0, -1) if layer_indices is None else layer_indices
+        end_idx = len(self._filters) if end_idx == -1 else end_idx
+
+        layers: dict[str, nn.Module] = {}
+        mask_layers: dict[str, nn.Module] = {}
+
+        if start_idx == 0 and self._reshape_shape is not None:
+            layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=True)
+            if self.learn_mask:
+                mask_layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=True)
+
+        if start_idx == 0:
+            self._dny_entry(layers)
+            if self.learn_mask:
+                self._dny_entry(mask_layers)
+
+        for i in range(start_idx, end_idx):
+            layers[f"up{i + 1}"] = self._upscale_block(i)
+            if self.learn_mask:
+                mask_layers[f"{self.method}{i + 1}"] = self._upscale_block(i, is_mask=True)
+
+        retval = {"face": nn.Sequential(OrderedDict(layers))}
+        if self.learn_mask:
+            retval["mask"] = nn.Sequential(OrderedDict(mask_layers))
+        return retval
+
+
+UPSCALE_GETTER = _UpscaleGetter()
+""" Handles returning a sequence of upscalers """
+
+
 class Encoder(nn.Sequential):
     """ Encoder. Uses one of pre-existing Keras/Faceswap models or custom encoder.
 
@@ -493,9 +759,8 @@ class Encoder(nn.Sequential):
         The pixel dimension of the encoder input
     load_imagenet_weights
         ``True`` to load imagenet weights for compatible models
-    bottleneck_args
-        The positional args for creating the bottleneck if to be placed in the encoder or ``None``
-        if it is not
+    include_bottleneck
+        ``True`` if the bottleneck is to be placed in the encoder
     is_legacy
         ``True`` if the model was originally created in Keras. Default: ``False``
     """
@@ -503,7 +768,7 @@ class Encoder(nn.Sequential):
                  architecture: str,
                  input_size: int,
                  load_imagenet_weights: bool,
-                 bottleneck_args: tuple[str, int, str] | None,
+                 include_bottleneck: bool,
                  is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
@@ -520,9 +785,7 @@ class Encoder(nn.Sequential):
         self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
         setattr(self, self._name, self._get_encoder(mod_info, load_imagenet_weights, is_legacy))
         out_shape = self._get_output_shape(input_size)
-        self.bottleneck = None if bottleneck_args is None else Bottleneck(out_shape,
-                                                                          *bottleneck_args,
-                                                                          is_legacy=is_legacy)
+        self.bottleneck = BOTTLENECK_GETTER(out_shape) if include_bottleneck else None
         self.output_shape = out_shape if self.bottleneck is None else self.bottleneck.output_shape
         """ The output shape from the encoder excluding batch dimension """
 
@@ -634,247 +897,6 @@ class Encoder(nn.Sequential):
         return super().forward(x)
 
 
-class UpscaleBlocks():  # pylint:disable=too-many-instance-attributes
-    """ Obtain a block of upscalers.
-
-    This class exists outside of the :class:`Decoder` model, as it is possible to place some of
-    the upscalers at the end of the Fully Connected Layers, so the upscale chain needs to be able
-    to be calculated by both the Fully Connected Layers and by the Decoder if required.
-
-    For this reason, the Upscale Filter list is created early for reference by either the Decoder
-    or Fully Connected models
-
-    Parameters
-    ----------
-    output_size
-        The final pixel output size from the Phaze-A model
-    min_filters
-        Minimum number of filters to use for upscales
-    max_filters
-        Maximum number of filters to use for upscales
-    slope_mode
-        How to calculate the filter slope
-    slope
-        The filter slope scaling factor
-    method
-        The upscaling method to use
-    gaussian
-        Apply gaussian regularization at each upscale
-    normalization
-        Normalization to apply after each upscale
-    res_blocks
-        Number of res-blocks to apply to each upscale
-    skip_last_residual
-        ``True`` to skip the residual block for the final upscale, if residuals enabled
-    learn_mask
-        ``True`` if a learned mask should also be created
-    is_legacy
-        ``True`` if the model was originally created in Keras
-    """
-    def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments
-                 output_size: int,
-                 min_filters: int,
-                 max_filters: int,
-                 slope_mode: T.Literal["full", "cap_max", "cap_min"],
-                 slope: float,
-                 method: UpsampleT,
-                 gaussian: bool,
-                 normalization: T.Literal["none", "batch", "group", "instance", "layer", "rms"],
-                 res_blocks: int,
-                 skip_last_residual: bool,
-                 learn_mask: bool,
-                 is_legacy: bool) -> None:
-        logger.debug(parse_class_init(locals()))
-        self._output_size = output_size
-        self._filter_args = (min_filters, max_filters, slope_mode, slope)
-
-        self._is_dny = method.lower() == "upscale_dny"
-        self._method: UpsampleT = method
-        self._learn_mask = learn_mask
-        self._gaussian = gaussian
-        self._norm_method = normalization
-        self._res_blocks = res_blocks
-        self._skip_last_res = skip_last_residual
-        self._is_legacy = is_legacy
-
-        self._in_channels = -1
-        self._reshape_shape: tuple[int, int, int] | None = None
-        self.filters: list[int] = []
-
-    @property
-    def out_channels(self) -> int:
-        """ The number of filters from the final upscale layer """
-        return self.filters[-1]
-
-    def _calculate_reshape(self, input_shape: tuple[int, int, int]) -> None:
-        """ Calculate whether the input needs reshaping for the chosen model output size and set to
-        :attr:`_in_channels` and :attr:`_reshape_shape`
-
-        Parameters
-        ----------
-        input_shape
-            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
-        """
-        old_dim = input_shape[-1]
-        new_dim = _scale_dim(self._output_size, old_dim)
-
-        if new_dim == old_dim:
-            self._in_channels = input_shape[0]
-        else:
-            self._in_channels = int(np.prod(input_shape) // new_dim ** 2)
-            self._reshape_shape = (self._in_channels, new_dim, new_dim)
-        logger.debug("[UpscaleBlocks] Set in_channels: %s and reshape_shape: %s",
-                     self._in_channels, self._reshape_shape)
-
-    def _calculate_filters(self, input_shape: tuple[int, int, int]) -> None:
-        """ Generate the filter curve
-
-        Parameters
-        ----------
-        input_shape
-            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
-        """
-        dim = input_shape[-1] if self._reshape_shape is None else self._reshape_shape[-1]
-        min_flt, max_flt, slope_mode, slope = self._filter_args
-        upscales = int(np.log2(self._output_size / dim))
-        self.filters = _get_curve(max_flt, min_flt, upscales, slope, mode=slope_mode)
-        logger.debug("[UpscaleBlocks] Set filters: %s)", self.filters)
-
-    def _dny_entry(self, layers: dict[str, nn.Module]) -> None:
-        """ Entry convolutions for using the upscale_dny method.
-
-        Parameters
-        ----------
-        layers
-            The currently building dict of layers to add the dny entry convs to, if required
-        """
-        if not self._is_dny:
-            return
-        logger.debug("[UpscaleBlocks] Adding DNY entry layers")
-        layers["dny"] = nn.Sequential(
-            nn.Conv2d(self._in_channels, self.filters[0], 4, padding="same"),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(self.filters[0], self.filters[0], 3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True))
-
-    def _upscale_block(self,
-                       index: int,
-                       is_mask: bool = False) -> nn.Sequential:
-        """ Upscale block for Phaze-A Decoder.
-
-        Uses requested upscale method, adds requested regularization and activation function.
-
-        Parameters
-        ----------
-        index
-            The filter index for the upscale
-        is_mask
-            ``True`` if the input is a mask. ``False`` if the input is a face. Default: ``False``
-
-        Returns
-        -------
-        The sequential model for an upscale layer tensor from the upscale block
-        """
-        filters_ = self.filters[index]
-        layers: dict[str, nn.Module] = {}
-        layers[self._method] = _get_upscale_layer(self._method,
-                                                  (self._in_channels if index == 0
-                                                   else self.filters[index - 1]),
-                                                  filters_,
-                                                  upsamples=2,
-                                                  is_legacy=self._is_legacy)
-        if not is_mask and self._gaussian:
-            layers["noise"] = GaussianNoise(1.0)
-        if self._norm_method and self._norm_method != "none":
-            layers["norm"] = _get_normalization(self._norm_method,
-                                                filters_,
-                                                is_legacy=self._is_legacy)
-
-        skip_res = self._skip_last_res and index == len(self.filters) - 1
-        if not is_mask and self._res_blocks and not skip_res:
-            layers["act"] = nn.LeakyReLU(0.2, inplace=True)
-            for i in range(self._res_blocks):
-                lbl = str(i + 1) if self._res_blocks > 1 else ""
-                layers[f"res{lbl}"] = ResidualBlock(filters_)
-        elif not self._is_dny:  # TODO this can't be right. Missing an act on non-dny
-            layers["act"] = nn.LeakyReLU(0.2, inplace=True)
-        return nn.Sequential(OrderedDict(layers))
-
-    def set_input_shape(self, input_shape: tuple[int, int, int]) -> None:
-        """ Set the input shape to the Upscale Blocks
-
-        Parameters
-        ----------
-        input_shape
-            The shape of the Tensor feeding the Upscale Blocks (output from Inter or output from
-            each fc if upscales in fc)
-        """
-        if self.filters:  # input shape already set
-            return
-        logger.debug("[UpscaleBlocks] Setting input_shape: %s", input_shape)
-        self._calculate_reshape(input_shape)
-        self._calculate_filters(input_shape)
-
-    def update_filters(self, upscales_in_fc) -> None:
-        """ When upscales are in fully connected layers and there are shared fully connected layers
-        the first filter for the decoder upscale requires doubling for the concatenated output.
-
-        NOTE: This unnecessarily blows out filters, but is a legacy hangover. Halving filters for
-        shared upscales in fc would make sense, but as putting upscales in FC for shared FC doesn't
-        make a lot of sense, it's probably not worth handling """
-        if upscales_in_fc < 1:
-            return
-        idx = upscales_in_fc - 1
-        filters = self.filters[idx] * 2
-        logger.info("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
-                    idx, self.filters[idx], filters, upscales_in_fc)
-        self.filters[idx] = filters
-
-    def __call__(self, layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
-        """ Obtain the upscaling layers
-
-        Parameters
-        ----------
-        layer_indices
-            The tuple indices indicating the starting layer index and the ending layer index to
-            generate upscales for. Used for when splitting upscales between the Fully Connected
-            Layers and the Decoder. ``None`` will generate the full Upscale chain. An end index of
-            -1 will generate the layers from the starting index to the final upscale.
-            Default: ``None``
-
-        Returns
-        -------
-        The upscale layers for the selected layer indices and the upscale layers for the mask
-        path if learn_mask is selected
-        """
-        assert self._in_channels > 0 and self.filters, "Input size must be set before calling"
-        start_idx, end_idx = (0, -1) if layer_indices is None else layer_indices
-        end_idx = len(self.filters) if end_idx == -1 else end_idx
-
-        layers: dict[str, nn.Module] = {}
-        mask_layers: dict[str, nn.Module] = {}
-
-        if start_idx == 0 and self._reshape_shape is not None:
-            layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=True)
-            if self._learn_mask:
-                mask_layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=True)
-
-        if start_idx == 0:
-            self._dny_entry(layers)
-            if self._learn_mask:
-                self._dny_entry(mask_layers)
-
-        for i in range(start_idx, end_idx):
-            layers[f"up{i + 1}"] = self._upscale_block(i)
-            if self._learn_mask:
-                mask_layers[f"{self._method}{i + 1}"] = self._upscale_block(i, is_mask=True)
-
-        retval = {"face": nn.Sequential(OrderedDict(layers))}
-        if self._learn_mask:
-            retval["mask"] = nn.Sequential(OrderedDict(mask_layers))
-        return retval
-
-
 class FullyConnected(nn.Module):
     """ Intermediate Fully Connected layers for Phaze-A Model.
 
@@ -895,13 +917,10 @@ class FullyConnected(nn.Module):
         How many upsamples to apply at the end of the FC layer
     upsample_filters
         The number of filters to apply to the upsampler, if required
-    bottleneck_args
-        The positional args for creating the bottleneck if to be placed outside the encoder or
-        ``None`` if it is placed in the encoder
+    include_bottleneck
+        ``True`` if the bottleneck is to be placed in the FC layers
     upscales
         The number of decoder upscales that should be placed within the fully connected block
-    upscale_blocks
-        The object that builds the upscale blocks
     is_legacy
         ``True`` if the model was originally created in Keras
     """
@@ -914,17 +933,16 @@ class FullyConnected(nn.Module):
                  upsamples: int,
                  upsample_filters: int,
                  upscales: int,
-                 upscale_blocks: UpscaleBlocks,
-                 bottleneck_args: tuple[str, int, str] | None,
+                 include_bottleneck: bool,
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
         dst_shape = (int(feats[-1] / (dim ** 2)), dim, dim)
 
-        if bottleneck_args is not None:
+        if include_bottleneck:
             assert len(input_shape) == 3
-            self.bottleneck = Bottleneck(input_shape, *bottleneck_args, is_legacy=is_legacy)
+            self.bottleneck = BOTTLENECK_GETTER(input_shape)
             feats = [self.bottleneck.output_shape[0]] + feats
         else:
             self.bottleneck = None
@@ -944,8 +962,8 @@ class FullyConnected(nn.Module):
             self.add_module(k, v)
 
         self._up_layers: dict[str, nn.Sequential] = {}
-        if upscales is not None:
-            for k, v in upscale_blocks((0, upscales)).items():
+        if upscales:
+            for k, v in UPSCALE_GETTER((0, upscales)).items():
                 v = self._fix_legacy_upscale(v) if is_legacy else v
                 self.add_module(k, v)
                 self._up_layers[k] = v
@@ -957,6 +975,7 @@ class FullyConnected(nn.Module):
                        out_channels: int,
                        is_legacy: bool) -> dict[str, nn.Module]:
         """ Obtain the upscale layers if requested """
+        logger.debug("[FullyConnected] Getting upsamples: %s", locals_strip(locals()))
         retval = {}
         if not upsamples:
             if is_legacy and upsampler == "upsample2d":  # Bug in keras code
@@ -1051,11 +1070,8 @@ class Inter(nn.Module):
         The number of filters to use for upsamplers that require them
     upscales
         The number of decoder upscales to place in the FC layers
-    upscale_blocks
-        The object that builds the upscale blocks
-    bottleneck_args
-        The positional args for creating the bottleneck if to be placed outside the encoder or
-        ``None`` if it is placed in the encoder
+    include_bottleneck
+        ``True`` if the bottleneck is to be placed in the FC layers
     is_legacy
         ``True`` if the model was originally created in Keras
     shared_inter
@@ -1076,8 +1092,7 @@ class Inter(nn.Module):
                  upsamples: int,
                  upsample_filters: int,
                  upscales: int,
-                 upscale_blocks: UpscaleBlocks,
-                 bottleneck_args: tuple[str, int, str] | None,
+                 include_bottleneck: bool,
                  is_legacy: bool,
                  shared_inter: FullyConnected | None = None) -> None:
         logger.debug(parse_class_init(locals()))
@@ -1099,8 +1114,8 @@ class Inter(nn.Module):
         fc_out_shape = (out_channels, final_dim, final_dim)
         out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
                      else fc_out_shape)
-        upscale_blocks.set_input_shape(fc_out_shape if upscales else out_shape)
-        out_channels = out_channels if not upscales else upscale_blocks.filters[upscales - 1]
+        UPSCALE_GETTER.configure(fc_out_shape if upscales else out_shape, is_legacy)
+        out_channels = out_channels if not upscales else UPSCALE_GETTER._filters[upscales - 1]
         self.out_channels = out_channels * 2 if shared != "none" else out_channels
         """ The number of output channels from the inter layer """
 
@@ -1112,8 +1127,7 @@ class Inter(nn.Module):
                    upsamples,
                    self._scale_filters(upsample_filters, final_dim, model_output_size),
                    upscales,
-                   upscale_blocks,
-                   bottleneck_args,
+                   include_bottleneck,
                    is_legacy)
 
         self.fc = FullyConnected(*fc_args)
@@ -1188,11 +1202,8 @@ class InterGBlock(nn.Sequential):
         The filter slope for the linear layers feeding the G-Block
     fc_dropout
         The dropout to apply to the linear layers feeding the G-Block
-    bottleneck_args
-        The positional args for creating the bottleneck if to be placed outside the encoder or
-        ``None`` if it is placed in the encoder
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    include_bottleneck
+        ``True`` if the bottleneck is to be placed in the FC layers
     """
     def __init__(self,
                  input_shape: tuple[int, int, int] | tuple[int],
@@ -1201,14 +1212,13 @@ class InterGBlock(nn.Sequential):
                  fc_max_nodes: int,
                  fc_slope: float,
                  fc_dropout: float,
-                 bottleneck_args: tuple[str, int, str] | None,
-                 is_legacy: bool) -> None:
+                 include_bottleneck: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         in_channels = input_shape[0]
-        if bottleneck_args is not None:
+        if include_bottleneck:
             assert len(input_shape) == 3
-            bottleneck = Bottleneck(input_shape, *bottleneck_args, is_legacy=is_legacy)
+            bottleneck = BOTTLENECK_GETTER(input_shape)
             self.add_module("bottleneck", bottleneck)
             in_channels = bottleneck.output_shape[0]
 
@@ -1298,149 +1308,29 @@ class GBlock(nn.Module):
         return x
 
 
-class GBlockO():
-    """ G-Block model, borrowing from Adain StyleGAN.
-
-    Parameters
-    ----------
-    content_channels
-        The number of channels feeding the content part of G-Block
-    style_channels
-            The number of channels feeding the style part of G-Block
-    num_units
-        The number of G-Blocks to create
-    g_block_recursions
-        The number of recursions to perform within the G-Block. Default: 2
-    """
-    def __init__(self,
-                 content_channels: int,
-                 style_channels: int,
-                 num_units: int,
-                 g_block_recursions: int = 2) -> None:
-        logger.debug(parse_class_init(locals()))
-        super().__init__()
-        self._gblock_recursions = g_block_recursions
-        self.gblock = self._build_gblock(content_channels, style_channels, num_units)
-
-    @classmethod
-    def _build_inter(cls,
-                     input_shape: tuple[int, int, int] | tuple[int],
-                     fc_depth: int,
-                     fc_min_nodes: int,
-                     fc_max_nodes: int,
-                     fc_slope: float,
-                     fc_dropout: float,
-                     bottleneck_args: tuple[str, int, str] | None,
-                     is_legacy: bool) -> tuple[int, nn.Sequential]:
-        """ Build the G-Block intermediate layer """
-        in_channels = input_shape[0]
-        fc_layers = OrderedDict()
-        if bottleneck_args is not None:
-            assert len(input_shape) == 3
-            b_neck = Bottleneck(input_shape, *bottleneck_args, is_legacy=is_legacy)
-            fc_layers["bottleneck"] = b_neck
-            in_channels = b_neck.output_shape[0]
-
-        fc_feats = _get_curve(fc_min_nodes, fc_max_nodes, fc_depth, fc_slope)
-        for i, feats in enumerate(fc_feats):
-            if fc_dropout > 0.:
-                fc_layers[f"drop{i}"] = nn.Dropout(fc_dropout, inplace=True)
-            fc_layers[f"fc{i}"] = nn.Linear(in_channels if i == 0 else fc_feats[i - 1], feats)
-        return in_channels, nn.Sequential(fc_layers)
-
-    def _build_gblock(self,
-                      content_channels: int,
-                      style_channels: int,
-                      num_units: int,
-                      style_recursions: int = 3,
-                      style_nodes: int = 512) -> nn.ModuleList:
-        """ Build the G-Block """
-        retval = nn.ModuleList()
-        for _ in range(num_units):
-            block = {}
-            block["style"] = nn.Sequential()
-            for i in range(style_recursions):
-                block["style"].append(nn.Linear(style_channels if i == 0 else style_nodes,
-                                                style_nodes))
-                if i != style_recursions - 1:
-                    block["style"].append(nn.LeakyReLU(0.1, inplace=True))
-            block["cont"] = nn.Sequential(
-                nn.Conv2d(content_channels, content_channels, 3, padding=1),
-                GaussianNoise(1.0)
-                )
-            block["gblock"] = nn.ModuleList()
-            for i in range(self._gblock_recursions):
-                gblock = nn.ModuleDict()
-                gblock["style"] = nn.ModuleList((
-                    nn.Sequential(nn.Linear(style_channels, content_channels),
-                                  Reshape((content_channels, 1, 1), is_contiguous=True))
-                    for _ in range(2)))
-                gblock["cont"] = nn.Sequential(
-                    GaussianNoise(1.0),
-                    nn.Conv2d(content_channels, content_channels, 3, padding=1)
-                    )
-                if i == self._gblock_recursions - 1:
-                    gblock["conv"] = nn.Conv2d(content_channels, content_channels, 3, padding=1)
-                gblock["norm"] = AdaIN(dim=1)
-                gblock["act"] = nn.LeakyReLU(0.2, inplace=True)
-                block["gblock"].append(gblock)
-            retval.append(nn.ModuleDict(block))
-        return retval
-
-    def __call__(self, styles: list[torch.Tensor], contents: list[torch.Tensor]
-                 ) -> list[torch.Tensor]:
-        """ Forward pass through the G-Block
-
-        Parameters
-        ----------
-        styles
-            The output from inter_gblock
-        contents
-            The outputs from the Phaze-A Intermediate layers
-
-        Returns
-        -------
-        The output tensors from the G-Block for each side of the model
-        """
-        retval: list[torch.Tensor] = []
-        for style, content, block in zip(styles, contents, T.cast(list[nn.ModuleDict],
-                                                                  self.gblock)):
-            style = block["style"](style)
-            x = block["cont"](content)
-            for idx, gblock in enumerate(T.cast(list[nn.ModuleDict], block["gblock"])):
-                stats = tuple(x(style) for x in T.cast(nn.ModuleList, gblock["style"]))
-                if idx == self._gblock_recursions - 1:
-                    x = gblock["conv"](x)
-                x = gblock["norm"](x, stats) + gblock["cont"](x)
-                x = gblock["act"](x)
-            retval.append(x)
-        return retval
-
-
 class Decoder(nn.ModuleDict):
     """ The Decoder(s) for Phaze-A
 
     Parameters
     ----------
-    upscale_blocks
-        A sequence of upscale blocks to use in the decoder
-    in_channels
-        The number of input channels to the final conv layer
+    upscales_in_fc
+        The number of upscales placed into the fully connected layers
     output_kernel
         The size of the kernel for the final conv layer
     """
-    def __init__(self,
-                 upscale_blocks: dict[str, nn.Sequential],
-                 in_channels: int,
-                 output_kernel: int) -> None:
+    def __init__(self, upscales_in_fc: int, output_kernel: int) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = False
+        upscale_blocks = UPSCALE_GETTER((upscales_in_fc, -1) if upscales_in_fc else None)
         for key, up in upscale_blocks.items():
             out_channels = 3 if key == "face" else 1
             if key == "mask":
                 self.learn_mask = True
-            up.add_module("conv", nn.Conv2d(in_channels, out_channels, output_kernel, padding=2))
+            up.add_module("conv", nn.Conv2d(UPSCALE_GETTER.out_channels,
+                                            out_channels,
+                                            output_kernel,
+                                            padding=2))
             up.add_module("act", nn.Sigmoid())
             self.add_module(key, up)
 
@@ -1459,7 +1349,6 @@ class Decoder(nn.ModuleDict):
         return tuple(module(inputs) for module in self.values())
 
 
-# TODO make sure dropouts are done (needed custom handling in keras)
 class PhazeA(ModelPlugin):
     """ Phaze-A Faceswap Model.
 
@@ -1491,34 +1380,17 @@ class PhazeA(ModelPlugin):
                          input_size,
                          is_rgb=not is_bgr,
                          is_legacy=is_legacy)
-        bottleneck_args = (cfg.bottleneck_type(), cfg.bottleneck_size(), cfg.bottleneck_norm())
+        BOTTLENECK_GETTER.configure(is_legacy)
+
         self.encoder = Encoder(cfg.enc_architecture(),
                                self.input_shape[1],
                                cfg.enc_load_weights(),
-                               bottleneck_args if cfg.bottleneck_in_encoder() else None,
+                               cfg.bottleneck_in_encoder(),
                                self.is_legacy)
-        if cfg.bottleneck_in_encoder():
-            bottleneck_args = None
 
-        up_blocks = UpscaleBlocks(
-            cfg.output_size(),
-            cfg.dec_min_filters(),
-            cfg.dec_max_filters(),
-            T.cast(T.Literal["full", "cap_max", "cap_min"], cfg.dec_slope_mode()),
-            cfg.dec_filter_slope(),
-            T.cast(UpsampleT, cfg.dec_upscale_method()),
-            cfg.dec_gaussian(),
-            T.cast(T.Literal["none", "batch", "group", "instance", "layer", "rms"],
-                   cfg.dec_norm()),
-            cfg.dec_res_blocks(),
-            cfg.dec_skip_last_residual(),
-            cfg_loss.learn_mask(),
-            self.is_legacy
-            )
-
-        self.inter = self._build_inter(up_blocks, bottleneck_args)
-        self.inter_gblock, self.gblock = self._build_gblock(bottleneck_args)
-        self.decoder = self._build_decoder(up_blocks)
+        self.inter = self._build_inter(not cfg.bottleneck_in_encoder())
+        self.inter_gblock, self.gblock = self._build_gblock(not cfg.bottleneck_in_encoder())
+        self.decoder = self._build_decoder()
 
     # TODO these 2 properties are hangovers from old system. Revisit when implemented
     @property
@@ -1576,9 +1448,7 @@ class PhazeA(ModelPlugin):
         # TODO keras version tracking removed from here. Delete this when confirmed models are all
         # in valid torch versions
 
-    def _build_inter(self,
-                     upscale_blocks: UpscaleBlocks,
-                     bottleneck_args: tuple[str, int, str] | None) -> Inter | nn.ModuleList:
+    def _build_inter(self, include_bottleneck: bool) -> Inter | nn.ModuleList:
         """ Build the intermediate layers """
         shared = T.cast(T.Literal["none", "full", "half"], cfg.shared_fc())
         upscales_in_fc = cfg.dec_upscales_in_fc()
@@ -1601,8 +1471,7 @@ class PhazeA(ModelPlugin):
                       cfg.fc_upsamples(),
                       cfg.fc_upsample_filters(),
                       upscales_in_fc,
-                      upscale_blocks,
-                      bottleneck_args,
+                      include_bottleneck,
                       self.is_legacy)
         inter0 = Inter(*inter_args)
 
@@ -1612,10 +1481,10 @@ class PhazeA(ModelPlugin):
             retval = nn.ModuleList([inter0] + [Inter(*inter_args, shared_inter=inter0.shared)
                                    for _ in range(self.num_identities - 1)])
         if shared != "none" and upscales_in_fc:
-            upscale_blocks.update_filters(upscales_in_fc)
+            UPSCALE_GETTER.update_filters(upscales_in_fc)
         return retval
 
-    def _build_gblock(self, bottleneck_args: tuple[str, int, str] | None
+    def _build_gblock(self, include_bottleneck: bool
                       ) -> tuple[InterGBlock, GBlock | nn.ModuleList] | tuple[None, None]:
         """ Build the gblock """
         if not cfg.enable_gblock():
@@ -1627,8 +1496,7 @@ class PhazeA(ModelPlugin):
                             cfg.fc_gblock_max_nodes(),
                             cfg.fc_gblock_filter_slope(),
                             cfg.fc_dropout(),
-                            bottleneck_args,
-                            self.is_legacy)
+                            include_bottleneck)
         content_channels = (T.cast(int, self.inter[0].out_channels)
                             if isinstance(self.inter, nn.ModuleList)
                             else self.inter.out_channels)
@@ -1639,15 +1507,14 @@ class PhazeA(ModelPlugin):
                                     for _ in range(self.num_identities)])
         return inter, gblock
 
-    def _build_decoder(self, upscale_blocks: UpscaleBlocks) -> Decoder | nn.ModuleList:
+    def _build_decoder(self) -> Decoder | nn.ModuleList:
         """ Build the Phaze-A decoder """
-        args = (upscale_blocks((cfg.dec_upscales_in_fc(), -1) if cfg.dec_upscales_in_fc()
-                               else None),
-                upscale_blocks.out_channels,
-                cfg.dec_output_kernel())
+        upscales_in_fc = cfg.dec_upscales_in_fc()
+        out_kernel = cfg.dec_output_kernel()
         if self._split_decoders:
-            return nn.ModuleList([Decoder(*args) for _ in range(self.num_identities)])
-        return Decoder(*args)
+            return nn.ModuleList([Decoder(upscales_in_fc, out_kernel)
+                                  for _ in range(self.num_identities)])
+        return Decoder(upscales_in_fc, out_kernel)
 
     def forward(self, inputs:  list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         """ Forward pass through the Phaze-A model
@@ -1680,7 +1547,6 @@ class PhazeA(ModelPlugin):
             out = [dec(y) for dec, y in zip(T.cast(nn.ModuleList, self.decoder), x)]
         else:
             out = [self.decoder(y) for y in x]
-
         return tuple(out)
 
     # TODO this is a c+p. Needs revisiting when load/freeze weights implemented
