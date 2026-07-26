@@ -1,5 +1,6 @@
 #! /usr/env/bin/python3
-""" The model build order for various Keras Application Encoders for porting weights """
+""" The model build order for various FS Models where they differ significantly from config order
+for porting weights """
 from __future__ import annotations
 import logging
 import re
@@ -13,6 +14,22 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ENC_PREFIX = "layers.functional.layers.functional.layers."
+
+
+def _iae_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+    """ Re-orders the intermediate layers for IAE models. Inters graph in order [both, B, A] but
+    build in order [A, B, Both] """
+    order = ["layers.input_layer",
+             "layers.functional.",
+             "layers.functional_2.",
+             "layers.functional_1.",
+             "layers.functional_3.",
+             "layers.concatenate",
+             "layers.functional_4."]
+    return {k: v
+            for model in order
+            for k, v in layers.items()
+            if k.startswith(model)}
 
 
 def _inception_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
@@ -155,7 +172,8 @@ def reorder_layers(model: str, layers: dict[str, LayerInfo]) -> dict[str, LayerI
     -------
     The reordered layers
     """
-    functions = {"inception_resnet_v2": _inception_reorder,
+    functions = {"iae": _iae_reorder,
+                 "inception_resnet_v2": _inception_reorder,
                  "inception_v3": _inception_reorder,
                  "nasnet_large": _nasnet_reorder,
                  "nasnet_mobile": _nasnet_reorder,

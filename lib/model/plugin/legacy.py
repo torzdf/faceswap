@@ -143,6 +143,7 @@ class KerasConfigParser:
             # Fallback (eg top-level concatenates referencing this model by name. Corrected to
             # real output layer name when known at the end of the function):
             mapping[config["name"]] = dst_label
+            outputs[name] = cls._sub_model_output_name(config)
             cls._map_sub_model_input(config, mapping, outputs, is_sequential)
 
         # If there is no "." in the label then this is the main parent model
@@ -407,10 +408,6 @@ class KerasToTorch:
     keras_file
         The fullpath to the keras model file
     """
-    custom_mapping = {"iae": {"inter_side.0": "layers.functional_1",
-                              "inter_both": "layers.functional_2"}}  # TODO move to legacy_build_order
-    """ Mapping for instances where keras graph and build orders don't match up """
-
     def __init__(self, torch_model: FaceswapModel, keras_file: str) -> None:
         logger.debug(parse_class_init(locals()))
         self._keras = KerasModel(keras_file)
@@ -436,7 +433,7 @@ class KerasToTorch:
         Parameters
         ----------
         layers
-            The list of standardized layer names within the keras model mapped to there inbound
+            The list of standardized layer names within the keras model mapped to their inbound
             nodes
 
         Returns
@@ -448,7 +445,7 @@ class KerasToTorch:
         for layer, info in layers.items():
             if not layer.rsplit(".", maxsplit=1)[-1].startswith("pixel_shuffler"):
                 continue
-            assert len(info.input_layers) == 1  # FS never has more than 2 inputs into a PS
+            assert len(info.input_layers) == 1  # FS never has more than 1 input into a PS
             in_ = info.input_layers[0]
             in_size = info.input_shapes[0][0]
             in_conv = None
@@ -892,16 +889,9 @@ class KerasToTorch:
                                                                "num_batches_tracked"], np.ndarray]]
                        ) -> str:
         """ Obtain the next qualifying weight key for the given torch key """
-        re_mapping = self.custom_mapping.get(self._torch.name, {})
-        re_map = next((x for x in [v if torch_key.startswith(k) else None
-                                   for k, v in re_mapping.items()]
-                       if x), None)
-        if re_map:
-            logger.debug("[KerasToTorch] Remapping '%s' to keras model '%s'", torch_key, re_map)
         retval = next(k for k, v in keras_grouped.items()
                       if ("mask" in torch_key and k in self._mask_layers
                           or "mask" not in torch_key and k not in self._mask_layers)
-                      and (not re_map or k.startswith(re_map))
                       and v["weight"].shape == weight_shape)
         return retval
 
