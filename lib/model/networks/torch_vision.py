@@ -109,7 +109,8 @@ def efficientnet_v2_b0(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
                                  TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
     dropout = kwargs.pop("dropout", 0.2)
     retval = TVMods.efficientnet.EfficientNet(
-        inverted_residual_setting, dropout, last_channel=1280, **kwargs)
+        inverted_residual_setting, dropout, last_channel=1280, **kwargs
+    )
 
     # TODO port weights and load here
     return retval
@@ -124,16 +125,18 @@ def efficientnet_v2_b1(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
-                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    inverted_residual_setting = [
+        TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 2),
+        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 3),
+        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 3),
+        TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, depth_mult=1.1),
+        TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, depth_mult=1.1),
+        TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, depth_mult=1.1)
+    ]
     dropout = kwargs.pop("dropout", 0.2)
     retval = TVMods.efficientnet.EfficientNet(
         inverted_residual_setting, dropout, last_channel=1280, **kwargs
-        )
+    )
     # TODO port weights and load here
     return retval
 
@@ -147,16 +150,18 @@ def efficientnet_v2_b2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
-                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    inverted_residual_setting = [
+        TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 2),
+        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 3),
+        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 56, 3),
+        TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, width_mult=1.1, depth_mult=1.2),
+        TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, width_mult=1.1, depth_mult=1.2),
+        TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, width_mult=1.1, depth_mult=1.2)
+    ]
     dropout = kwargs.pop("dropout", 0.2)
     retval = TVMods.efficientnet.EfficientNet(
         inverted_residual_setting, dropout, last_channel=1408, **kwargs
-        )
+    )
     # TODO port weights and load here
     return retval
 
@@ -170,15 +175,17 @@ def efficientnet_v2_b3(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
-                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    inverted_residual_setting = [
+        TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 40, 16, 2),
+        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 40, 3),
+        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 40, 56, 3),
+        TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, width_mult=1.2, depth_mult=1.4),
+        TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, width_mult=1.2, depth_mult=1.4),
+        TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, width_mult=1.2, depth_mult=1.4)
+    ]
     dropout = kwargs.pop("dropout", 0.2)
     retval = TVMods.efficientnet.EfficientNet(
-        inverted_residual_setting, dropout, last_channel=1280, **kwargs
+        inverted_residual_setting, dropout, last_channel=1536, **kwargs
         )
     # TODO port weights and load here
     return retval

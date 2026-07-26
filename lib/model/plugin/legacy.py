@@ -404,7 +404,7 @@ class KerasToTorch:
     Parameters
     ----------
     torch_model
-        The uninitialized corresponding Torch model plugin
+        The uninitialized Torch model plugin
     keras_file
         The fullpath to the keras model file
     """

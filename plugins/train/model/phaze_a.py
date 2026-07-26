@@ -143,7 +143,7 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "efficientnet_v2_b2": _EncoderInfo(
         torch_name="~efficientnet_v2_b2", default_size=260, **_EFF_NET_V2_LEGACY),
     "efficientnet_v2_b3": _EncoderInfo(
-        torch_name="~efficientnet_v2_b0", default_size=300, **_EFF_NET_V2_LEGACY),
+        torch_name="~efficientnet_v2_b3", default_size=300, **_EFF_NET_V2_LEGACY),
     "efficientnet_v2_s": _EncoderInfo(
         torch_name="efficientnet_v2_s", default_size=384, **_EFF_NET_V2_LEGACY),
     "efficientnet_v2_m": _EncoderInfo(
@@ -499,6 +499,11 @@ class _BottleneckGetter:
         is_legacy
             ``True`` if the model was originally created in Keras
         """
+        # Reset class params for model reload
+        # TODO We need to change upstream to only ever load a model once and remove this:
+        cls.bottleneck = cfg.bottleneck_type()
+        cls.size = cfg.bottleneck_size()
+        cls.normalization = cfg.bottleneck_norm()
         cls.is_legacy = is_legacy
 
     @classmethod
@@ -611,8 +616,23 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         is_legacy
             ``True`` if the model was originally created in Keras
         """
-        if cls.input_shape is not None and cls.is_legacy is not None:
-            return
+        # TODO this will initialize for every inter. We need to change upstream to only ever load a
+        # model once
+        # if cls.input_shape is not None and cls.is_legacy is not None:
+        #    return
+
+        # Reset class params for model reload
+        cls.output_size = cfg.output_size()
+        cls.min_filters = cfg.dec_min_filters()
+        cls.max_filters = cfg.dec_max_filters()
+        cls.slope_mode = cfg.dec_slope_mode()
+        cls.slope = cfg.dec_filter_slope()
+        cls.method: UpsampleT = T.cast(UpsampleT, cfg.dec_upscale_method())
+        cls.gaussian = cfg.dec_gaussian()
+        cls.normalization = cfg.dec_norm()
+        cls.res_blocks = cfg.dec_res_blocks()
+        cls.skip_last_residual = cfg.dec_skip_last_residual()
+        cls.learn_mask = cfg_loss.learn_mask()
         logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, is_legacy: %s)",
                      input_shape, is_legacy)
         cls.is_legacy = is_legacy
