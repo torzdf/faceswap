@@ -615,6 +615,9 @@ def _process_value(value: T.Any) -> T.Any:
     except ImportError:
         return repr(value)
 
+    if isinstance(value, dict):
+        return {k: _process_value(v) for k, v in value.items()}
+
     if isinstance(value, np.ndarray):
         return format_array(value)
 
