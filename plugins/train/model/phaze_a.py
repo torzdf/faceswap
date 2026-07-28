@@ -191,7 +191,10 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "resnet152_v2": _EncoderInfo(torch_name="~resnet152_v2", kwargs={"include_top": False}),
     "vgg16": _EncoderInfo(torch_name="vgg16", legacy_scaling=(0, 255), legacy_bgr=True),
     "vgg19": _EncoderInfo(torch_name="vgg19", legacy_scaling=(0, 255), legacy_bgr=True),
-    "xception": _EncoderInfo(torch_name="~xception", min_size=71, default_size=299),
+    "xception": _EncoderInfo(torch_name="~xception",
+                             min_size=71,
+                             default_size=299,
+                             last_layer="act4"),
     "fs_original": _EncoderInfo(torch_name="", min_size=32, default_size=1024)}
 
 
