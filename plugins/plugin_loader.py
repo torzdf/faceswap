@@ -204,6 +204,35 @@ class PluginLoader():
         return plugins
 
     @classmethod
+    def get_model_path(cls, name: str, module: bool = False) -> str:
+        """ Obtain the full dot separated path to a training model plugin relative to the project
+        root
+
+        Parameters
+        ----------
+        name
+            The name of the requested training model plugin
+        module
+            ``True`` to return the path to the containing module. ``False`` to return the path to
+            the plugin object. Default: ``False``
+
+        Returns
+        -------
+        The dot separated path to the training model relative to the project root
+        """
+        name = name.lower().replace("-", "_")
+        mods = [p.split(".")[-2] for p in cls.model_plugins]
+        if name not in mods:
+            raise ValueError(f"{name} is not a valid train plugin. Select from "
+                             f"{[x.replace('_', '-') for x in mods]}")
+
+        retval = cls.model_plugins[mods.index(name)]
+        if module:
+            retval = retval.rsplit(".", maxsplit=1)[0]
+        logger.debug("[PluginLoader] name: '%s', module: %s, path: %s", name, module, retval)
+        return retval
+
+    @classmethod
     def get_model(cls, name: str) -> type[ModelPlugin]:
         """Return requested training model plugin
 
@@ -216,13 +245,9 @@ class PluginLoader():
         -------
         A training model plugin
         """
-        name = name.lower().replace("-", "_")
-        mods = [p.split(".")[-2] for p in cls.model_plugins]
-        if name not in mods:
-            raise ValueError(f"{name} is not a valid train plugin. Select from {mods}")
-
-        retval = cls._import_plugin(cls.model_plugins[mods.index(name)])
-        logger.info("Loading Model from %s plugin", name.title())
+        path = cls.get_model_path(name, module=False)
+        retval = cls._import_plugin(path)
+        logger.info("Loading Model from %s plugin", path.rsplit(".", maxsplit=1)[-1])
         return retval
 
     @classmethod

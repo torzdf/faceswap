@@ -33,7 +33,12 @@ logger = logging.getLogger(__name__)
 
 
 class FaceswapModel:
-    """Holds the model and state information on a Faceswap model for serialization
+    """Holds the model and state information on a Faceswap model for serialization.
+
+    Note
+    ----
+    load_state_dict() must be called to load the plugin. This should be called with an empty
+    dictionary if creating a fresh model
 
     Parameters
     ----------
@@ -60,8 +65,8 @@ class FaceswapModel:
         """The plugin name of the model to load"""
         self._num_identities = num_identities
 
-        self._plugin = PluginLoader.get_model(name)(num_identities)
-        self.state = State(self._plugin.__class__.__module__, batch_size=batch_size)
+        self.state = State(PluginLoader.get_model_path(name, module=True), batch_size=batch_size)
+        self._plugin: ModelPlugin | None = None
 
     def state_dict(self) -> dict[T.Literal["model", "state", "version"], float | dict[str, T.Any]]:
         """Get the Faceswap model's state_dict"""
@@ -75,33 +80,35 @@ class FaceswapModel:
     @property
     def plugin(self) -> ModelPlugin:
         """The loaded Faceswap plugin"""
+        assert self._plugin is not None, "load_state_dict must be called"
         return self._plugin
 
     def load_state_dict(self, state_dict: dict[T.Literal["model", "state", "version"],
                                                float | dict[str, T.Any]]) -> None:
         """Load the contents of the given state dict into this object. If a state key is provided
-        within the state_dict then the model plugin will be re-initialized with the new settings.
+        within the state_dict then the model will be initialized with the given settings.
 
-        If no keys are provided the object remains unchanged
+        If no keys are provided the model is loaded with the current global configuration settings
 
         Parameters
         ----------
         state_dict
             The Faceswap model's state_dict to load
         """
-        if not state_dict:
-            return
-
         logger.debug("%s version: %s, state_dict keys: %s",
                      self._name, state_dict.get("version", 0.0), list(state_dict))
 
+        if self._plugin is not None:
+            raise RuntimeError(f"Model plugin '{self.name}' has already been loaded")
+
         if "state" in state_dict:
             self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
-            logger.debug("%s Reloading plugin", self._name)
-            old = self._plugin
-            self._plugin = old.__class__(self._num_identities, is_legacy=self.state.is_legacy)
-            del old
+            logger.debug("%s Loading plugin from saved config", self._name)
+
+        self._plugin = PluginLoader.get_model(self.name)(self._num_identities)
+
         if "model" in state_dict:
+            logger.debug("%s Loading weights from saved model", self._name)
             self._plugin.load_state_dict(T.cast(dict[str, T.Any], state_dict["model"]))
 
     def to(self, device: torch.Device) -> None:
@@ -343,11 +350,12 @@ class TrainHandler:
         """
         logger.debug("[TrainHandler] Loading state_dict: %s", self._model)
         state_dict = self._io.load(model=self._model)
+        self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
+
         if not state_dict:
             logger.debug("[TrainHandler] No state_dict to load")
             return
 
-        self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
         if "optimizer" not in state_dict:
             return
 
