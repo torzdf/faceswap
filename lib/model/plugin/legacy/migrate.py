@@ -414,8 +414,8 @@ class KerasWeights:
 
     def _prepare_weights(self, weights: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         """ Some Keras weights need preparation for porting. Specifically: ClipV
-        embedding/projection layers. BatchNorm2D layers with scale=False. SeparableConv2D layers.
-        MultiHeadAttention layers
+        embedding/projection layers, BatchNorm2D layers with scale=False, SeparableConv2D layers
+        and MultiHeadAttention layers
 
         Parameters
         ----------
@@ -448,7 +448,14 @@ class KerasWeights:
         """
         retval = weights
         reshaped = False
-        if (weights.ndim == 4
+        if layer == "group_normalization":  # Group norm needs to be squeezed to 1 dim
+            retval = weights.squeeze()
+            reshaped = True
+        elif layer == "layer_scale":  # ConvNeXt layer scale needs dims expanded:
+            assert weights.ndim == 1, f"Keras layer_scale shape: {weights.shape}"
+            retval = weights[:, None, None]
+            reshaped = True
+        elif (weights.ndim == 4
                 and layer in ("separable_conv2d", "depthwise_conv2d")
                 and weights.shape[0] != 1):
             new_shape = (weights.shape[2] * weights.shape[3], 1, *weights.shape[:2])
@@ -459,10 +466,6 @@ class KerasWeights:
             reshaped = True
         elif weights.ndim == 2:
             retval = weights.transpose(1, 0)
-            reshaped = True
-        elif layer == "layer_scale":  # ConvNeXt layer scale needs dims expanded:
-            assert weights.ndim == 1, f"Keras layer_scale shape: {weights.shape}"
-            retval = weights[:, None, None]
             reshaped = True
 
         if reshaped:

@@ -296,7 +296,13 @@ def _get_normalization(normalization: str,
     if normalization == "batch":
         retval = nn.BatchNorm2d(in_channels, eps=0.001, momentum=0.01)
     elif normalization == "group":
-        retval = nn.GroupNorm(32, in_channels, eps=1e-6)
+        if is_legacy:
+            groups = 32  # Was hard-coded for legacy models
+        elif in_channels % 16 == 0:
+            groups = max(1, in_channels // 16)
+        else:  # We always ensure that filters are divisible by 8 in _get_curve
+            groups = max(1, in_channels // 8)
+        retval = nn.GroupNorm(groups, in_channels, eps=1e-6)
     elif is_legacy and normalization == "instance":
         retval = InstanceNormLegacy()
     elif normalization == "instance":
@@ -384,7 +390,9 @@ def _get_upscale_layer(method: UpsampleT,
     elif method == "upscale_dny":
         retval = UpscaleDNY(in_channels, out_channels, scale_factor=upsamples, is_legacy=is_legacy)
     elif method == "resize_images":  # Needs testing. May need a legacy variant for align_corners
-        retval = UpscaleResizeImages(in_channels, out_channels, scale_factor=upsamples)
+        retval = UpscaleResizeImages(
+            in_channels, out_channels, scale_factor=upsamples, is_legacy=is_legacy
+        )
     else:
         raise FaceswapError(
             f"'{method}' is not a valid upscale method. Select from: ['resize_images', "
@@ -636,14 +644,20 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         cls.res_blocks = cfg.dec_res_blocks()
         cls.skip_last_residual = cfg.dec_skip_last_residual()
         cls.learn_mask = cfg_loss.learn_mask()
+
+        cls._is_dny = cls.method.lower() == "upscale_dny"
+        cls._needs_act = cls.method.lower() in ("subpixel", "upscale_fast", "upscale_hybrid")
+
         logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, is_legacy: %s)",
                      input_shape, is_legacy)
+        if is_legacy and cls.method.lower() == "resize_images":
+            cls._needs_act = True  # Legacy bug. Extra leaky-relu
         cls.is_legacy = is_legacy
         cls._calculate_reshape(input_shape)
         cls._calculate_filters(input_shape)
 
     @classmethod
-    def update_filters(cls, upscales_in_fc) -> None:
+    def update_filters(cls, upscales_in_fc: int) -> None:
         """ When upscales are in fully connected layers and there are shared fully connected layers
         the first filter for the decoder upscale requires doubling for the concatenated output.
 
@@ -748,9 +762,9 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         mask_layers: dict[str, nn.Module] = {}
 
         if start_idx == 0 and self._reshape_shape is not None:
-            layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=True)
+            layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=False)
             if self.learn_mask:
-                mask_layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=True)
+                mask_layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=False)
 
         if start_idx == 0:
             self._dny_entry(layers)
@@ -761,7 +775,6 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             layers[f"up{i + 1}"] = self._upscale_block(i)
             if self.learn_mask:
                 mask_layers[f"{self.method}{i + 1}"] = self._upscale_block(i, is_mask=True)
-
         retval = {"face": nn.Sequential(OrderedDict(layers))}
         if self.learn_mask:
             retval["mask"] = nn.Sequential(OrderedDict(mask_layers))
@@ -1363,7 +1376,7 @@ class Decoder(nn.ModuleDict):
             up.add_module("conv", nn.Conv2d(UPSCALE_GETTER.out_channels,
                                             out_channels,
                                             output_kernel,
-                                            padding=2))
+                                            padding="same"))
             up.add_module("act", nn.Sigmoid())
             self.add_module(key, up)
 

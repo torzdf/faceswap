@@ -390,10 +390,10 @@ class Upscale2xBlock(nn.Module):
                              else out_channels - int(out_channels * sr_ratio))
         """ The number of output channels from the layer """
 
-        self.upscale = UpscaleSubpixel(in_channels,
-                                       self.out_channels,
-                                       scale_factor=scale_factor,
-                                       leaky_slope=0.1 if activation else -1.0)
+        self.subpixel = UpscaleSubpixel(in_channels,
+                                        self.out_channels,
+                                        scale_factor=scale_factor,
+                                        leaky_slope=0.1 if activation else -1.0)
         if self.fast or (not self.fast and self.out_channels > 0):
             self.conv = nn.Conv2d(in_channels, self.out_channels, 3, padding=1)
             if is_legacy:
@@ -417,10 +417,10 @@ class Upscale2xBlock(nn.Module):
         if self.fast:
             x = self.conv(x)
             x = self.upsample(x)
-            x1 = self.upscale(inputs)
+            x1 = self.subpixel(inputs)
             x = x1 + x
         else:
-            x_sr = self.upscale(x)
+            x_sr = self.subpixel(x)
             if self.out_channels > 0:
                 x = self.conv(x)
                 x = self.upsample(x)
@@ -549,9 +549,6 @@ class UpscaleSubpixel(nn.Sequential):
     leaky_slope
         The value to use for LeakyReLu negative slope. Negative values remove activation
         altogether. Default: 0.1.
-    is_legacy
-        Used to correctly pad legacy models with kernel size > 3. Should not be used for new
-        models. Default: ``False``
     """
     def __init__(self,
                  in_channels: int,
