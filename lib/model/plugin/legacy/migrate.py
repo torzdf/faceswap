@@ -484,6 +484,8 @@ class KerasWeights:
             The type of the layer (the name with any following indices removed)
         """
         layer = name.rsplit(".", maxsplit=1)[-1]
+        if layer.startswith("separable_conv2d_"):  # strip our manually added sep2d suffix
+            layer = layer.rsplit("_", maxsplit=1)[0]
         layer_split = layer.rsplit("_", maxsplit=1)
         if len(layer_split) == 1:
             return layer
@@ -535,7 +537,8 @@ class KerasWeights:
                     if (is_mask and k in self._mask_layers
                         or not is_mask and k not in self._mask_layers)
                     and weight_key in v
-                    and len(v) == len(torch_weights))
+                    and len(v) == len(torch_weights)
+                    and torch_weights[weight_key].shape == v[weight_key].shape)
         weights = self._grouped.pop(name)
         logger.debug("[KerasWeights] Got %s weights '%s' for shape: %s. Remaining: %s",
                      len(weights), name, torch_weights[weight_key].shape, self.len_grouped)
@@ -773,6 +776,7 @@ class KerasToTorch:
         torch_grouped = self._group_weights(torch_filtered)
         logger.debug("[KerasToTorch] keras grouped weights: %s, torch grouped weights: %s",
                      keras.len_grouped, len(torch_grouped))
+
         if keras.len_grouped != len(torch_grouped):
             raise RuntimeError(
                 f"The number of grouped weights within the keras file ({keras.len_grouped}) "

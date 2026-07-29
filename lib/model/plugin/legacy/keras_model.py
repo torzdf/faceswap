@@ -149,6 +149,25 @@ def _nasnet_reorder(layers: dict[str, LayerInfo]  # pylint:disable=too-many-loca
     return retval
 
 
+def _resnet_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+    """ Re-orders imported layer names from Keras Applications ResNet from graph order to build
+    order. This is not actually required, but we implemented accidentally, so might as well keep
+    it. Fortunately layer labelling makes this trivial """
+    block_ids = {k: re.findall(r"\d+", v.layer_name) for k, v in layers.items()
+                 if k.startswith(_ENC_PREFIX)}
+    re_order = {k: tuple(int(x) for x in v) for k, v in block_ids.items() if len(v) == 3}
+    ordered = [k[0] for k in sorted(re_order.items(), key=lambda x: x[1])]
+    order_iter = iter(ordered)
+    retval: dict[str, LayerInfo] = {}
+    for k, v in layers.items():
+        if k in ordered:
+            next_k = next(order_iter)
+            retval[next_k] = layers[next_k]
+        else:
+            retval[k] = v
+    return retval
+
+
 def _xception_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
     """ Re-orders imported layer names from Keras Applications Xception from graph order to build
     order. Skip layers need to be built prior to separable conv within each block """
@@ -209,6 +228,9 @@ def reorder_layers(model: str, layers: dict[str, LayerInfo]) -> dict[str, LayerI
                  "inception_v3": _inception_reorder,
                  "nasnet_large": _nasnet_reorder,
                  "nasnet_mobile": _nasnet_reorder,
+                 "resnet50": _resnet_reorder,
+                 "resnet101": _resnet_reorder,
+                 "resnet152": _resnet_reorder,
                  "xception": _xception_reorder}
 
     if model not in functions:
