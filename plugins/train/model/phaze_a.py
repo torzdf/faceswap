@@ -1185,40 +1185,29 @@ class InterGBlock(nn.Sequential):
     ----------
     input_shape
         The input shape to the linear layers feeding the G-Block
-    fc_depth
-        The number of consecutive linear layers feeding the G-Block
-    fc_min_nodes
-        The number of filters within the initial linear layer feeding the G-Block
-    fc_max_nodes
-        The number of filters within the final linear layer feeding the G-Block
-    fc_slope
-        The filter slope for the linear layers feeding the G-Block
-    fc_dropout
-        The dropout to apply to the linear layers feeding the G-Block
-    include_bottleneck
-        ``True`` if the bottleneck is to be placed in the FC layers
     """
-    def __init__(self,
-                 input_shape: tuple[int, int, int] | tuple[int],
-                 fc_depth: int,
-                 fc_min_nodes: int,
-                 fc_max_nodes: int,
-                 fc_slope: float,
-                 fc_dropout: float,
-                 include_bottleneck: bool) -> None:
+    def __init__(self, input_shape: tuple[int, int, int] | tuple[int]) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+
+        depth = cfg.fc_gblock_depth()
+        min_nodes = cfg.fc_gblock_min_nodes()
+        max_nodes = cfg.fc_gblock_max_nodes()
+        slope = cfg.fc_gblock_filter_slope()
+        dropout = cfg.fc_dropout()
+        inc_bottleneck = not cfg.bottleneck_in_encoder()
+
         in_channels = input_shape[0]
-        if include_bottleneck:
+        if inc_bottleneck:
             assert len(input_shape) == 3
             bottleneck = BOTTLENECK_GETTER(input_shape)
             self.add_module("bottleneck", bottleneck)
             in_channels = bottleneck.output_shape[0]
 
-        fc_feats = _get_curve(fc_min_nodes, fc_max_nodes, fc_depth, fc_slope)
+        fc_feats = _get_curve(min_nodes, max_nodes, depth, slope)
         for i, feats in enumerate(fc_feats):
-            if fc_dropout > 0.:
-                self.add_module(f"drop{i}", nn.Dropout(fc_dropout, inplace=True))
+            if dropout > 0.:
+                self.add_module(f"drop{i}", nn.Dropout(dropout, inplace=True))
             self.add_module(f"fc{i}", nn.Linear(in_channels if i == 0 else fc_feats[i - 1], feats))
 
         self.in_channels = in_channels
@@ -1235,16 +1224,16 @@ class GBlock(nn.Module):
     content_channels
         The number of channels feeding the content part of G-Block
     style_recursions
-        The number of recursions for the style Linear layers
+        The number of recursions for the style Linear layers. Default: 3
     style_nodes
-        The number of channels in each style Linear layer
+        The number of channels in each style Linear layer. Default: 512
     g_block_recursions
         The number of recursions to perform within the G-Block. Default: 2
     """
     def __init__(self,
                  style_channels: int,
                  content_channels: int,
-                 style_recursions: int = 2,
+                 style_recursions: int = 3,
                  style_nodes: int = 512,
                  g_block_recursions: int = 2) -> None:
         logger.debug(parse_class_init(locals()))
@@ -1267,7 +1256,7 @@ class GBlock(nn.Module):
                 for _ in range(2)))
             gblock["noise"] = nn.Sequential(
                 GaussianNoise(1.0),
-                nn.Conv2d(content_channels, content_channels, 3, padding=1)
+                nn.Conv2d(content_channels, content_channels, 1)
                 )
             if i == self._gblock_recursions - 1:
                 gblock["conv"] = nn.Conv2d(content_channels, content_channels, 3, padding=1)
@@ -1377,7 +1366,7 @@ class PhazeA(ModelPlugin):
 
         self.encoder = Encoder(self.input_shape[1], self.is_legacy)
         self.inter = self._build_inter()
-        self.inter_gblock, self.gblock = self._build_gblock(not cfg.bottleneck_in_encoder())
+        self.inter_gblock, self.gblock = self._build_gblock()
         self.decoder = self._build_decoder()
 
     # TODO these 2 properties are hangovers from old system. Revisit when implemented
@@ -1460,19 +1449,12 @@ class PhazeA(ModelPlugin):
             UPSCALE_GETTER.update_filters(upscales_in_fc)
         return retval
 
-    def _build_gblock(self, include_bottleneck: bool
-                      ) -> tuple[InterGBlock, GBlock | nn.ModuleList] | tuple[None, None]:
+    def _build_gblock(self) -> tuple[InterGBlock, GBlock | nn.ModuleList] | tuple[None, None]:
         """ Build the gblock """
         if not cfg.enable_gblock():
             return None, None
 
-        inter = InterGBlock(self.encoder.output_shape,
-                            cfg.fc_gblock_depth(),
-                            cfg.fc_gblock_min_nodes(),
-                            cfg.fc_gblock_max_nodes(),
-                            cfg.fc_gblock_filter_slope(),
-                            cfg.fc_dropout(),
-                            include_bottleneck)
+        inter = InterGBlock(self.encoder.output_shape)
         content_channels = (T.cast(int, self.inter[0].out_channels)
                             if isinstance(self.inter, nn.ModuleList)
                             else self.inter.out_channels)
