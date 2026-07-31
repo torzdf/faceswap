@@ -55,7 +55,7 @@ class AdaIN(nn.Module):
         content
             The content image tensor
         style
-            The style image Tensor or a tuple of (beta, gamma) tensors
+            The style image Tensor or a tuple of (beta[mean], gamma[std]) tensors
 
         Returns
         -------
@@ -65,9 +65,12 @@ class AdaIN(nn.Module):
         if self.dim is not None:
             del reduction_axes[self.dim - 1]
 
-        content_std, content_mean = torch.std_mean(content, dim=reduction_axes, keepdim=True)
+        content_std, content_mean = torch.std_mean(content,
+                                                   dim=reduction_axes,
+                                                   keepdim=True,
+                                                   correction=0)
         if isinstance(style, (tuple, list)):
-            style_std, style_mean = style
+            style_mean, style_std = style
         else:
             style_std, style_mean = torch.std_mean(style, dim=reduction_axes, keepdim=True)
 

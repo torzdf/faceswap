@@ -1286,7 +1286,7 @@ class GBlock(nn.Module):
             if idx == self._gblock_recursions - 1:
                 x = gblock["conv"](x)
             norm = gblock["norm"](x, styles)
-            x = norm + noise
+            x = gblock["act"](norm + noise)
         return x
 
 
