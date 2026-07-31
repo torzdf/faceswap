@@ -195,7 +195,8 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
                              min_size=71,
                              default_size=299,
                              last_layer="act4"),
-    "fs_original": _EncoderInfo(torch_name="", min_size=32, default_size=1024)}
+    "fs_original": _EncoderInfo(torch_name="", min_size=32, default_size=1024)
+    }
 
 
 def _calculate_input_size(size: int, scaling: float, is_legacy: bool) -> int:
@@ -370,7 +371,8 @@ def _get_upscale_layer(method: UpsampleT,
     The selected configured upscale layer
     """
     if method == "upsample2d" and is_legacy:
-        retval = UpSampling2dLegacy(upsamples, interpolation="bilinear")
+        interpolation = "bilinear" if upsamples > 2 else "nearest"  # Legacy bug
+        retval = UpSampling2dLegacy(upsamples, interpolation=interpolation)
     elif method == "upsample2d":
         retval = nn.UpsamplingBilinear2d(scale_factor=upsamples)
     elif method == "subpixel":
@@ -405,27 +407,18 @@ class _EncoderFaceswap(nn.Sequential):
 
     Parameters
     ----------
-    depth
-        The number of convolutions to perform within the encoder
-    min_filters
-        The minimum number of filters to use for encoder convolutions. (i.e. the number of filters
-        to use for the first encoder layer)
-    max_filters
-        The maximum number of filters to use for encoder convolutions. (i.e. the number of filters
-        to use for the final encoder layer)
-    use_alt
-        Use a slightly alternate version of the Faceswap Encoder
     is_legacy
         ``True`` if the model was originally created in Keras
     """
-    def __init__(self,
-                 depth: int,
-                 min_filters: int,
-                 max_filters: int,
-                 use_alt: bool,
-                 is_legacy: bool) -> None:
+    def __init__(self, is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+
+        depth = cfg.fs_original_depth()
+        min_filters = cfg.fs_original_min_filters()
+        max_filters = cfg.fs_original_max_filters()
+        use_alt = cfg.fs_original_use_alt()
+
         channels = [3] + [min(max_filters, min_filters * (2 ** i)) for i in range(depth)]
         if use_alt:
             start = channels[0]
@@ -790,27 +783,21 @@ class Encoder(nn.Sequential):
 
     Parameters
     ----------
-    architecture
-        The selected encoder architecture
     input_size
         The pixel dimension of the encoder input
-    load_imagenet_weights
-        ``True`` to load imagenet weights for compatible models
-    include_bottleneck
-        ``True`` if the bottleneck is to be placed in the encoder
     is_legacy
         ``True`` if the model was originally created in Keras. Default: ``False``
     """
-    def __init__(self,
-                 architecture: str,
-                 input_size: int,
-                 load_imagenet_weights: bool,
-                 include_bottleneck: bool,
-                 is_legacy: bool = False) -> None:
+    def __init__(self, input_size: int, is_legacy: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-        self._name = snake_to_camel_case(architecture)
-        mod_info = _MODEL_MAPPING[architecture]
+
+        arch = cfg.enc_architecture()
+        load_imagenet_weights = cfg.enc_load_weights()
+        inc_bottleneck = cfg.bottleneck_in_encoder()
+
+        self._name = snake_to_camel_case(arch)
+        mod_info = _MODEL_MAPPING[arch]
 
         if is_legacy:  # No need to load weights if we are bringing in a legacy trained model
             load_imagenet_weights = False
@@ -824,7 +811,7 @@ class Encoder(nn.Sequential):
                 self._name,
                 self._get_encoder(mod_info, load_imagenet_weights, input_size, is_legacy))
         out_shape = self._get_output_shape(input_size)
-        self.bottleneck = BOTTLENECK_GETTER(out_shape) if include_bottleneck else None
+        self.bottleneck = BOTTLENECK_GETTER(out_shape) if inc_bottleneck else None
         self.output_shape = out_shape if self.bottleneck is None else self.bottleneck.output_shape
         """ The output shape from the encoder excluding batch dimension """
 
@@ -904,11 +891,7 @@ class Encoder(nn.Sequential):
             retval = self._select_layers(backbone, mod_info)
             return retval
 
-        return _EncoderFaceswap(cfg.fs_original_depth(),  # Move config to EncInfo Kwargs
-                                cfg.fs_original_min_filters(),
-                                cfg.fs_original_max_filters(),
-                                cfg.fs_original_use_alt(),
-                                is_legacy)
+        return _EncoderFaceswap(is_legacy)
 
     def _get_output_shape(self, input_size: int) -> tuple[int, int, int]:
         """ Run a dummy tensor through the model to get the output shape """
@@ -951,19 +934,8 @@ class FullyConnected(nn.Module):
         The input shape for the fully connected layers
     feats
         List of number of features for each linear layer
-    dim
-        The height and width dimension for the final reshape layer at the end of the fully
-        connected layers
-    dropout
-        Dropout amount between each FC layer
-    upsampler
-        The upsampler to use at the end of the FC layer
     upsamples
         How many upsamples to apply at the end of the FC layer
-    upsample_filters
-        The number of filters to apply to the upsampler, if required
-    include_bottleneck
-        ``True`` if the bottleneck is to be placed in the FC layers
     upscales
         The number of decoder upscales that should be placed within the fully connected block
     is_legacy
@@ -972,20 +944,21 @@ class FullyConnected(nn.Module):
     def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments,too-many-locals  # noqa:E501
                  input_shape: tuple[int, int, int] | tuple[int],
                  feats: list[int],
-                 dim: int,
-                 dropout: float,
-                 upsampler: UpsampleT,
-                 upsamples: int,
                  upsample_filters: int,
                  upscales: int,
-                 include_bottleneck: bool,
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
+        dim = cfg.fc_dimensions()
+        dropout = cfg.fc_dropout()
+        upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
+        upsamples = cfg.fc_upsamples()
+        inc_bottleneck = not cfg.bottleneck_in_encoder()
+
         dst_shape = (int(feats[-1] / (dim ** 2)), dim, dim)
 
-        if include_bottleneck:
+        if inc_bottleneck:
             assert len(input_shape) == 3
             self.bottleneck = BOTTLENECK_GETTER(input_shape)
             feats = [self.bottleneck.output_shape[0]] + feats
@@ -1035,8 +1008,9 @@ class FullyConnected(nn.Module):
         else:
             for i in range(upsamples):
                 lbl = str(i + 1) if upsamples > 1 else ''
+                in_c = in_channels if i == 0 else out_channels
                 retval[f"{upsampler}{lbl}"] = _get_upscale_layer(
-                    upsampler, in_channels, out_channels, 2, is_legacy=is_legacy
+                    upsampler, in_c, out_channels, 2, is_legacy=is_legacy
                     )
         if upsampler == "upsample2d":
             retval["act"] = nn.LeakyReLU(0.1, inplace=True)
@@ -1091,33 +1065,11 @@ class Inter(nn.Module):
     ----------
     input_shape
         The input shape to the FC layers
-    model_output_size
-        The final pixel output size from the Phaze-A model
     shared
         Whether to have a shared FC layer. ``Full`` has a fully shared layer. ``Half`` places the
         shared data into identity 0's FC layer
-    min_filters
-        The number of 'filters' to use for the first FC layer assuming shape of (filters, dim, dim)
-    max_filters
-        The number of 'filters' to use for the last FC layer assuming shape of (filters, dim, dim)
-    depth
-        The number of fully connected layers
-    slope
-        The rate to move from minimum filters to maximum filters
-    dim
-       The dimensions to use for the final reshape layer assuming shape of (filters, dim, dim)
-    dropout
-        Dropout value between each FC layer
-    upsampler
-        Type of upsampler to use of upsamples > 0
-    upsamples
-        Number of upsamples to place at the end of each FC layer
-    upsample_filters
-        The number of filters to use for upsamplers that require them
     upscales
         The number of decoder upscales to place in the FC layers
-    include_bottleneck
-        ``True`` if the bottleneck is to be placed in the FC layers
     is_legacy
         ``True`` if the model was originally created in Keras
     shared_inter
@@ -1126,34 +1078,34 @@ class Inter(nn.Module):
     """
     def __init__(self,  # pylint:disable=too-many-locals,too-many-positional-arguments,too-many-arguments  # noqa[E501]
                  input_shape: tuple[int, int, int] | tuple[int],
-                 model_output_size: int,
                  shared: T.Literal["none", "full", "half"],
-                 min_filters: int,
-                 max_filters: int,
-                 depth: int,
-                 slope: float,
-                 dim: int,
-                 dropout: float,
-                 upsampler: UpsampleT,
-                 upsamples: int,
-                 upsample_filters: int,
                  upscales: int,
-                 include_bottleneck: bool,
                  is_legacy: bool,
                  shared_inter: FullyConnected | None = None) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+
+        model_output_size = cfg.output_size()
+        depth = cfg.fc_depth()
+        slope = cfg.fc_filter_slope()
+        dim = cfg.fc_dimensions()
+        upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
+        upsamples = cfg.fc_upsamples()
+        upsample_filters = cfg.fc_upsample_filters()
+
+        final_dim = dim * (upsamples + 1)
+        min_filters = self._scale_filters(cfg.fc_min_filters(),
+                                          final_dim,
+                                          model_output_size) * dim ** 2
+        max_filters = self._scale_filters(cfg.fc_max_filters(),
+                                          final_dim,
+                                          model_output_size) * dim ** 2
+
         # TODO legacy handling. final dim should not actually be required for filter scaling as
         # assumption was made during original implementation that upscale filters also need scaling
         # (they should not). This leads to excess filter adjustments when not necessary. Use
         # original dim instead
-        final_dim = dim * (upsamples + 1)
-        filters = _get_curve(
-            self._scale_filters(min_filters, final_dim, model_output_size) * dim ** 2,
-            self._scale_filters(max_filters, final_dim, model_output_size) * dim ** 2,
-            depth,
-            slope
-            )
+        filters = _get_curve(min_filters, max_filters, depth, slope)
 
         out_channels = (upsample_filters if upsamples > 0 and upsampler != "upsample2d"
                         else filters[-1] // (final_dim * 2))
@@ -1167,13 +1119,8 @@ class Inter(nn.Module):
 
         fc_args = (input_shape,
                    filters,
-                   dim,
-                   dropout,
-                   upsampler,
-                   upsamples,
                    self._scale_filters(upsample_filters, final_dim, model_output_size),
                    upscales,
-                   include_bottleneck,
                    is_legacy)
 
         self.fc = FullyConnected(*fc_args)
@@ -1428,13 +1375,8 @@ class PhazeA(ModelPlugin):
                          is_legacy=is_legacy)
         BOTTLENECK_GETTER.configure(is_legacy)
 
-        self.encoder = Encoder(cfg.enc_architecture(),
-                               self.input_shape[1],
-                               cfg.enc_load_weights(),
-                               cfg.bottleneck_in_encoder(),
-                               self.is_legacy)
-
-        self.inter = self._build_inter(not cfg.bottleneck_in_encoder())
+        self.encoder = Encoder(self.input_shape[1], self.is_legacy)
+        self.inter = self._build_inter()
         self.inter_gblock, self.gblock = self._build_gblock(not cfg.bottleneck_in_encoder())
         self.decoder = self._build_decoder()
 
@@ -1494,7 +1436,7 @@ class PhazeA(ModelPlugin):
         # TODO keras version tracking removed from here. Delete this when confirmed models are all
         # in valid torch versions
 
-    def _build_inter(self, include_bottleneck: bool) -> Inter | nn.ModuleList:
+    def _build_inter(self) -> Inter | nn.ModuleList:
         """ Build the intermediate layers """
         shared = T.cast(T.Literal["none", "full", "half"], cfg.shared_fc())
         upscales_in_fc = cfg.dec_upscales_in_fc()
@@ -1504,21 +1446,9 @@ class PhazeA(ModelPlugin):
                                 "identities")
         if not self.is_legacy and not self._split_fc and shared != "none":
             raise FaceswapError("Shared FC layer is only compatible with split FC layers")
-        inter_args = (self.encoder.output_shape,
-                      cfg.output_size(),
-                      shared,
-                      cfg.fc_min_filters(),
-                      cfg.fc_max_filters(),
-                      cfg.fc_depth(),
-                      cfg.fc_filter_slope(),
-                      cfg.fc_dimensions(),
-                      cfg.fc_dropout(),
-                      T.cast(UpsampleT, cfg.fc_upsampler()),
-                      cfg.fc_upsamples(),
-                      cfg.fc_upsample_filters(),
-                      upscales_in_fc,
-                      include_bottleneck,
-                      self.is_legacy)
+
+        inter_args = (self.encoder.output_shape, shared, upscales_in_fc, self.is_legacy)
+
         inter0 = Inter(*inter_args)
 
         if not self._split_fc:

@@ -178,6 +178,10 @@ class UpSampling2dLegacy(nn.Module):
         self.mode = interpolation
         self.align_corners = False if interpolation in ("bicubic", "bilinear") else None
 
+    def __repr__(self) -> str:
+        """ Standard module repr """
+        return f"{self.__class__.__name__}(size={self.factor}, interpolation={repr(self.mode)})"
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Call the Upsampling2D Layer
 
