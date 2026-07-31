@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code,too-many-lines
 
 # TODO summaries instance counts + call per instance counts can be wrong
-# TODO check EncInfo kwargs load correctly when loading model. If not then use value() in build
 
 
 UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
@@ -160,7 +159,7 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
                                  legacy_scaling=(-1, 1)),
     "mobilenet": _EncoderInfo(torch_name="~mobilenet",
                               last_layer="dw",
-                              kwargs={"alpha": cfg.mobilenet_width(),  # TODO test if this format works for reloading
+                              kwargs={"alpha": cfg.mobilenet_width(),
                                       "depth_multiplier": cfg.mobilenet_depth(),
                                       "dropout": cfg.mobilenet_dropout()}),
     "mobilenet_v2": _EncoderInfo(torch_name="mobilenet_v2",
@@ -503,11 +502,6 @@ class _BottleneckGetter:
         is_legacy
             ``True`` if the model was originally created in Keras
         """
-        # Reset class params for model reload
-        # TODO We need to change upstream to only ever load a model once and remove this:
-        cls.bottleneck = cfg.bottleneck_type()
-        cls.size = cfg.bottleneck_size()
-        cls.normalization = cfg.bottleneck_norm()
         cls.is_legacy = is_legacy
 
     @classmethod
@@ -620,26 +614,8 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         is_legacy
             ``True`` if the model was originally created in Keras
         """
-        # TODO this will initialize for every inter. We need to change upstream to only ever load a
-        # model once
-        # if cls.input_shape is not None and cls.is_legacy is not None:
-        #    return
-
-        # Reset class params for model reload
-        cls.output_size = cfg.output_size()
-        cls.min_filters = cfg.dec_min_filters()
-        cls.max_filters = cfg.dec_max_filters()
-        cls.slope_mode = cfg.dec_slope_mode()
-        cls.slope = cfg.dec_filter_slope()
-        cls.method: UpsampleT = T.cast(UpsampleT, cfg.dec_upscale_method())
-        cls.gaussian = cfg.dec_gaussian()
-        cls.normalization = cfg.dec_norm()
-        cls.res_blocks = cfg.dec_res_blocks()
-        cls.skip_last_residual = cfg.dec_skip_last_residual()
-        cls.learn_mask = cfg_loss.learn_mask()
-
-        cls._is_dny = cls.method.lower() == "upscale_dny"
-        cls._needs_act = cls.method.lower() in ("subpixel", "upscale_fast", "upscale_hybrid")
+        if cls.input_shape is not None and cls.is_legacy is not None:
+            return
 
         logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, is_legacy: %s)",
                      input_shape, is_legacy)
@@ -1091,7 +1067,6 @@ class Inter(nn.Module):
         dim = cfg.fc_dimensions()
         upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
         upsamples = cfg.fc_upsamples()
-        upsample_filters = cfg.fc_upsample_filters()
 
         final_dim = dim * (upsamples + 1)
         min_filters = self._scale_filters(cfg.fc_min_filters(),
@@ -1100,26 +1075,30 @@ class Inter(nn.Module):
         max_filters = self._scale_filters(cfg.fc_max_filters(),
                                           final_dim,
                                           model_output_size) * dim ** 2
+        upsample_filters = self._scale_filters(cfg.fc_upsample_filters(),
+                                               final_dim,
+                                               model_output_size)
 
         # TODO legacy handling. final dim should not actually be required for filter scaling as
         # assumption was made during original implementation that upscale filters also need scaling
         # (they should not). This leads to excess filter adjustments when not necessary. Use
         # original dim instead
         filters = _get_curve(min_filters, max_filters, depth, slope)
-
-        out_channels = (upsample_filters if upsamples > 0 and upsampler != "upsample2d"
-                        else filters[-1] // (final_dim * 2))
-        fc_out_shape = (out_channels, final_dim, final_dim)
+        fc_out_shape = self._calculate_fc_output_shape(upsample_filters,
+                                                       upsamples,
+                                                       upsampler,
+                                                       filters[-1],
+                                                       final_dim)
         out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
                      else fc_out_shape)
         UPSCALE_GETTER.configure(fc_out_shape if upscales else out_shape, is_legacy)
-        out_channels = out_channels if not upscales else UPSCALE_GETTER._filters[upscales - 1]
+        out_channels = out_shape[0] if not upscales else UPSCALE_GETTER._filters[upscales - 1]
         self.out_channels = out_channels * 2 if shared != "none" else out_channels
         """ The number of output channels from the inter layer """
 
         fc_args = (input_shape,
                    filters,
-                   self._scale_filters(upsample_filters, final_dim, model_output_size),
+                   upsample_filters,
                    upscales,
                    is_legacy)
 
@@ -1150,14 +1129,31 @@ class Inter(nn.Module):
         """
         scaled_dim = _scale_dim(output_size, final_dim)
         if scaled_dim == final_dim:
-            logger.debug("filters don't require scaling. Returning: %s", original_filters)
+            logger.debug("[Inter] filters don't require scaling. Returning: %s", original_filters)
             return original_filters
 
         flat = final_dim ** 2 * original_filters
         modifier = final_dim ** 2 * scaled_dim ** 2
         retval = int((flat // modifier) * modifier)
         retval = int(retval / final_dim ** 2)
-        logger.debug("original_filters: %s, scaled_filters: %s", original_filters, retval)
+        logger.debug("[Inter] original_filters: %s, scaled_filters: %s", original_filters, retval)
+        return retval
+
+    @classmethod
+    def _calculate_fc_output_shape(cls,
+                                   upsample_filters: int,
+                                   upsamples: int,
+                                   upsampler: UpsampleT,
+                                   final_filters: int,
+                                   final_dim: int) -> tuple[int, int, int]:
+        """ Calculate the output shape from each fully connected layers including any upscales but
+        excluding any decoder upscales within the inter layers """
+        has_up_filt = upsamples > 0 and upsampler != "upsample2d"
+        channels = upsample_filters if has_up_filt else final_filters // (final_dim * 2)
+        retval = (channels, final_dim, final_dim)
+        logger.debug("[Inter] upsample_filters: %s, upsamples: %s, upsampler: %s, "
+                     "final_filters: %s, final_dim: %s. Output shape: %s",
+                     upsample_filters, upsamples, upsampler, final_filters, final_dim, retval)
         return retval
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
