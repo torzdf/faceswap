@@ -160,7 +160,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
 
         if self._learn_mask:  # Add the face mask as it's own target
             assert meta.mask_face is not None
-            targets += [meta.mask_face[-1].permute(0, 1, 3, 4, 2)]
+            targets += [meta.mask_face[-1]]
         logger.trace(  # type:ignore[attr-defined]
             "[TrainLoader] input_shapes: %s, target_shapes: %s, meta: %s",
             [i.shape for i in inputs], [t.shape for t in targets], meta)
