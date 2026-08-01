@@ -224,7 +224,8 @@ def _get_curve(start_y: int,
                end_y: int,
                num_points: int,
                scale: float,
-               mode: T.Literal["full", "cap_max", "cap_min"] = "full") -> list[int]:
+               mode: T.Literal["full", "cap_max", "cap_min"] = "full",
+               round_to: int = 8) -> list[int]:
     """ Obtain a curve.
 
     For the given start and end y values, return the y co-ordinates of a curve for the given
@@ -247,6 +248,8 @@ def _get_curve(start_y: int,
         fixed divider to the `"end_y"` value. `"cap_min"` starts at the `"start_y" filling points
         at a fixed divider until the `"end_y"` value is reached and pads the remaining points with
         the `"end_y"` value. Default: `"full"`
+    round_to
+        Round down to the nearest number divisible by the given integer. Default: 8
 
     Returns
     -------
@@ -260,12 +263,12 @@ def _get_curve(start_y: int,
         y_axis: np.ndarray | list[int] = (x_axis - x_axis * scale) / (scale - abs(x_axis)
                                                                       * 2 * scale + 1)
         y_axis = T.cast(np.ndarray, y_axis) * (end_y - start_y) + start_y
-        retval = [int((y // 8) * 8) for y in y_axis]
+        retval = [int((y // round_to) * round_to) for y in y_axis]
     else:
         y_axis = [start_y]
         scale = 1. - abs(scale)
         for _ in range(num_points - 1):
-            current_value = max(end_y, int(((y_axis[-1] * scale) // 8) * 8))
+            current_value = max(end_y, int(((y_axis[-1] * scale) // round_to) * round_to))
             y_axis.append(current_value)
             if current_value == end_y:
                 break
@@ -572,6 +575,14 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         input_shape
             The shape of the Tensor feeding the Upscale Blocks (output from Inter)
         """
+        if not cls.is_legacy:
+            # Legacy used to scale filters for mismatched fc_dims and output size. This leads to
+            # awkward reshaping between fc_output and decoder input. Now we just set the
+            # dimensional space correctly when creating the FC layers
+            cls._in_channels = input_shape[0]
+            logger.debug("[UpscaleBlocks] Set in_channels: %s", cls._in_channels)
+            return
+
         old_dim = input_shape[-1]
         new_dim = _scale_dim(cls.output_size, old_dim)
 
@@ -908,6 +919,8 @@ class FullyConnected(nn.Module):
     ----------
     input_shape
         The input shape for the fully connected layers
+    dim
+        The spatial dimension to reshape the FC outputs to
     feats
         List of number of features for each linear layer
     upsamples
@@ -919,6 +932,7 @@ class FullyConnected(nn.Module):
     """
     def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments,too-many-locals  # noqa:E501
                  input_shape: tuple[int, int, int] | tuple[int],
+                 dim: int,
                  feats: list[int],
                  upsample_filters: int,
                  upscales: int,
@@ -926,7 +940,6 @@ class FullyConnected(nn.Module):
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
-        dim = cfg.fc_dimensions()
         dropout = cfg.fc_dropout()
         upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
         upsamples = cfg.fc_upsamples()
@@ -1060,35 +1073,39 @@ class Inter(nn.Module):
                  shared_inter: FullyConnected | None = None) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
-
         model_output_size = cfg.output_size()
         depth = cfg.fc_depth()
+        upsample_filters = cfg.fc_upsample_filters()
         slope = cfg.fc_filter_slope()
         dim = cfg.fc_dimensions()
         upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
         upsamples = cfg.fc_upsamples()
 
-        final_dim = dim * (upsamples + 1)
+        # Legacy used to just scale filters for mismatched fc_dims and output size. This leads to
+        # awkward reshaping between fc_output and decoder input. Now we set the dimensional space
+        # correctly staight out of the FC layers
+        scaled_dim = _scale_dim(model_output_size, dim)
+        final_dim = (dim if is_legacy else scaled_dim) * (upsamples + 1)
+
         min_filters = self._scale_filters(cfg.fc_min_filters(),
-                                          final_dim,
+                                          final_dim if is_legacy else dim,
                                           model_output_size) * dim ** 2
         max_filters = self._scale_filters(cfg.fc_max_filters(),
-                                          final_dim,
+                                          final_dim if is_legacy else dim,
                                           model_output_size) * dim ** 2
-        upsample_filters = self._scale_filters(cfg.fc_upsample_filters(),
-                                               final_dim,
-                                               model_output_size)
-
-        # TODO legacy handling. final dim should not actually be required for filter scaling as
-        # assumption was made during original implementation that upscale filters also need scaling
-        # (they should not). This leads to excess filter adjustments when not necessary. Use
-        # original dim instead
         filters = _get_curve(min_filters, max_filters, depth, slope)
+        if is_legacy:  # Need scaling for reshape in decoder
+            upsample_filters = self._scale_filters(cfg.fc_upsample_filters(),
+                                                   final_dim,
+                                                   model_output_size)
+
+        dim = dim if is_legacy else scaled_dim  # Handle reshape here for non-legacy
+
         fc_out_shape = self._calculate_fc_output_shape(upsample_filters,
                                                        upsamples,
                                                        upsampler,
                                                        filters[-1],
-                                                       final_dim)
+                                                       dim)
         out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
                      else fc_out_shape)
         UPSCALE_GETTER.configure(fc_out_shape if upscales else out_shape, is_legacy)
@@ -1097,6 +1114,7 @@ class Inter(nn.Module):
         """ The number of output channels from the inter layer """
 
         fc_args = (input_shape,
+                   dim,
                    filters,
                    upsample_filters,
                    upscales,
@@ -1110,15 +1128,15 @@ class Inter(nn.Module):
             self.shared = self.fc
 
     @classmethod
-    def _scale_filters(cls, original_filters: int, final_dim: int, output_size: int) -> int:
+    def _scale_filters(cls, original_filters: int, dim: int, output_size: int) -> int:
         """ Scale the filters to be compatible with the model's selected output size.
 
         Parameters
         ----------
         original_filters
             The original user selected number of filters
-        final_dim
-            The dimensional shape of the final upsample layer
+        dim
+            The original user selected dimensional shape of reshape layer
         output_size
             The final pixel output size from the Phaze-A model
 
@@ -1127,15 +1145,15 @@ class Inter(nn.Module):
         int
             The number of filters scaled down for output size
         """
-        scaled_dim = _scale_dim(output_size, final_dim)
-        if scaled_dim == final_dim:
+        scaled_dim = _scale_dim(output_size, dim)
+        if scaled_dim == dim:
             logger.debug("[Inter] filters don't require scaling. Returning: %s", original_filters)
             return original_filters
 
-        flat = final_dim ** 2 * original_filters
-        modifier = final_dim ** 2 * scaled_dim ** 2
+        flat = dim ** 2 * original_filters
+        modifier = dim ** 2 * scaled_dim ** 2
         retval = int((flat // modifier) * modifier)
-        retval = int(retval / final_dim ** 2)
+        retval = int(retval / dim ** 2)
         logger.debug("[Inter] original_filters: %s, scaled_filters: %s", original_filters, retval)
         return retval
 
@@ -1145,15 +1163,16 @@ class Inter(nn.Module):
                                    upsamples: int,
                                    upsampler: UpsampleT,
                                    final_filters: int,
-                                   final_dim: int) -> tuple[int, int, int]:
+                                   dim: int) -> tuple[int, int, int]:
         """ Calculate the output shape from each fully connected layers including any upscales but
         excluding any decoder upscales within the inter layers """
         has_up_filt = upsamples > 0 and upsampler != "upsample2d"
-        channels = upsample_filters if has_up_filt else final_filters // (final_dim * 2)
+        channels = upsample_filters if has_up_filt else (final_filters // (dim ** 2))
+        final_dim = dim * (upsamples + 1)
         retval = (channels, final_dim, final_dim)
         logger.debug("[Inter] upsample_filters: %s, upsamples: %s, upsampler: %s, "
-                     "final_filters: %s, final_dim: %s. Output shape: %s",
-                     upsample_filters, upsamples, upsampler, final_filters, final_dim, retval)
+                     "final_filters: %s, dim: %s. Output shape: %s",
+                     upsample_filters, upsamples, upsampler, final_filters, dim, retval)
         return retval
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
