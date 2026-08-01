@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code,too-many-lines
 
 # TODO summaries instance counts + call per instance counts can be wrong
+# TODO warn when some layers could not load weights (imgnet + FS loading) [clipV]
 
 
 UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
@@ -454,23 +455,19 @@ class Bottleneck(nn.Sequential):
     ----------
     input_shape
         The input shape to the bottleneck, excluding batch dimension
-    bottleneck
-        The type of bottleneck to use
-    size
-        The number of nodes for the dense layer (if selected)
-    normalization
-        The normalization method to use prior to the bottleneck
     is_legacy
         ``True`` if the model was originally created in Keras
     """
     def __init__(self,
                  input_shape: tuple[int, int, int],
-                 bottleneck: str,
-                 size: int,
-                 normalization: str,
                  is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
+
+        bottleneck = cfg.bottleneck_type()
+        size = cfg.bottleneck_size()
+        normalization = cfg.bottleneck_norm()
+
         if normalization and normalization != "none":
             self.norm = _get_normalization(normalization, input_shape[0], is_legacy)
         if len(input_shape) > 1 and bottleneck in ("dense", "flatten"):
@@ -489,45 +486,6 @@ class Bottleneck(nn.Sequential):
         """ The output shape from the bottleneck excluding batch dimension """
 
 
-class _BottleneckGetter:
-    """ Handles returning a BottleNeck instance from the calling module """
-    bottleneck = cfg.bottleneck_type()
-    size = cfg.bottleneck_size()
-    normalization = cfg.bottleneck_norm()
-    is_legacy: bool | None = None
-
-    @classmethod
-    def configure(cls, is_legacy: bool) -> None:
-        """ Configure the bottleneck
-
-        Parameters
-        ----------
-        is_legacy
-            ``True`` if the model was originally created in Keras
-        """
-        cls.is_legacy = is_legacy
-
-    @classmethod
-    def __call__(cls, input_shape: tuple[int, int, int]) -> Bottleneck:
-        """ Obtain a BottleNeck instance
-
-        Parameters
-        ----------
-        input_shape
-            The input shape to the bottleneck, excluding batch dimension
-        """
-        assert cls.is_legacy is not None
-        return Bottleneck(input_shape,
-                          cls.bottleneck,
-                          cls.size,
-                          cls.normalization,
-                          cls.is_legacy)
-
-
-BOTTLENECK_GETTER = _BottleneckGetter()
-""" Handles returning a BottleNeck instance from the calling module """
-
-
 class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
     """ Obtain a block of upscalers.
 
@@ -538,26 +496,10 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
     For this reason, the Upscale Filter list is created early for reference by either the Decoder
     or Fully Connected models
     """
-    output_size = cfg.output_size()
-    min_filters = cfg.dec_min_filters()
-    max_filters = cfg.dec_max_filters()
-    slope_mode = cfg.dec_slope_mode()
-    slope = cfg.dec_filter_slope()
-    method: UpsampleT = T.cast(UpsampleT, cfg.dec_upscale_method())
-    gaussian = cfg.dec_gaussian()
-    normalization = cfg.dec_norm()
-    res_blocks = cfg.dec_res_blocks()
-    skip_last_residual = cfg.dec_skip_last_residual()
-    learn_mask = cfg_loss.learn_mask()
-
-    _is_dny = method.lower() == "upscale_dny"
-    _needs_act = method.lower() in ("subpixel", "upscale_fast", "upscale_hybrid")
     _in_channels = -1
     _reshape_shape: tuple[int, int, int] | None = None
-
     is_legacy: bool | None = None
     input_shape: tuple[int, int, int] | None = None
-
     _filters: list[int] = []
 
     @property
@@ -584,7 +526,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             return
 
         old_dim = input_shape[-1]
-        new_dim = _scale_dim(cls.output_size, old_dim)
+        new_dim = _scale_dim(cfg.output_size(), old_dim)
 
         if new_dim == old_dim:
             cls._in_channels = input_shape[0]
@@ -604,13 +546,13 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             The shape of the Tensor feeding the Upscale Blocks (output from Inter)
         """
         dim = input_shape[-1] if cls._reshape_shape is None else cls._reshape_shape[-1]
-        upscales = int(np.log2(cls.output_size / dim))
-        cls._filters = _get_curve(cls.max_filters,
-                                  cls.min_filters,
+        upscales = int(np.log2(cfg.output_size() / dim))
+        cls._filters = _get_curve(cfg.dec_max_filters(),
+                                  cfg.dec_min_filters(),
                                   upscales,
-                                  cls.slope,
+                                  cfg.dec_filter_slope(),
                                   mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
-                                              cls.slope_mode))
+                                              cfg.dec_slope_mode()))
         logger.debug("[UpscaleBlocks] Set filters: %s)", cls._filters)
 
     @classmethod
@@ -627,11 +569,9 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         """
         if cls.input_shape is not None and cls.is_legacy is not None:
             return
-
         logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, is_legacy: %s)",
                      input_shape, is_legacy)
-        if is_legacy and cls.method.lower() == "resize_images":
-            cls._needs_act = True  # Legacy bug. Extra leaky-relu
+
         cls.is_legacy = is_legacy
         cls._calculate_reshape(input_shape)
         cls._calculate_filters(input_shape)
@@ -648,8 +588,8 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             return
         idx = upscales_in_fc - 1
         filters = cls._filters[idx] * 2
-        logger.info("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
-                    idx, cls._filters[idx], filters, upscales_in_fc)
+        logger.debug("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
+                     idx, cls._filters[idx], filters, upscales_in_fc)
         cls._filters[idx] = filters
 
     def _dny_entry(self, layers: dict[str, nn.Module]) -> None:
@@ -660,7 +600,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         layers
             The currently building dict of layers to add the dny entry convs to, if required
         """
-        if not self._is_dny:
+        if cfg.dec_upscale_method().lower() != "upscale_dny":
             return
         logger.debug("[UpscaleBlocks] Adding DNY entry layers")
         layers["dny"] = nn.Sequential(
@@ -688,32 +628,41 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         The sequential model for an upscale layer tensor from the upscale block
         """
         assert self.is_legacy is not None
+
+        norm = cfg.dec_norm()
+        res_blocks = cfg.dec_res_blocks()
+        method = T.cast(UpsampleT, cfg.dec_upscale_method())
+        do_act = cfg.dec_upscale_method().lower() in ("subpixel", "upscale_fast", "upscale_hybrid")
+        if self.is_legacy and cfg.dec_upscale_method().lower() == "resize_images":
+            do_act = True  # Legacy bug. Extra leaky-relu
+
         filters_ = self._filters[index]
         layers: dict[str, nn.Module] = {}
         if index == 0:
-            in_channels = self._filters[0] if self._is_dny else self._in_channels
+            in_channels = (self._filters[0] if cfg.dec_upscale_method().lower() == "upscale_dny"
+                           else self._in_channels)
         else:
             in_channels = self._filters[index - 1]
-        up = _get_upscale_layer(self.method,
+        up = _get_upscale_layer(method,
                                 in_channels,
                                 filters_,
                                 upsamples=2,
                                 is_legacy=self.is_legacy)
-        layers[self.method] = up
-        if not is_mask and self.gaussian:
+        layers[method] = up
+        if not is_mask and cfg.dec_gaussian():
             layers["noise"] = GaussianNoise(1.0)
-        if self.normalization and self.normalization != "none":
-            layers["norm"] = _get_normalization(self.normalization,
+        if norm and norm != "none":
+            layers["norm"] = _get_normalization(norm,
                                                 filters_,
                                                 is_legacy=self.is_legacy)
 
-        skip_res = self.skip_last_residual and index == len(self._filters) - 1
-        if not is_mask and self.res_blocks and not skip_res:
+        skip_res = cfg.dec_skip_last_residual() and index == len(self._filters) - 1
+        if not is_mask and res_blocks and not skip_res:
             layers["act"] = nn.LeakyReLU(0.2, inplace=True)
-            for i in range(self.res_blocks):
-                lbl = str(i + 1) if self.res_blocks > 1 else ""
+            for i in range(res_blocks):
+                lbl = str(i + 1) if res_blocks > 1 else ""
                 layers[f"res{lbl}"] = ResidualBlock(filters_)
-        elif self._needs_act:
+        elif do_act:
             layers["act"] = nn.LeakyReLU(0.2, inplace=True)
         return nn.Sequential(OrderedDict(layers))
 
@@ -735,6 +684,10 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         path if learn_mask is selected
         """
         assert self._in_channels > 0 and self._filters, "Input size must be set before calling"
+
+        learn_mask = cfg_loss.learn_mask()
+        method = T.cast(UpsampleT, cfg.dec_upscale_method())
+
         start_idx, end_idx = (0, -1) if layer_indices is None else layer_indices
         end_idx = len(self._filters) if end_idx == -1 else end_idx
 
@@ -743,20 +696,20 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
 
         if start_idx == 0 and self._reshape_shape is not None:
             layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=False)
-            if self.learn_mask:
+            if learn_mask:
                 mask_layers["reshape"] = Reshape(self._reshape_shape, is_contiguous=False)
 
         if start_idx == 0:
             self._dny_entry(layers)
-            if self.learn_mask:
+            if learn_mask:
                 self._dny_entry(mask_layers)
 
         for i in range(start_idx, end_idx):
             layers[f"up{i + 1}"] = self._upscale_block(i)
-            if self.learn_mask:
-                mask_layers[f"{self.method}{i + 1}"] = self._upscale_block(i, is_mask=True)
+            if learn_mask:
+                mask_layers[f"{method}{i + 1}"] = self._upscale_block(i, is_mask=True)
         retval = {"face": nn.Sequential(OrderedDict(layers))}
-        if self.learn_mask:
+        if learn_mask:
             retval["mask"] = nn.Sequential(OrderedDict(mask_layers))
         return retval
 
@@ -798,7 +751,7 @@ class Encoder(nn.Sequential):
                 self._name,
                 self._get_encoder(mod_info, load_imagenet_weights, input_size, is_legacy))
         out_shape = self._get_output_shape(input_size)
-        self.bottleneck = BOTTLENECK_GETTER(out_shape) if inc_bottleneck else None
+        self.bottleneck = Bottleneck(out_shape, is_legacy) if inc_bottleneck else None
         self.output_shape = out_shape if self.bottleneck is None else self.bottleneck.output_shape
         """ The output shape from the encoder excluding batch dimension """
 
@@ -949,7 +902,7 @@ class FullyConnected(nn.Module):
 
         if inc_bottleneck:
             assert len(input_shape) == 3
-            self.bottleneck = BOTTLENECK_GETTER(input_shape)
+            self.bottleneck = Bottleneck(input_shape, is_legacy)
             feats = [self.bottleneck.output_shape[0]] + feats
         else:
             self.bottleneck = None
@@ -1200,8 +1153,10 @@ class InterGBlock(nn.Sequential):
     ----------
     input_shape
         The input shape to the linear layers feeding the G-Block
+    is_legacy
+        ``True`` if the model was created in Keras
     """
-    def __init__(self, input_shape: tuple[int, int, int] | tuple[int]) -> None:
+    def __init__(self, input_shape: tuple[int, int, int] | tuple[int], is_legacy: bool) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -1215,7 +1170,7 @@ class InterGBlock(nn.Sequential):
         in_channels = input_shape[0]
         if inc_bottleneck:
             assert len(input_shape) == 3
-            bottleneck = BOTTLENECK_GETTER(input_shape)
+            bottleneck = Bottleneck(input_shape, is_legacy)
             self.add_module("bottleneck", bottleneck)
             in_channels = bottleneck.output_shape[0]
 
@@ -1359,7 +1314,6 @@ class PhazeA(ModelPlugin):
         ``True`` if the model was originally created in Keras. Default ``False``
     """
     def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        logger.debug(parse_class_init(locals()))
         if cfg.output_size() % 16 != 0:
             raise FaceswapError("Phaze-A output shape must be a multiple of 16")
 
@@ -1377,7 +1331,6 @@ class PhazeA(ModelPlugin):
                          input_size,
                          is_rgb=not is_bgr,
                          is_legacy=is_legacy)
-        BOTTLENECK_GETTER.configure(is_legacy)
 
         self.encoder = Encoder(self.input_shape[1], self.is_legacy)
         self.inter = self._build_inter()
@@ -1423,7 +1376,7 @@ class PhazeA(ModelPlugin):
             retval = default_size
         else:
             retval = size
-        logger.debug("Encoder input size to: %s", retval)
+        logger.debug("Encoder input size: %s", retval)
         return retval
 
     def _validate_encoder_architecture(self) -> None:
@@ -1437,8 +1390,6 @@ class PhazeA(ModelPlugin):
         if not model:
             raise FaceswapError(f"'{arch}' is not a valid choice for encoder architecture. Choose "
                                 f"one of {list(_MODEL_MAPPING.keys())}.")
-        # TODO keras version tracking removed from here. Delete this when confirmed models are all
-        # in valid torch versions
 
     def _build_inter(self) -> Inter | nn.ModuleList:
         """ Build the intermediate layers """
@@ -1469,7 +1420,7 @@ class PhazeA(ModelPlugin):
         if not cfg.enable_gblock():
             return None, None
 
-        inter = InterGBlock(self.encoder.output_shape)
+        inter = InterGBlock(self.encoder.output_shape, self.is_legacy)
         content_channels = (T.cast(int, self.inter[0].out_channels)
                             if isinstance(self.inter, nn.ModuleList)
                             else self.inter.out_channels)
