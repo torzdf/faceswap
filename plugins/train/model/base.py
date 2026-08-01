@@ -2,7 +2,15 @@
 """Base class for Models plugins ALL Models should at least inherit from this class."""
 
 import abc
+import logging
+
 from torch import nn
+
+from lib.logger import parse_class_init
+from lib.utils import get_module_objects
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModelPlugin(nn.Module, abc.ABC):
@@ -24,6 +32,7 @@ class ModelPlugin(nn.Module, abc.ABC):
                  input_size: int = 0,
                  is_rgb: bool = False,
                  is_legacy: bool = False) -> None:
+        logger.debug(parse_class_init(locals()))
         assert input_size > 0
         self.num_identities = num_identities
         self.input_shape = (3, input_size, input_size)
@@ -38,3 +47,6 @@ class ModelPlugin(nn.Module, abc.ABC):
                                                    "is_rgb": self.is_rgb,
                                                    "is_legacy": self.is_legacy}.items())
         return f"{self.__class__.__name__}({params})"
+
+
+__all__ = get_module_objects(__name__)

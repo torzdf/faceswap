@@ -175,7 +175,6 @@ class Villain(ModelPlugin):
         ``True`` if the model was originally created in Keras. Default ``False``
     """
     def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        logger.debug(parse_class_init(locals()))
         super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
         self.encoder = Encoder(cfg.lowmem(), self.is_legacy)
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask())

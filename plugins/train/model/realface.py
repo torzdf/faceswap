@@ -271,7 +271,6 @@ class RealFace(ModelPlugin):
         ``True`` if the model was originally created in Keras. Default ``False``
     """
     def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        logger.debug(parse_class_init(locals()))
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")

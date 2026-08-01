@@ -124,7 +124,6 @@ class DFaker(ModelPlugin):
         ``True`` if the model was originally created in Keras. Default ``False``
     """
     def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        logger.debug(parse_class_init(locals()))
         output_size = cfg.output_size()
         if output_size not in (128, 256):
             logger.error("Dfaker output shape should be 128 or 256 px")

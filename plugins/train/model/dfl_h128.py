@@ -119,7 +119,6 @@ class DflH128(ModelPlugin):
         ``True`` if the model was originally created in Keras. Default ``False``
     """
     def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        logger.debug(parse_class_init(locals()))
         super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
         encoder_dim = 256 if cfg.lowmem() else 512
         self.encoder = Encoder(encoder_dim, self.is_legacy)
