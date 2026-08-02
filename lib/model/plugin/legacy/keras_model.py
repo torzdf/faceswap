@@ -571,14 +571,13 @@ class KerasModel:  # pylint:disable=too-few-public-methods
 
         lookup: dict[str, list[str]] = {}
         # Remove normalization weights from the beginning of EffNet
-        # TODO may actually need to prepend norms for legacy torch
         kap_enc_weights = [k for k in weights
                            if k.startswith("layers.functional.layers.functional.layers.")]
 
         for k in reversed(kap_enc_weights):
             if ".layers.normalization.vars." not in k:  # Always at end of encoder list
                 break
-            logger.info("[KerasModel] Removing KApp normalization weights: '%s'", k)
+            logger.debug("[KerasModel] Removing KApp normalization weights: '%s'", k)
             del weights[k]
 
         for k in weights:

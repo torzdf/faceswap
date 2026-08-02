@@ -582,7 +582,9 @@ class KerasToTorch:
         -------
         The keras state file with legacy items fixed for import
         """
-        retval = {k: "none" if v is None else v  # Nonetype used to be allowed
+        state: dict[str, T.Any] = {"plugin_name": self._keras.state.pop("name").replace("_", "-"),
+                                   "plugin_version": 0.5}
+        state |= {k: "none" if v is None else v  # Nonetype used to be allowed
                   for k, v in self._keras.state.items()
                   if k not in ("mixed_precision_layers",  # Dropped
                                "sessions")}  # Handled later
@@ -594,64 +596,62 @@ class KerasToTorch:
             "optimizer": "adam"
         }
         for key, val in legacy_defaults.items():
-            retval[key] = retval.get(key, val)
+            state["config"][key] = state["config"].get(key, val)
 
-        if isinstance(retval.get("lowest_avg_loss"), dict):  # Loss used to be stored per side
-            lowest_avg_loss = sum(T.cast(dict[str, float], retval["lowest_avg_loss"]).values())
+        if isinstance(state.get("lowest_avg_loss"), dict):  # Loss used to be stored per side
+            lowest_avg_loss = sum(T.cast(dict[str, float], state["lowest_avg_loss"]).values())
             logger.debug("[KerasToTorch] Collating legacy lowest_avg_loss from %s to %s",
-                         retval["lowest_avg_loss"], lowest_avg_loss)
-            retval["lowest_avg_loss"] = lowest_avg_loss
+                         state["lowest_avg_loss"], lowest_avg_loss)
+            state["lowest_avg_loss"] = lowest_avg_loss
 
         # Following keys no longer exist or map to new keys
         priors = ["dssim_loss", "mask_type", "mask_type", "l2_reg_term", "clipnorm", "autoclip"]
         new_items = ["loss_function", "learn_mask", "mask_type", "loss_function_2",
                      "gradient_clipping", "clipping"]
         for old, new in zip(priors, new_items):
-            if old not in retval:
+            if old not in state:
                 logger.debug("[KerasToTorch] Legacy item '%s' not in state config. Skipping", old)
                 continue
 
             if old == "dssim_loss":  # dssim_loss > loss_function
-                retval[new] = "ssim" if retval[old] else "mae"
-                del retval[old]
+                state[new] = "ssim" if state[old] else "mae"
+                del state[old]
                 logger.debug("[KerasToTorch] Updated state config from legacy dssim format. New"
-                             "config loss function: '%s'", retval[new])
+                             "config loss function: '%s'", state[new])
                 continue
 
             if (old == "mask_type" and  # Replace removed masks with most similar equivalent
                     new == "mask_type" and
-                    retval[old] in ("facehull", "dfl_full")):
-                old_mask = retval[old]
-                retval[new] = "components"
+                    state[old] in ("facehull", "dfl_full")):
+                old_mask = state[old]
+                state[new] = "components"
                 logger.debug("[KerasToTorch] Updated 'mask_type' from '%s' to '%s' for this model",
-                             old_mask, retval[new])
+                             old_mask, state[new])
 
             if old == "l2_reg_term":  # Replace l2_reg_term with loss_2 func and update  weight
-                retval[new] = "mse"
-                retval["loss_weight_2"] = retval[old]
-                del retval[old]
+                state[new] = "mse"
+                state["loss_weight_2"] = state[old]
+                del state[old]
                 logger.info("[KerasToTorch] Updated state config from legacy 'l2_reg_term' to "
                             "'loss_function_2'")
 
             if old == "clipnorm":  # Replace clipnorm with correct grad clip type and value
-                retval[new] = "norm"
-                del retval[old]
+                state[new] = "norm"
+                del state[old]
                 logger.info("[KerasToTorch] Updated state config from legacy '%s' to  '%s: %s'",
                             old, new, old)
 
             if old == "autoclip":  # Replace autoclip with correct gradient clipping type
-                retval[new] = old
-                del retval[old]
+                state[new] = old
+                del state[old]
                 logger.info("[KerasToTorch] Updated state config from legacy '%s' to '%s: %s'",
                             old, new, old)
 
-        retval["sessions"] = {int(i): {"batch_size" if k == "batchsize" else k: v
-                                       for k, v in s.items() if k != "no_logs"}
-                              for i, s in self._keras.state["sessions"].items()}
-        retval["is_legacy"] = True
-        retval["version"] = 2.0
-        logger.debug("[KerasToTorch] Cleaned state: %s", retval)
-        return retval
+        state["sessions"] = {int(i): {"batch_size" if k == "batchsize" else k: v
+                                      for k, v in s.items() if k != "no_logs"}
+                             for i, s in self._keras.state["sessions"].items()}
+        logger.debug("[KerasToTorch] Cleaned state: %s", state)
+        return state
 
     def _group_weights(self, weights: dict[str, torch.Tensor]
                        ) -> dict[str, dict[str, torch.Tensor]]:
@@ -757,7 +757,7 @@ class KerasToTorch:
         -------
         The imported keras weights for importing into a torch plugin
         """
-        is_clip = (self._state["name"] == "phaze_a" and
+        is_clip = (self._state["plugin_name"] == "phaze-a" and
                    self._state["config"].get("enc_architecture", "").startswith("clipv_"))
         mask_layers = _get_mask_layers({k: v.input_layers
                                         for k, v in self._keras.layers.items()},
@@ -829,7 +829,7 @@ class KerasToTorch:
         # Initialize empty model with loaded state settings
         self._torch.load_state_dict({"state": self._state})
         self._state_dict = {"version": 1.0,
-                            "state": self._state,
+                            "state": self._torch.state.state_dict(),
                             "model": self._map_weights(self._torch.plugin.state_dict(),
                                                        self._keras.weights)}
         if self._keras._optimizer:  # TODO

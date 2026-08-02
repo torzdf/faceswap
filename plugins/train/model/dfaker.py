@@ -30,15 +30,16 @@ class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
     ----------
     input_size
         The pixel input size to the model
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, input_size: int, is_legacy: bool) -> None:
+    def __init__(self, input_size: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = conv(3, 128, 5, stride=2, padding=padding)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
@@ -120,16 +121,17 @@ class DFaker(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+    def __init__(self, num_identities: int = 2, version: float = 1.0) -> None:
         output_size = cfg.output_size()
         if output_size not in (128, 256):
             logger.error("Dfaker output shape should be 128 or 256 px")
             sys.exit(1)
-        super().__init__(num_identities, input_size=output_size // 2, is_legacy=is_legacy)
-        self.encoder = Encoder(self.input_shape[1], self.is_legacy)
+        super().__init__(num_identities, input_size=output_size // 2, version=version)
+        self.encoder = Encoder(self.input_shape[1], version)
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask(), output_size)
                                       for _ in range(num_identities))
 

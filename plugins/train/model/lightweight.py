@@ -29,15 +29,16 @@ class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
 
     Parameters
     ----------
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, is_legacy: bool) -> None:
+    def __init__(self, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = conv(3, 128, 5, stride=2, padding=padding)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
@@ -112,12 +113,13 @@ class Lightweight(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        super().__init__(num_identities, input_size=64, is_legacy=is_legacy)
-        self.encoder = Encoder(self.is_legacy)
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
+        super().__init__(num_identities, input_size=64, version=version)
+        self.encoder = Encoder(version)
         self.decoders = nn.ModuleList(Decoder(cfg_loss.learn_mask())
                                       for _ in range(num_identities))
 

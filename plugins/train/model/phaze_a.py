@@ -122,7 +122,7 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "densenet161": _EncoderInfo(torch_name="densenet161", layer_append=(("nn.relu", None), )),
     "densenet169": _EncoderInfo(torch_name="densenet169", layer_append=(("nn.relu", None), )),
     "densenet201": _EncoderInfo(torch_name="densenet201", layer_append=(("nn.relu", None), )),
-    "efficientnet_b0": _EncoderInfo(torch_name="efficientnet_b0", **_EFF_NET_LEGACY),  # TODO legacy scaling removed. Needs real world test
+    "efficientnet_b0": _EncoderInfo(torch_name="efficientnet_b0", **_EFF_NET_LEGACY),
     "efficientnet_b1": _EncoderInfo(
         torch_name="efficientnet_b1", default_size=240, **_EFF_NET_LEGACY),
     "efficientnet_b2": _EncoderInfo(
@@ -199,7 +199,7 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     }
 
 
-def _calculate_input_size(size: int, scaling: float, is_legacy: bool) -> int:
+def _calculate_input_size(size: int, scaling: float, version: float) -> int:
     """ Calculate the input shape for the model.
 
     Parameters
@@ -208,15 +208,16 @@ def _calculate_input_size(size: int, scaling: float, is_legacy: bool) -> int:
         The full size that the model is built for
     scaling
         The amount of scaling that the full input size should be scaled to
-    is_legacy
-        ``True`` if the model is an imported legacy model (to cover for scaling bug)
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
 
     Returns
     --------
-        The calculated input size, scaled and rounded down to the nearest 16 pixels if scaling is
-        to be applied
+    The calculated input size, scaled and rounded down to the nearest 16 pixels if scaling is to be
+    applied
     """
-    if scaling == 1.0 and not is_legacy:
+    if scaling == 1.0 and version >= 1.0:
         return size
     return int(((size * scaling) // 16) * 16)
 
@@ -281,7 +282,7 @@ def _get_curve(start_y: int,
 
 def _get_normalization(normalization: str,
                        in_channels: int,
-                       is_legacy: bool) -> nn.Module:
+                       version: float) -> nn.Module:
     """ Obtain the selected normalization layer
 
     Parameters
@@ -290,8 +291,9 @@ def _get_normalization(normalization: str,
         The normalization method to obtain
     in_channels
         The number of features that the normalization will apply to
-    is_legacy
-        ``True`` if the model was originally created in Keras.`
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch.
 
     Returns
     -------
@@ -300,21 +302,21 @@ def _get_normalization(normalization: str,
     if normalization == "batch":
         retval = nn.BatchNorm2d(in_channels, eps=0.001, momentum=0.01)
     elif normalization == "group":
-        if is_legacy:
+        if version < 1.0:
             groups = 32  # Was hard-coded for legacy models
         elif in_channels % 16 == 0:
             groups = max(1, in_channels // 16)
         else:  # We always ensure that filters are divisible by 8 in _get_curve
             groups = max(1, in_channels // 8)
         retval = nn.GroupNorm(groups, in_channels, eps=1e-6)
-    elif is_legacy and normalization == "instance":
+    elif version < 1.0 and normalization == "instance":
         retval = InstanceNormLegacy()
     elif normalization == "instance":
         retval = nn.InstanceNorm2d(in_channels, affine=True)
     elif normalization == "layer":
-        retval = ChannelLayerNorm(in_channels, eps=1e-3 if is_legacy else 1e-5)
+        retval = ChannelLayerNorm(in_channels, eps=1e-3 if version < 1.0 else 1e-5)
     elif normalization == "rms":
-        retval = ChannelRMSNorm(in_channels, eps=1e-8 if is_legacy else None)
+        retval = ChannelRMSNorm(in_channels, eps=1e-8 if version < 1.0 else None)
     else:
         raise FaceswapError(f"Invalid bottleneck_norm '{normalization}'. Choose from: "
                             "['batch', 'group', 'instance', 'layer', 'rms']")
@@ -352,7 +354,7 @@ def _get_upscale_layer(method: UpsampleT,
                        in_channels: int,
                        out_channels: int,
                        upsamples: int = 2,
-                       is_legacy: bool = False) -> nn.Module:
+                       version: float = 1.0) -> nn.Module:
     """ Obtain an instance of the requested upscale method.
 
     Parameters
@@ -366,13 +368,15 @@ def _get_upscale_layer(method: UpsampleT,
         The number of output channels. Used for all methods other than upsample2d
     upsamples
         The scale factor to use. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
 
     Returns
     -------
     The selected configured upscale layer
     """
+    is_legacy = version < 1.0
     if method == "upsample2d" and is_legacy:
         interpolation = "bilinear" if upsamples > 2 else "nearest"  # Legacy bug
         retval = UpSampling2dLegacy(upsamples, interpolation=interpolation)
@@ -410,10 +414,11 @@ class _EncoderFaceswap(nn.Sequential):
 
     Parameters
     ----------
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, is_legacy: bool) -> None:
+    def __init__(self, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -440,8 +445,8 @@ class _EncoderFaceswap(nn.Sequential):
                 if i != depth - 1:
                     self.add_module(f"pool{i + 2}", nn.MaxPool2d(2))
         else:
-            conv = Conv2dLegacy if is_legacy else nn.Conv2d
-            padding = "same" if is_legacy else 2
+            conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+            padding = "same" if version < 1.0 else 2
             for i in range(depth):
                 self.add_module(f"conv{i + 1}",
                                 conv(channels[i], channels[i + 1], 5, stride=2, padding=padding))
@@ -455,12 +460,11 @@ class Bottleneck(nn.Sequential):
     ----------
     input_shape
         The input shape to the bottleneck, excluding batch dimension
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self,
-                 input_shape: tuple[int, int, int],
-                 is_legacy: bool) -> None:
+    def __init__(self, input_shape: tuple[int, int, int], version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -469,7 +473,7 @@ class Bottleneck(nn.Sequential):
         normalization = cfg.bottleneck_norm()
 
         if normalization and normalization != "none":
-            self.norm = _get_normalization(normalization, input_shape[0], is_legacy)
+            self.norm = _get_normalization(normalization, input_shape[0], version)
         if len(input_shape) > 1 and bottleneck in ("dense", "flatten"):
             self.flat = nn.Flatten()
 
@@ -498,7 +502,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
     """
     _in_channels = -1
     _reshape_shape: tuple[int, int, int] | None = None
-    is_legacy: bool | None = None
+    version: float = 0.0
     input_shape: tuple[int, int, int] | None = None
     _filters: list[int] = []
 
@@ -517,7 +521,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         input_shape
             The shape of the Tensor feeding the Upscale Blocks (output from Inter)
         """
-        if not cls.is_legacy:
+        if cls.version >= 1.0:
             # Legacy used to scale filters for mismatched fc_dims and output size. This leads to
             # awkward reshaping between fc_output and decoder input. Now we just set the
             # dimensional space correctly when creating the FC layers
@@ -556,7 +560,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         logger.debug("[UpscaleBlocks] Set filters: %s)", cls._filters)
 
     @classmethod
-    def configure(cls, input_shape: tuple[int, int, int], is_legacy: bool) -> None:
+    def configure(cls, input_shape: tuple[int, int, int], version: float) -> None:
         """ Configure the upscale getter
 
         Parameters
@@ -564,15 +568,16 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         input_shape
             The shape of the Tensor feeding the Upscale Blocks (output from Inter or output from
             each fc if upscales in fc)
-        is_legacy
-            ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch.
         """
-        if cls.input_shape is not None and cls.is_legacy is not None:
+        if cls.input_shape is not None and not cls.version:
             return
-        logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, is_legacy: %s)",
-                     input_shape, is_legacy)
+        logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, version: %s)",
+                     input_shape, version)
 
-        cls.is_legacy = is_legacy
+        cls.version = version
         cls._calculate_reshape(input_shape)
         cls._calculate_filters(input_shape)
 
@@ -627,13 +632,13 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         -------
         The sequential model for an upscale layer tensor from the upscale block
         """
-        assert self.is_legacy is not None
+        assert self.version
 
         norm = cfg.dec_norm()
         res_blocks = cfg.dec_res_blocks()
         method = T.cast(UpsampleT, cfg.dec_upscale_method())
         do_act = cfg.dec_upscale_method().lower() in ("subpixel", "upscale_fast", "upscale_hybrid")
-        if self.is_legacy and cfg.dec_upscale_method().lower() == "resize_images":
+        if self.version < 1.0 and cfg.dec_upscale_method().lower() == "resize_images":
             do_act = True  # Legacy bug. Extra leaky-relu
 
         filters_ = self._filters[index]
@@ -647,14 +652,12 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
                                 in_channels,
                                 filters_,
                                 upsamples=2,
-                                is_legacy=self.is_legacy)
+                                version=self.version)
         layers[method] = up
         if not is_mask and cfg.dec_gaussian():
             layers["noise"] = GaussianNoise(1.0)
         if norm and norm != "none":
-            layers["norm"] = _get_normalization(norm,
-                                                filters_,
-                                                is_legacy=self.is_legacy)
+            layers["norm"] = _get_normalization(norm, filters_, self.version)
 
         skip_res = cfg.dec_skip_last_residual() and index == len(self._filters) - 1
         if not is_mask and res_blocks and not skip_res:
@@ -725,10 +728,11 @@ class Encoder(nn.Sequential):
     ----------
     input_size
         The pixel dimension of the encoder input
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default: ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch
     """
-    def __init__(self, input_size: int, is_legacy: bool = False) -> None:
+    def __init__(self, input_size: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -739,19 +743,19 @@ class Encoder(nn.Sequential):
         self._name = snake_to_camel_case(arch)
         mod_info = _MODEL_MAPPING[arch]
 
-        if is_legacy:  # No need to load weights if we are bringing in a legacy trained model
+        if version < 1.0:  # No need to load weights if we are bringing in a legacy trained model
             load_imagenet_weights = False
         if load_imagenet_weights and not mod_info.torch_name:
             logger.warning("Loading ImageNet weights is not supported for '%s'. "
                            "Weights will be randomly initialized", self._name)
             load_imagenet_weights = False
 
-        self.legacy_scaling = mod_info.legacy_scaling if is_legacy else (0, 1)
+        self.legacy_scaling = mod_info.legacy_scaling if version < 1.0 else (0, 1)
         setattr(self,
                 self._name,
-                self._get_encoder(mod_info, load_imagenet_weights, input_size, is_legacy))
+                self._get_encoder(mod_info, load_imagenet_weights, input_size, version))
         out_shape = self._get_output_shape(input_size)
-        self.bottleneck = Bottleneck(out_shape, is_legacy) if inc_bottleneck else None
+        self.bottleneck = Bottleneck(out_shape, version) if inc_bottleneck else None
         self.output_shape = out_shape if self.bottleneck is None else self.bottleneck.output_shape
         """ The output shape from the encoder excluding batch dimension """
 
@@ -764,7 +768,7 @@ class Encoder(nn.Sequential):
                       mod_info: _EncoderInfo,
                       load_weights: bool,
                       input_size: int,
-                      is_legacy: bool
+                      version: float
                       ) -> nn.Module:
         """ Load an encoder backbone defined within the Faceswap Repo or in TorchVision """
         if mod_info.torch_name == "inception_v3":
@@ -779,9 +783,9 @@ class Encoder(nn.Sequential):
             kwargs["input_size"] = input_size
         retval: nn.Module = getattr(module, name)(**kwargs)
 
-        if is_legacy and (mod_info.legacy_same_pad
-                          or mod_info.legacy_bn_eps is not None
-                          or mod_info.legacy_bn_momentum is not None):
+        if version < 1.0 and (mod_info.legacy_same_pad
+                              or mod_info.legacy_bn_eps is not None
+                              or mod_info.legacy_bn_momentum is not None):
             patch_legacy(retval,  # Patch the Torch module to be compatible with keras version
                          same_pad=mod_info.legacy_same_pad,
                          bn_eps=mod_info.legacy_bn_eps,
@@ -823,15 +827,15 @@ class Encoder(nn.Sequential):
                      mod_info: _EncoderInfo,
                      load_weights: bool,
                      input_size: int,
-                     is_legacy: bool) -> nn.Module:
+                     version: float) -> nn.Module:
         """ Obtain the torch Module for the specified encoder architecture """
         logger.debug("[Encoder] Loading encoder: '%s'", mod_info)
         if mod_info.torch_name:
-            backbone = self._get_backbone(mod_info, load_weights, input_size, is_legacy)
+            backbone = self._get_backbone(mod_info, load_weights, input_size, version)
             retval = self._select_layers(backbone, mod_info)
             return retval
 
-        return _EncoderFaceswap(is_legacy)
+        return _EncoderFaceswap(version)
 
     def _get_output_shape(self, input_size: int) -> tuple[int, int, int]:
         """ Run a dummy tensor through the model to get the output shape """
@@ -880,8 +884,9 @@ class FullyConnected(nn.Module):
         How many upsamples to apply at the end of the FC layer
     upscales
         The number of decoder upscales that should be placed within the fully connected block
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch.
     """
     def __init__(self,  # pylint:disable=too-many-positional-arguments,too-many-arguments,too-many-locals  # noqa:E501
                  input_shape: tuple[int, int, int] | tuple[int],
@@ -889,7 +894,7 @@ class FullyConnected(nn.Module):
                  feats: list[int],
                  upsample_filters: int,
                  upscales: int,
-                 is_legacy: bool) -> None:
+                 version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -902,7 +907,7 @@ class FullyConnected(nn.Module):
 
         if inc_bottleneck:
             assert len(input_shape) == 3
-            self.bottleneck = Bottleneck(input_shape, is_legacy)
+            self.bottleneck = Bottleneck(input_shape, version)
             feats = [self.bottleneck.output_shape[0]] + feats
         else:
             self.bottleneck = None
@@ -917,14 +922,14 @@ class FullyConnected(nn.Module):
         self.reshape = Reshape((dst_shape), is_contiguous=True)
 
         for k, v in self._get_upsamples(
-                upsampler, upsamples, dst_shape[0], upsample_filters, is_legacy
+                upsampler, upsamples, dst_shape[0], upsample_filters, version
                 ).items():
             self.add_module(k, v)
 
         self._up_layers: dict[str, nn.Sequential] = {}
         if upscales:
             for k, v in UPSCALE_GETTER((0, upscales)).items():
-                v = self._fix_legacy_upscale(v) if is_legacy else v
+                v = self._fix_legacy_upscale(v) if version < 1.0 else v
                 self.add_module(k, v)
                 self._up_layers[k] = v
 
@@ -933,26 +938,26 @@ class FullyConnected(nn.Module):
                        upsamples: int,
                        in_channels: int,
                        out_channels: int,
-                       is_legacy: bool) -> dict[str, nn.Module]:
+                       version: float) -> dict[str, nn.Module]:
         """ Obtain the upscale layers if requested """
         logger.debug("[FullyConnected] Getting upsamples: %s",
                      {k: v for k, v in locals().items() if k != "self"})
         retval = {}
         if not upsamples:
-            if is_legacy and upsampler == "upsample2d":  # Bug in keras code
+            if version < 1.0 and upsampler == "upsample2d":  # Bug in keras code
                 retval["act"] = nn.LeakyReLU(0.1, inplace=True)
             return retval
 
         if upsampler == "upsample2d" and upsamples > 1:
             retval[upsampler] = _get_upscale_layer(
-                upsampler, in_channels, out_channels, 2 ** upsamples, is_legacy=is_legacy
+                upsampler, in_channels, out_channels, 2 ** upsamples, version
                 )
         else:
             for i in range(upsamples):
                 lbl = str(i + 1) if upsamples > 1 else ''
                 in_c = in_channels if i == 0 else out_channels
                 retval[f"{upsampler}{lbl}"] = _get_upscale_layer(
-                    upsampler, in_c, out_channels, 2, is_legacy=is_legacy
+                    upsampler, in_c, out_channels, 2, version
                     )
         if upsampler == "upsample2d":
             retval["act"] = nn.LeakyReLU(0.1, inplace=True)
@@ -1012,8 +1017,9 @@ class Inter(nn.Module):
         shared data into identity 0's FC layer
     upscales
         The number of decoder upscales to place in the FC layers
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch.
     shared_inter
         The shared intermediate layer to use if required and not the first Inter instance being
         created otherwise ``None``
@@ -1022,7 +1028,7 @@ class Inter(nn.Module):
                  input_shape: tuple[int, int, int] | tuple[int],
                  shared: T.Literal["none", "full", "half"],
                  upscales: int,
-                 is_legacy: bool,
+                 version: float,
                  shared_inter: FullyConnected | None = None) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
@@ -1034,6 +1040,7 @@ class Inter(nn.Module):
         upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
         upsamples = cfg.fc_upsamples()
 
+        is_legacy = version < 1.0
         # Legacy used to just scale filters for mismatched fc_dims and output size. This leads to
         # awkward reshaping between fc_output and decoder input. Now we set the dimensional space
         # correctly staight out of the FC layers
@@ -1061,7 +1068,7 @@ class Inter(nn.Module):
                                                        dim)
         out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
                      else fc_out_shape)
-        UPSCALE_GETTER.configure(fc_out_shape if upscales else out_shape, is_legacy)
+        UPSCALE_GETTER.configure(fc_out_shape if upscales else out_shape, version)
         out_channels = out_shape[0] if not upscales else UPSCALE_GETTER._filters[upscales - 1]
         self.out_channels = out_channels * 2 if shared != "none" else out_channels
         """ The number of output channels from the inter layer """
@@ -1071,7 +1078,7 @@ class Inter(nn.Module):
                    filters,
                    upsample_filters,
                    upscales,
-                   is_legacy)
+                   version)
 
         self.fc = FullyConnected(*fc_args)
         self.shared = shared_inter
@@ -1153,10 +1160,11 @@ class InterGBlock(nn.Sequential):
     ----------
     input_shape
         The input shape to the linear layers feeding the G-Block
-    is_legacy
-        ``True`` if the model was created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch.
     """
-    def __init__(self, input_shape: tuple[int, int, int] | tuple[int], is_legacy: bool) -> None:
+    def __init__(self, input_shape: tuple[int, int, int] | tuple[int], version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -1170,7 +1178,7 @@ class InterGBlock(nn.Sequential):
         in_channels = input_shape[0]
         if inc_bottleneck:
             assert len(input_shape) == 3
-            bottleneck = Bottleneck(input_shape, is_legacy)
+            bottleneck = Bottleneck(input_shape, version)
             self.add_module("bottleneck", bottleneck)
             in_channels = bottleneck.output_shape[0]
 
@@ -1310,10 +1318,11 @@ class PhazeA(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
         if cfg.output_size() % 16 != 0:
             raise FaceswapError("Phaze-A output shape must be a multiple of 16")
 
@@ -1323,16 +1332,16 @@ class PhazeA(ModelPlugin):
         self._split_gblock = cfg.split_gblock()
         self._split_decoders = cfg.split_decoders()
 
-        input_size = self._get_input_size(is_legacy)
+        input_size = self._get_input_size(version)
         is_bgr = cfg.enc_architecture() == "fs_original" or (
-            is_legacy and _MODEL_MAPPING[cfg.enc_architecture()].legacy_bgr
+            version < 1.0 and _MODEL_MAPPING[cfg.enc_architecture()].legacy_bgr
             )
         super().__init__(num_identities,
                          input_size,
-                         is_rgb=not is_bgr,
-                         is_legacy=is_legacy)
+                         version=version,
+                         is_rgb=not is_bgr)
 
-        self.encoder = Encoder(self.input_shape[1], self.is_legacy)
+        self.encoder = Encoder(self.input_shape[1], version)
         self.inter = self._build_inter()
         self.inter_gblock, self.gblock = self._build_gblock()
         self.decoder = self._build_decoder()
@@ -1348,7 +1357,7 @@ class PhazeA(ModelPlugin):
         """ Valid layers to load based on configured options """
         return self._select_real_layers(cfg.load_layers())
 
-    def _get_input_size(self, is_legacy: bool) -> int:
+    def _get_input_size(self, version: float) -> int:
         """ Obtain the input shape for the model.
 
         Input shape is calculated from the selected Encoder's input size, scaled to the user
@@ -1368,7 +1377,7 @@ class PhazeA(ModelPlugin):
         default_size = _MODEL_MAPPING[arch].default_size
         scaling = cfg.enc_scaling() / 100
         min_size = _MODEL_MAPPING[arch].min_size
-        size = int(max(min_size, _calculate_input_size(default_size, scaling, is_legacy)))
+        size = int(max(min_size, _calculate_input_size(default_size, scaling, version)))
         if cfg.enc_load_weights() and enforce_size and scaling != 1.0:
             logger.warning("%s requires input size to be %spx when loading imagenet weights. "
                            "Adjusting input size from %spx to %spx",
@@ -1399,10 +1408,10 @@ class PhazeA(ModelPlugin):
         if self.num_identities > 2 and shared == "half":
             raise FaceswapError("half shared FC layer is not compatible with more than 2"
                                 "identities")
-        if not self.is_legacy and not self._split_fc and shared != "none":
+        if self.version >= 1.0 and not self._split_fc and shared != "none":
             raise FaceswapError("Shared FC layer is only compatible with split FC layers")
 
-        inter_args = (self.encoder.output_shape, shared, upscales_in_fc, self.is_legacy)
+        inter_args = (self.encoder.output_shape, shared, upscales_in_fc, self.version)
 
         inter0 = Inter(*inter_args)
 
@@ -1420,7 +1429,7 @@ class PhazeA(ModelPlugin):
         if not cfg.enable_gblock():
             return None, None
 
-        inter = InterGBlock(self.encoder.output_shape, self.is_legacy)
+        inter = InterGBlock(self.encoder.output_shape, self.version)
         content_channels = (T.cast(int, self.inter[0].out_channels)
                             if isinstance(self.inter, nn.ModuleList)
                             else self.inter.out_channels)

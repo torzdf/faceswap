@@ -100,13 +100,15 @@ class FaceswapModel:
         if self._plugin is not None:
             raise RuntimeError(f"Model plugin '{self.name}' has already been loaded")
 
-        is_legacy = False  # TO DO VERSIONING
+        plugin_kwargs: dict[str, T.Any] = {"num_identities": self._num_identities}
         if "state" in state_dict:
-            is_legacy = "version" not in state_dict
-            self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
             logger.info("%s Loading plugin from saved config", self._name)
+            self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
+            plugin_kwargs["version"] = self.state.plugin_version
 
-        self._plugin = PluginLoader.get_model(self.name)(self._num_identities, is_legacy=is_legacy)
+        self._plugin = PluginLoader.get_model(self.name)(**plugin_kwargs)
+        if "state" not in state_dict:
+            self.state.set_plugin_version(self._plugin.version)
 
         if "model" in state_dict:
             logger.debug("%s Loading weights from saved model", self._name)

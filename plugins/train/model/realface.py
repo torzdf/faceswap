@@ -37,17 +37,18 @@ class Encoder(nn.Sequential):
         Encoder Convolution Layer Complexity
     num_downscale
         The number of downscale blocks
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, complexity: int, num_downscale: int = 4, is_legacy: bool = False) -> None:
+    def __init__(self, complexity: int, num_downscale: int = 4, version: float = 1.0) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
         channels = [3] + [complexity * 2 ** i for i in range(num_downscale)]
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         for i in range(num_downscale - 1):
             self.add_module(f"conv{i + 1}", conv(channels[i],
@@ -267,10 +268,11 @@ class RealFace(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")
@@ -283,11 +285,11 @@ class RealFace(ModelPlugin):
         dense_width, num_upscale = self._get_dense_width_upscaler_numbers(input_size,
                                                                           downscale_ratio)
         dense_filters = (int(1024 - (dense_width - 4) * 64) // 16) * 16
-        super().__init__(num_identities, input_size=input_size, is_legacy=is_legacy)
+        super().__init__(num_identities, input_size=input_size, version=version)
 
         self.encoder = Encoder(cfg.complexity_encoder(),
                                num_downscale=num_downscale,
-                               is_legacy=self.is_legacy)
+                               version=version)
 
         dec_input_filters = cfg.complexity_encoder() * 2 ** (num_downscale - 1)
         dec_upscale_width = cfg.input_size() // downscale_ratio

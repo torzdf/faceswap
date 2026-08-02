@@ -32,14 +32,15 @@ class EncoderDF(nn.Sequential):  # pylint:disable=too-many-instance-attributes
         The number of dimensions per encoder channel
     ae_dims
         The number of dimensions for the latent space
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
     def __init__(self,
                  input_shape: tuple[int, int, int],
                  encoder_dim: int,
                  ae_dims: int,
-                 is_legacy: bool) -> None:
+                 version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
@@ -47,8 +48,8 @@ class EncoderDF(nn.Sequential):  # pylint:disable=too-many-instance-attributes
         dims = channels * encoder_dim
         lowest_res = res // 16
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = conv(channels, dims, 5, stride=2, padding=padding)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
@@ -75,21 +76,22 @@ class EncoderLIAE(nn.Sequential):
         The (C, H, W) input shape to the model
     encoder_dim
         The number of dimensions per encoder channel
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
     def __init__(self,
                  input_shape: tuple[int, int, int],
                  encoder_dim: int,
-                 is_legacy: bool) -> None:
+                 version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
         channels = input_shape[0]
         dims = channels * encoder_dim
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = conv(channels, dims, 5, stride=2, padding=padding)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
@@ -217,14 +219,15 @@ class DFLSae(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")
-        super().__init__(num_identities, input_size=cfg.input_size(), is_legacy=is_legacy)
+        super().__init__(num_identities, input_size=cfg.input_size(), version=version)
         self.architecture = cfg.architecture().lower()
 
         enc_dim = cfg.encoder_dims()
@@ -236,12 +239,12 @@ class DFLSae(ModelPlugin):
         dec_in = ae_dims if self.architecture == "df" else ae_dims * 4
 
         if self.architecture == "df":
-            self.encoder = EncoderDF(self.input_shape, enc_dim, ae_dims, self.is_legacy)
+            self.encoder = EncoderDF(self.input_shape, enc_dim, ae_dims, version)
             self.decoders = nn.ModuleList(Decoder(dec_in, cfg_loss.learn_mask(), dec_dim, ms_count)
                                           for _ in range(self.num_identities))
         else:
             int_shape = (enc_dim * 3 * 8, self.input_shape[1] // 16, self.input_shape[1] // 16)
-            self.encoder = EncoderLIAE(self.input_shape, enc_dim, self.is_legacy)
+            self.encoder = EncoderLIAE(self.input_shape, enc_dim, version)
             self.inter_both = InterLIAE(int_shape, ae_dims)
             self.inter_side = InterLIAE(int_shape, ae_dims)
             self.decoder = Decoder(dec_in, cfg_loss.learn_mask(), dec_dim, ms_count)

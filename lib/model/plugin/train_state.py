@@ -18,6 +18,10 @@ from plugins.train import train_config as cfg
 logger = logging.getLogger(__name__)
 
 
+_VERSION = 1.0
+""" The current state_dict version """
+
+
 class _Config:
     """ Manages the updatable config items
 
@@ -154,7 +158,7 @@ class Session:
     """ Number of iterations processed for the session """
 
 
-class State:
+class State:  # pylint:disable=too-many-instance-attributes
     """ Holds information about the training state of the model
 
     Parameters
@@ -170,6 +174,7 @@ class State:
         self._repr = (f"{self.__class__.__name__}(plugin_path={repr(plugin_path)}, "
                       f"batch_size={batch_size}")
 
+        self.plugin_name = plugin_path.rsplit(".")[-1].replace("_", "-")
         self._batch_size = batch_size
         self.lr_finder = -1.0
         """ The value discovered from the learning rate finder. -1 if no value stored """
@@ -179,8 +184,7 @@ class State:
         self.learning_rate_from_finder: bool = False
         """ bool. Set to ``True`` if learning rate is being read from the finder rather than user
         config """
-        self.is_legacy = False
-        """ ``True`` if the model was originally created in Keras """
+        self._plugin_version = 0.0
         self._config = _Config(plugin_path)
         self._total_steps = 0
         self._step_called = False
@@ -188,6 +192,12 @@ class State:
     def __repr__(self) -> str:
         """ Cleaner logging """
         return self._repr
+
+    @property
+    def plugin_version(self) -> float:
+        """ The version of the plugin that this state file corresponds to in use """
+        assert self._plugin_version, "Plugin version has not been set"
+        return self._plugin_version
 
     @property
     def session_id(self) -> int:
@@ -210,6 +220,17 @@ class State:
             return 0
         return self._sessions[self.session_id].iterations
 
+    def set_plugin_version(self, version: float) -> None:
+        """ Set the plugin version for a newly initialized model
+
+        Parameters
+        ----------
+        version
+            The version of the plugin that has been loaded
+        """
+        logger.debug("[State] Setting plugin_version: %s", version)
+        self._plugin_version = version
+
     def load_state_dict(self, state_dict: dict[str, T.Any]):
         """ Load the contents of the state_dict into this state object
 
@@ -218,24 +239,25 @@ class State:
         state_dict
             The State state dict for the running Faceswap model
         """
+        self._plugin_version = state_dict.get("plugin_version", 0.0)
         self._total_steps = state_dict.get("iterations", 0)
-        self._sessions = {k: Session(**v) for k, v in state_dict.get("sessions", {}).items()}
         self.lowest_avg_loss = state_dict.get("lowest_avg_loss", 0.0)
         self.lr_finder = state_dict.get("lr_finder", -1.0)
-        self.is_legacy = state_dict.get("is_legacy", False)
+        self._sessions = {k: Session(**v) for k, v in state_dict.get("sessions", {}).items()}
         self._config.load_state_dict(state_dict.get("config", {}))
         logger.debug("[State] Loaded state_dict: %s", state_dict)
 
     def state_dict(self) -> dict[str, T.Any]:
         """ This State object's state_dict """
-        return {"iterations": self._total_steps,
+        return {"plugin_name": self.plugin_name,
+                "plugin_version": self.plugin_version,
+                "iterations": self._total_steps,
                 "lowest_avg_loss": self.lowest_avg_loss,
                 "lr_finder": self.lr_finder,
                 "sessions": {k: asdict(v) for k, v in self._sessions.items()
                              if v.iterations > 0},
                 "config": self._config.state_dict(),
-                "is_legacy": self.is_legacy,
-                "version": 2.0}
+                "version": _VERSION}
 
     def step(self) -> None:
         """ Increment the session and total steps

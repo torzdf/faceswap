@@ -36,29 +36,30 @@ class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
         The dimensions to reshape the bottleneck
     input_size
         The pixel input dimension to the encoder
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
     def __init__(self,
                  complexity: int,
                  bottleneck: int,
                  dense_dim: int,
                  input_size: int,
-                 is_legacy: bool) -> None:
+                 version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         dense_width = input_size // 16
         half_width = dense_width // 2
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = conv(3, complexity, 5, stride=2, padding=padding)
-        self.norm1 = self._get_instance_norm(is_legacy, complexity)
+        self.norm1 = self._get_instance_norm(version, complexity)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
 
         self.conv2 = conv(complexity, complexity * 2, 5, stride=2, padding=padding)
-        self.norm2 = self._get_instance_norm(is_legacy, complexity * 2)
+        self.norm2 = self._get_instance_norm(version, complexity * 2)
         self.act2 = nn.LeakyReLU(0.1, inplace=True)
 
         self.conv3 = conv(complexity * 2, complexity * 4, 5, stride=2, padding=padding)
@@ -76,10 +77,10 @@ class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
         self.reshape = Reshape((dense_dim, dense_width, dense_width), is_contiguous=True)
 
     @classmethod
-    def _get_instance_norm(cls, is_legacy: bool, num_feats: int
+    def _get_instance_norm(cls, version: float, num_feats: int
                            ) -> InstanceNormLegacy | nn.InstanceNorm2d:
         """ Get the Torch or Legacy Instance Normalization layer """
-        if is_legacy:
+        if version < 1.0:
             return InstanceNormLegacy()
         return nn.InstanceNorm2d(num_feats, affine=True)
 
@@ -238,21 +239,22 @@ class Unbalanced(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")
-        super().__init__(num_identities, input_size=cfg.input_size(), is_legacy=is_legacy)
+        super().__init__(num_identities, input_size=cfg.input_size(), version=version)
 
         dense_dim = 384 if cfg.lowmem() else 512
         self.encoder = Encoder(128 if cfg.lowmem() else cfg.complexity_encoder(),
                                512 if cfg.lowmem() else cfg.nodes(),
                                dense_dim,
                                self.input_shape[-1],
-                               self.is_legacy)
+                               version)
         self.decoder_a = DecoderA(dense_dim,
                                   320 if cfg.lowmem() else cfg.complexity_decoder_a(),
                                   cfg_loss.learn_mask())

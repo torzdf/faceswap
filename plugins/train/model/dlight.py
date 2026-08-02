@@ -38,16 +38,17 @@ class Encoder(nn.Module):  # pylint:disable=too-many-instance-attributes
         The base filters to use for each convolution
     encoder_dim
         The bottleneck size
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, encoder_filters: int, encoder_dim: int, is_legacy: bool) -> None:
+    def __init__(self, encoder_filters: int, encoder_dim: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         in_chan = 3
         out_chan = encoder_filters // 2
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = nn.Sequential(conv(in_chan, out_chan, 5, stride=2, padding=padding),
                                    nn.LeakyReLU(0.1, inplace=True))
@@ -141,16 +142,19 @@ class DecoderA(nn.Module):  # pylint:disable=too-many-instance-attributes
         ``True`` to set a secondary task to learn a mask
     upscale_ratio
         The amount to upscale the input to the layer
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, learn_mask: bool, upscale_ratio: int, is_legacy: bool) -> None:
+    def __init__(self, learn_mask: bool, upscale_ratio: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
 
         dec_a_complexity = 256
         mask_complexity = 128
+
+        is_legacy = version < 1.0
 
         if is_legacy:
             self.up1 = UpSampling2dLegacy(size=upscale_ratio, interpolation="bilinear")
@@ -229,16 +233,18 @@ class DecoderB(nn.Module):  # pylint:disable=too-many-instance-attributes
         ``True`` to set a secondary task to learn a mask
     upscale_ratio
         The amount to upscale the input to the layer
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, learn_mask: bool, upscale_ratio: int, is_legacy: bool) -> None:
+    def __init__(self, learn_mask: bool, upscale_ratio: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
 
         dec_b_complexity = 512
         mask_complexity = 128
+        is_legacy = version < 1.0
 
         self.up1 = Upscale2xBlock(1024,
                                   dec_b_complexity,
@@ -353,16 +359,18 @@ class DecoderBFast(nn.Module):  # pylint:disable=too-many-instance-attributes
         ``True`` to set a secondary task to learn a mask
     upscale_ratio
         The amount to upscale the input to the layer
-    is_legacy
-        ``True`` if the model was originally created in Keras
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, learn_mask: bool, upscale_ratio: int, is_legacy: bool) -> None:
+    def __init__(self, learn_mask: bool, upscale_ratio: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self.learn_mask = learn_mask
 
         dec_b_complexity = 512
         mask_complexity = 128
+        is_legacy = version < 1.0
 
         self.up1 = UpscaleSubpixel(1024, dec_b_complexity, scale_factor=upscale_ratio)
         self.up2 = Upscale2xBlock(dec_b_complexity,
@@ -439,14 +447,15 @@ class Dlight(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
         if num_identities != 2:
             raise FaceswapError(f"{self.__class__.__name__} only supports 2 identities. Reduce "
                                 "the number of identities or choose a different model")
-        super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
+        super().__init__(num_identities, input_size=128, version=version)
 
         learn_mask = cfg_loss.learn_mask()
         features = {"lowmem": 0, "fair": 1, "best": 2}[cfg.features()]
@@ -465,9 +474,9 @@ class Dlight(ModelPlugin):
                        2: 1536 + bonum_fortunam}[features]
 
         dec_b = DecoderB if details > 0 else DecoderBFast
-        self.encoder = Encoder(encoder_filters, encoder_dim, self.is_legacy)
-        self.decoders = nn.ModuleList((DecoderA(learn_mask, upscale_ratio, self.is_legacy),
-                                       dec_b(learn_mask, upscale_ratio, self.is_legacy)))
+        self.encoder = Encoder(encoder_filters, encoder_dim, version)
+        self.decoders = nn.ModuleList((DecoderA(learn_mask, upscale_ratio, version),
+                                       dec_b(learn_mask, upscale_ratio, version)))
 
     def forward(self, inputs: tuple[torch.Tensor, ...]) -> tuple[tuple[torch.Tensor, ...]]:
         """ Forward pass through the Dlight model

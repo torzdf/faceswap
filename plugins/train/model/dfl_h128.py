@@ -28,15 +28,16 @@ class Encoder(nn.Sequential):  # pylint:disable=too-many-instance-attributes
     ----------
     encoder_dim
         The size of the bottleneck and subsequent multiplier
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, encoder_dim: int, is_legacy: bool) -> None:
+    def __init__(self, encoder_dim: int, version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
 
-        conv = Conv2dLegacy if is_legacy else nn.Conv2d
-        padding = "same" if is_legacy else 2
+        conv = Conv2dLegacy if version < 1.0 else nn.Conv2d
+        padding = "same" if version < 1.0 else 2
 
         self.conv1 = conv(3, 128, 5, stride=2, padding=padding)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
@@ -115,13 +116,14 @@ class DflH128(ModelPlugin):
     ----------
     num_identities
         The number of identities that the model is to be trained on. Default: 2
-    is_legacy
-        ``True`` if the model was originally created in Keras. Default ``False``
+    version
+        The plugin version. Versions less than 1.0 means that the model was created in Keras.
+        Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, is_legacy: bool = False) -> None:
-        super().__init__(num_identities, input_size=128, is_legacy=is_legacy)
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
+        super().__init__(num_identities, input_size=128, version=version)
         encoder_dim = 256 if cfg.lowmem() else 512
-        self.encoder = Encoder(encoder_dim, self.is_legacy)
+        self.encoder = Encoder(encoder_dim, version)
         self.decoders = nn.ModuleList(Decoder(encoder_dim, cfg_loss.learn_mask())
                                       for _ in range(num_identities))
 
