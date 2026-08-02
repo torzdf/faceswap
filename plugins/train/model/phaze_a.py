@@ -1081,11 +1081,15 @@ class Inter(nn.Module):
                    version)
 
         self.fc = FullyConnected(*fc_args)
-        self.shared = shared_inter
-        if self.shared is None and shared == "full":
+        # TODO: I do not like this. Find way to make all shared sit in one module
+        if shared_inter is not None:
+            object.__setattr__(self, "shared", shared_inter)  # Prevent re-registering
+        elif shared == "full":
             self.shared = FullyConnected(*fc_args)
-        if self.shared is None and shared == "half":
+        elif shared == "half":
             self.shared = self.fc
+        else:
+            self.shared = None
 
     @classmethod
     def _scale_filters(cls, original_filters: int, dim: int, output_size: int) -> int:
@@ -1419,7 +1423,7 @@ class PhazeA(ModelPlugin):
             retval = inter0
         else:
             retval = nn.ModuleList([inter0] + [Inter(*inter_args, shared_inter=inter0.shared)
-                                   for _ in range(self.num_identities - 1)])
+                                               for _ in range(self.num_identities - 1)])
         if shared != "none" and upscales_in_fc:
             UPSCALE_GETTER.update_filters(upscales_in_fc)
         return retval
