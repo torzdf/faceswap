@@ -934,9 +934,10 @@ class FullyConnected(nn.Module):
                 ).items():
             self.add_module(k, v)
 
-        out_channels = (dst_shape[0] if not upsamples or upsampler == "upsampling2d"
+        out_channels = (dst_shape[0] if not upsamples or upsampler == "upsample2d"
                         else upsample_filters)
-        self.out_shape = (out_channels, dim * (upsamples + 1), dim * (upsamples + 1))
+        out_dim = dim * 2 ** upsamples
+        self.out_shape = (out_channels, out_dim, out_dim)
 
         self._up_layers: dict[str, nn.Sequential] = {}
 
