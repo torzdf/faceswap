@@ -500,45 +500,16 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
     For this reason, the Upscale Filter list is created early for reference by either the Decoder
     or Fully Connected models
     """
-    _in_channels = -1
     _reshape_shape: tuple[int, int, int] | None = None
     version: float = 0.0
     input_shape: tuple[int, int, int] | None = None
+    _in_channels: list[int] = []
     filters: list[int] = []
 
     @property
     def out_channels(self) -> int:
         """ The number of filters from the final upscale layer """
         return self.filters[-1]
-
-    @classmethod
-    def _calculate_reshape(cls, input_shape: tuple[int, int, int]) -> None:
-        """ Calculate whether the input needs reshaping for the chosen model output size and set to
-        :attr:`_in_channels` and :attr:`_reshape_shape`
-
-        Parameters
-        ----------
-        input_shape
-            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
-        """
-        if cls.version >= 1.0:
-            # Legacy used to scale filters for mismatched fc_dims and output size. This leads to
-            # awkward reshaping between fc_output and decoder input. Now we just set the
-            # dimensional space correctly when creating the FC layers
-            cls._in_channels = input_shape[0]
-            logger.debug("[UpscaleBlocks] Set in_channels: %s", cls._in_channels)
-            return
-
-        old_dim = input_shape[-1]
-        new_dim = _scale_dim(cfg.output_size(), old_dim)
-
-        if new_dim == old_dim:
-            cls._in_channels = input_shape[0]
-        else:
-            cls._in_channels = int(np.prod(input_shape) // new_dim ** 2)
-            cls._reshape_shape = (cls._in_channels, new_dim, new_dim)
-        logger.debug("[UpscaleBlocks] Set in_channels: %s and reshape_shape: %s",
-                     cls._in_channels, cls._reshape_shape)
 
     @classmethod
     def _calculate_filters(cls, input_shape: tuple[int, int, int]) -> None:
@@ -557,45 +528,84 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
                                  cfg.dec_filter_slope(),
                                  mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
                                              cfg.dec_slope_mode()))
-        logger.debug("[UpscaleBlocks] Set filters: %s)", cls.filters)
+        cls._in_channels = cls.filters[:-1]
+        logger.debug("[_UpscaleGetter] Set filters: %s)", cls.filters)
 
     @classmethod
-    def configure(cls, input_shape: tuple[int, int, int], version: float) -> None:
-        """ Configure the upscale getter
+    def _calculate_reshape(cls, input_shape: tuple[int, int, int]) -> None:
+        """ Calculate whether the input needs reshaping for the chosen model output size and set to
+        :attr:`_in_channels` and :attr:`_reshape_shape`
 
         Parameters
         ----------
         input_shape
-            The shape of the Tensor feeding the Upscale Blocks (output from Inter or output from
-            each fc if upscales in fc)
-    version
-        The plugin version. Versions less than 1.0 means that the model was created in Keras.
-        Versions 1.0 and above are created in Torch.
+            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
         """
-        if cls.input_shape is not None and not cls.version:
+        if cls.version >= 1.0:
+            # Legacy used to scale filters for mismatched fc_dims and output size. This leads to
+            # awkward reshaping between fc_output and decoder input. Now we just set the
+            # dimensional space correctly when creating the FC layers
+            cls._in_channels.insert(0, input_shape[0])
+            logger.debug("[_UpscaleGetter] Set in_channels: %s", cls._in_channels)
             return
-        logger.debug("[UpscaleBlocks] Configuring (input_shape: %s, version: %s)",
-                     input_shape, version)
 
-        cls.version = version
-        cls._calculate_reshape(input_shape)
-        cls._calculate_filters(input_shape)
+        old_dim = input_shape[-1]
+        new_dim = _scale_dim(cfg.output_size(), old_dim)
+
+        if new_dim == old_dim:
+            cls._in_channels.insert(0, input_shape[0])
+        else:
+            cls._in_channels.insert(0, int(np.prod(input_shape) // new_dim ** 2))
+            cls._reshape_shape = (cls._in_channels[0], new_dim, new_dim)
+        logger.debug("[_UpscaleGetter] Set in_channels: %s and reshape_shape: %s",
+                     cls._in_channels, cls._reshape_shape)
 
     @classmethod
-    def update_filters(cls, upscales_in_fc: int) -> None:
-        """ When upscales are in fully connected layers and there are shared fully connected layers
-        the first filter for the decoder upscale requires doubling for the concatenated output.
+    def configure(cls,
+                  fc_output_shape: tuple[int, int, int],
+                  upscales_in_fc: int,
+                  shared_fc: bool,
+                  version: float) -> None:
+        """ Configure the upscale getter
 
-        NOTE: This unnecessarily blows out filters, but is a legacy hangover. Halving filters for
-        shared upscales in fc would make sense, but as putting upscales in FC for shared FC doesn't
-        make a lot of sense, it's probably not worth handling """
-        if upscales_in_fc < 1:
+        Parameters
+        ----------
+        fc_output_shape
+            The shape of the Tensor from each fc layer
+        upscales_in_fc
+            The number of upscales that are being placed within the FC layers
+        shared_fc
+            ``True`` if the model has a shared fully connected layer
+        version
+            The plugin version. Versions less than 1.0 means that the model was created in Keras.
+            Versions 1.0 and above are created in Torch.
+        """
+        input_shape = fc_output_shape
+        if shared_fc and not upscales_in_fc:  # Input shape is the concatenated inters
+            input_shape = (input_shape[0] * 2, *input_shape[1:])
+
+        logger.debug("[_UpscaleGetter] Configuring (fc_output_shape: %s, upscales_in_fc: %s, "
+                     "shared_fc: %s, version: %s). Input shape: %s",
+                     fc_output_shape, upscales_in_fc, shared_fc, version, input_shape)
+
+        cls.version = version
+        cls._calculate_filters(input_shape)
+        cls._calculate_reshape(input_shape)
+
+        if not upscales_in_fc or not shared_fc:
             return
-        idx = upscales_in_fc - 1
-        filters = cls.filters[idx] * 2
-        logger.debug("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
-                     idx, cls.filters[idx], filters, upscales_in_fc)
-        cls.filters[idx] = filters
+
+        # When upscales are in fully connected layers and there are shared fully connected layers
+        # the first in_channel for the decoder upscale requires doubling for the concatenated
+        # output.
+        # TODO: This unnecessarily blows out filters, but is a legacy hangover. Halving filters
+        # for shared upscales in fc would make sense, but as putting upscales in FC for shared FC
+        # doesn't make a lot of sense, it's probably not worth handling
+        out_idx = upscales_in_fc - 1
+        filters = cls.filters[out_idx] * 2
+        logger.debug("[_UpscaleGetter] Updating in_channels from %s to %s for %s upscales in fc",
+                     cls._in_channels[upscales_in_fc], filters, upscales_in_fc)
+        cls._in_channels[upscales_in_fc] = filters
 
     def _dny_entry(self, layers: dict[str, nn.Module]) -> None:
         """ Entry convolutions for using the upscale_dny method.
@@ -607,9 +617,9 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         """
         if cfg.dec_upscale_method().lower() != "upscale_dny":
             return
-        logger.debug("[UpscaleBlocks] Adding DNY entry layers")
+        logger.debug("[_UpscaleGetter] Adding DNY entry layers")
         layers["dny"] = nn.Sequential(
-            nn.Conv2d(self._in_channels, self.filters[0], 4, padding="same"),
+            nn.Conv2d(self._in_channels[0], self.filters[0], 4, padding="same"),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(self.filters[0], self.filters[0], 3, padding=1),
             nn.LeakyReLU(0.2, inplace=True))
@@ -643,11 +653,13 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
 
         filters_ = self.filters[index]
         layers: dict[str, nn.Module] = {}
-        if index == 0:
-            in_channels = (self.filters[0] if cfg.dec_upscale_method().lower() == "upscale_dny"
-                           else self._in_channels)
-        else:
-            in_channels = self.filters[index - 1]
+
+        in_channels = self._in_channels[index]
+        if index == 0 and cfg.dec_upscale_method().lower() == "upscale_dny":
+            in_channels = self.filters[0]
+
+        logger.debug("[_UpscaleGetter] Creating upscale block %s. in_channels: %s, "
+                     "out_channels: %s", index, in_channels, filters_)
         up = _get_upscale_layer(method,
                                 in_channels,
                                 filters_,
@@ -686,7 +698,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         The upscale layers for the selected layer indices and the upscale layers for the mask
         path if learn_mask is selected
         """
-        assert self._in_channels > 0 and self.filters, "Input size must be set before calling"
+        assert self._in_channels and self.filters, "Input size must be set before calling"
 
         learn_mask = cfg_loss.learn_mask()
         method = T.cast(UpsampleT, cfg.dec_upscale_method())
@@ -882,8 +894,6 @@ class FullyConnected(nn.Module):
         List of number of features for each linear layer
     upsamples
         How many upsamples to apply at the end of the FC layer
-    upscales
-        The number of decoder upscales that should be placed within the fully connected block
     version
         The plugin version. Versions less than 1.0 means that the model was created in Keras.
         Versions 1.0 and above are created in Torch.
@@ -893,7 +903,6 @@ class FullyConnected(nn.Module):
                  dim: int,
                  feats: list[int],
                  upsample_filters: int,
-                 upscales: int,
                  version: float) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
@@ -902,8 +911,6 @@ class FullyConnected(nn.Module):
         upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
         upsamples = cfg.fc_upsamples()
         inc_bottleneck = not cfg.bottleneck_in_encoder()
-
-        dst_shape = (int(feats[-1] / (dim ** 2)), dim, dim)
 
         if inc_bottleneck:
             assert len(input_shape) == 3
@@ -919,6 +926,7 @@ class FullyConnected(nn.Module):
                 self.add_module(f"drop{lbl}", nn.Dropout(dropout, inplace=True))
             self.add_module(f"fc{lbl}", nn.Linear(feats[i], out_feats))
 
+        dst_shape = (int(feats[-1] / (dim ** 2)), dim, dim)
         self.reshape = Reshape((dst_shape), is_contiguous=True)
 
         for k, v in self._get_upsamples(
@@ -926,12 +934,11 @@ class FullyConnected(nn.Module):
                 ).items():
             self.add_module(k, v)
 
+        out_channels = (dst_shape[0] if not upsamples or upsampler == "upsampling2d"
+                        else upsample_filters)
+        self.out_shape = (out_channels, dim * (upsamples + 1), dim * (upsamples + 1))
+
         self._up_layers: dict[str, nn.Sequential] = {}
-        if upscales:
-            for k, v in UPSCALE_GETTER((0, upscales)).items():
-                v = self._fix_legacy_upscale(v) if version < 1.0 else v
-                self.add_module(k, v)
-                self._up_layers[k] = v
 
     def _get_upsamples(self,
                        upsampler: UpsampleT,
@@ -980,6 +987,23 @@ class FullyConnected(nn.Module):
                                                   if not k.startswith("res")}))
         del upscale
         return nn.Sequential(new)
+
+    def append_upscales(self, upscales: int, version: float) -> None:
+        """ Append decoder upscales to the fully connected layer
+
+        Parameters
+        ----------
+        upscales
+            The number of upscales to append
+        version
+            The plugin version. Versions less than 1.0 means that the model was created in Keras.
+            Versions 1.0 and above are created in Torch.
+        """
+        for k, v in UPSCALE_GETTER((0, upscales)).items():
+            logger.debug("[FullyConnected] Inserting decoder upscale '%s'", k)
+            v = self._fix_legacy_upscale(v) if version < 1.0 else v
+            self.add_module(k, v)
+            self._up_layers[k] = v
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """ Call the Phaze-A Fully Connected layer
@@ -1036,7 +1060,7 @@ class Inter():
         self._shared = T.cast(T.Literal["none", "full", "half"], cfg.shared_fc())
         self._split = cfg.split_fc()
         self._dim = cfg.fc_dimensions()
-        self._upscales = cfg.dec_upscales_in_fc()
+        self._upsamples = cfg.fc_upsamples()
 
         if num_identities > 2 and self._shared == "half":
             raise FaceswapError("half shared FC layer is not compatible with more than 2"
@@ -1044,29 +1068,28 @@ class Inter():
         if version >= 1.0 and not self._split and self._shared != "none":
             raise FaceswapError("Shared FC layer is only compatible with split FC layers")
 
-        upsamples = cfg.fc_upsamples()
-        upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
-
         # Legacy used to just scale filters for mismatched fc_dims and output size. This leads to
         # awkward reshaping between fc_output and decoder input. Now we set the dimensional space
         # correctly staight out of the FC layers
-        self._filters = self._get_filters(self._dim, upsamples, version)
         self._upsample_filters = (
             self._scale_filters(cfg.fc_upsample_filters(),  # For reshape in decoder
-                                self._dim * (upsamples + 1),
+                                self._dim * (self._upsamples + 1),
                                 cfg.output_size()) if version < 1.0
             else cfg.fc_upsample_filters()  # We reshape here. Use supplied
         )
 
-        self.out_channels = self._configure_output(upsamples, upsampler, version)
-        """ The number of output channels from the inter layer """
-
-        self._shared_fc: None | nn.Module = None  # reference to shared for easier access
+        self._shared_id = -1  # reference to shared for easier access
         self.modules = self._build_modules(num_identities, input_shape, version)
         """ The inter module/module list """
 
-        if self._upscales:
-            UPSCALE_GETTER.update_filters(self._upscales)
+        self.fc_out_shape = T.cast(FullyConnected, self.modules[0]).out_shape
+        """ The output shape from each fully connected layer prior to any decoder upscaling """
+
+        if self._shared != "none":
+            self.out_shape = (self.fc_out_shape[0] * 2, *self.fc_out_shape[1:])  # concat filters
+            """ The output shape from each inter """
+        else:
+            self.out_shape = self.fc_out_shape
 
     @classmethod
     def _scale_filters(cls, original_filters: int, dim: int, output_size: int) -> int:
@@ -1098,24 +1121,6 @@ class Inter():
         logger.debug("[Inter] original_filters: %s, scaled_filters: %s", original_filters, retval)
         return retval
 
-    @classmethod
-    def _calculate_fc_output_shape(cls,
-                                   upsample_filters: int,
-                                   upsamples: int,
-                                   upsampler: UpsampleT,
-                                   final_filters: int,
-                                   dim: int) -> tuple[int, int, int]:
-        """ Calculate the output shape from each fully connected layers including any upscales but
-        excluding any decoder upscales within the inter layers """
-        has_up_filt = upsamples > 0 and upsampler != "upsample2d"
-        channels = upsample_filters if has_up_filt else (final_filters // (dim ** 2))
-        final_dim = dim * (upsamples + 1)
-        retval = (channels, final_dim, final_dim)
-        logger.debug("[Inter] upsample_filters: %s, upsamples: %s, upsampler: %s, "
-                     "final_filters: %s, dim: %s. Output shape: %s",
-                     upsample_filters, upsamples, upsampler, final_filters, dim, retval)
-        return retval
-
     def _get_filters(self, dim: int, upsamples: int, version: float) -> list[int]:
         """ Obtain the filters for each fc layer within each inter """
         # Legacy used to just scale filters by the upscaled output dim. Now we just scale by the
@@ -1131,53 +1136,55 @@ class Inter():
         logger.debug("[Inter] Got filters: %s", retval)
         return retval
 
-    def _configure_output(self,
-                          upsamples: int,
-                          upsampler: UpsampleT,
-                          version: float) -> int:
-        """ Obtain the final number of output channels from each inter and configure the
-        upscaler """
-        # Handle reshape here for non-legacy
-        real_dim = self._dim if version < 1.0 else _scale_dim(self._model_output_size, self._dim)
-        fc_out_shape = self._calculate_fc_output_shape(self._upsample_filters,
-                                                       upsamples,
-                                                       upsampler,
-                                                       self._filters[-1],
-                                                       real_dim)
-        out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if self._shared != "none"
-                     else fc_out_shape)
-        UPSCALE_GETTER.configure(fc_out_shape if self._upscales
-                                 else out_shape, version)
-        out_channels = (out_shape[0] if not self._upscales
-                        else UPSCALE_GETTER.filters[self._upscales - 1])
-        retval = out_channels * 2 if self._shared != "none" else out_channels
-        logger.debug("[Inter] output_channels: %s", retval)
-        return retval
-
     def _build_modules(self,
                        num_identities: int,
-                       input_shape,
-                       version) -> nn.ModuleList | nn.Module:
+                       input_shape: tuple[int] | tuple[int, int, int],
+                       version) -> nn.ModuleList:
         """ Build the inter module list"""
+        real_dim = self._dim if version < 1.0 else _scale_dim(self._model_output_size, self._dim)
         fc_args = (input_shape,
-                   self._dim,
-                   self._filters,
+                   real_dim,
+                   self._get_filters(self._dim, self._upsamples, version),
                    self._upsample_filters,
-                   self._upscales,
                    version)
 
-        modules = [FullyConnected(*fc_args)]
-        if not self._split:
-            return modules[0]
+        retval = nn.ModuleList([FullyConnected(*fc_args)])
 
-        modules.extend([FullyConnected(*fc_args) for _ in range(num_identities - 1)])
+        if self._split:
+            retval.extend([FullyConnected(*fc_args) for _ in range(num_identities - 1)])
+
         if self._shared == "full":
-            self._shared_fc = FullyConnected(*fc_args)
-            modules.append(self._shared_fc)
+            retval.append(FullyConnected(*fc_args))
+            self._shared_id = len(retval) - 1
         elif self._shared == "half":
-            self._shared_fc = modules[0]
+            self._shared_id = 0
 
-        return nn.ModuleList(modules)
+        return retval
+
+    def configure_upscales(self, upscales: int, version: float) -> None:
+        """ Insert decoder upscales into the FC layers + update the inter out_shape if required
+
+        Parameters
+        ----------
+        upscales
+            The number of decoder upscales to place in fc layers
+        version
+            The plugin version. Versions less than 1.0 means that the model was created in Keras.
+            Versions 1.0 and above are created in Torch.
+        """
+        if not upscales:
+            return
+
+        for mod in T.cast(list[FullyConnected], self.modules):
+            mod.append_upscales(upscales, version)
+
+        # TODO halve upscale filters in shared
+        out_shape = (UPSCALE_GETTER.filters[upscales - 1] * (2 if self._shared != "none" else 1),
+                     self.out_shape[1] * (upscales + 1),
+                     self.out_shape[2] * (upscales + 1))
+        logger.debug("[Inter] Updated output shape from %s to %s for %s upscales",
+                     self.out_shape, out_shape, upscales)
+        self.out_shape = out_shape
 
     def __call__(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """ Forward pass through the intermediate layers
@@ -1192,15 +1199,15 @@ class Inter():
         The output tensor from each side's Intermediate layer
         """
         if self._split:
-            x = [inter(i) for inter, i in zip(T.cast(nn.ModuleList, self.modules)[:len(inputs)],
-                                              inputs)]
+            x = [inter(i) for inter, i in zip(self.modules[:len(inputs)], inputs)]
         else:
-            x = [self.modules(i) for i in inputs]
+            x = [self.modules[0](i) for i in inputs]
 
-        if self._shared_fc is None:
+        if self._shared_id < 0:
             return x
 
-        return [torch.concat([self._shared_fc(i), y], dim=1) for i, y in zip(inputs, x)]
+        return [torch.concat([self.modules[self._shared_id](i), y], dim=1)
+                for i, y in zip(inputs, x)]
 
 
 class InterGBlock(nn.Sequential):
@@ -1395,6 +1402,12 @@ class PhazeA(ModelPlugin):
 
         self._inter = Inter(num_identities, self.encoder.output_shape, version)
         self.inter = self._inter.modules  # Elevate to parent
+        upscales_in_fc = cfg.dec_upscales_in_fc()
+        UPSCALE_GETTER.configure(self._inter.fc_out_shape,
+                                 upscales_in_fc,
+                                 self._shared_fc,
+                                 version)
+        self._inter.configure_upscales(upscales_in_fc, version)
 
         self.inter_gblock, self.gblock = self._build_gblock()
         self.decoder = self._build_decoder()
@@ -1459,7 +1472,7 @@ class PhazeA(ModelPlugin):
             return None, None
 
         inter = InterGBlock(self.encoder.output_shape, self.version)
-        content_channels = self._inter.out_channels
+        content_channels = self._inter.out_shape[0]
         if not self._split_gblock:
             gblock = GBlock(cfg.fc_gblock_max_nodes(), content_channels)
         else:
