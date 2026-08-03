@@ -504,12 +504,12 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
     _reshape_shape: tuple[int, int, int] | None = None
     version: float = 0.0
     input_shape: tuple[int, int, int] | None = None
-    _filters: list[int] = []
+    filters: list[int] = []
 
     @property
     def out_channels(self) -> int:
         """ The number of filters from the final upscale layer """
-        return self._filters[-1]
+        return self.filters[-1]
 
     @classmethod
     def _calculate_reshape(cls, input_shape: tuple[int, int, int]) -> None:
@@ -551,13 +551,13 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         """
         dim = input_shape[-1] if cls._reshape_shape is None else cls._reshape_shape[-1]
         upscales = int(np.log2(cfg.output_size() / dim))
-        cls._filters = _get_curve(cfg.dec_max_filters(),
-                                  cfg.dec_min_filters(),
-                                  upscales,
-                                  cfg.dec_filter_slope(),
-                                  mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
-                                              cfg.dec_slope_mode()))
-        logger.debug("[UpscaleBlocks] Set filters: %s)", cls._filters)
+        cls.filters = _get_curve(cfg.dec_max_filters(),
+                                 cfg.dec_min_filters(),
+                                 upscales,
+                                 cfg.dec_filter_slope(),
+                                 mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
+                                             cfg.dec_slope_mode()))
+        logger.debug("[UpscaleBlocks] Set filters: %s)", cls.filters)
 
     @classmethod
     def configure(cls, input_shape: tuple[int, int, int], version: float) -> None:
@@ -592,10 +592,10 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         if upscales_in_fc < 1:
             return
         idx = upscales_in_fc - 1
-        filters = cls._filters[idx] * 2
+        filters = cls.filters[idx] * 2
         logger.debug("[UpscaleBlocks] Updating filter %s from %s to %s for %s upscales in fc",
-                     idx, cls._filters[idx], filters, upscales_in_fc)
-        cls._filters[idx] = filters
+                     idx, cls.filters[idx], filters, upscales_in_fc)
+        cls.filters[idx] = filters
 
     def _dny_entry(self, layers: dict[str, nn.Module]) -> None:
         """ Entry convolutions for using the upscale_dny method.
@@ -609,9 +609,9 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             return
         logger.debug("[UpscaleBlocks] Adding DNY entry layers")
         layers["dny"] = nn.Sequential(
-            nn.Conv2d(self._in_channels, self._filters[0], 4, padding="same"),
+            nn.Conv2d(self._in_channels, self.filters[0], 4, padding="same"),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(self._filters[0], self._filters[0], 3, padding=1),
+            nn.Conv2d(self.filters[0], self.filters[0], 3, padding=1),
             nn.LeakyReLU(0.2, inplace=True))
 
     def _upscale_block(self,
@@ -641,13 +641,13 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         if self.version < 1.0 and cfg.dec_upscale_method().lower() == "resize_images":
             do_act = True  # Legacy bug. Extra leaky-relu
 
-        filters_ = self._filters[index]
+        filters_ = self.filters[index]
         layers: dict[str, nn.Module] = {}
         if index == 0:
-            in_channels = (self._filters[0] if cfg.dec_upscale_method().lower() == "upscale_dny"
+            in_channels = (self.filters[0] if cfg.dec_upscale_method().lower() == "upscale_dny"
                            else self._in_channels)
         else:
-            in_channels = self._filters[index - 1]
+            in_channels = self.filters[index - 1]
         up = _get_upscale_layer(method,
                                 in_channels,
                                 filters_,
@@ -659,7 +659,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         if norm and norm != "none":
             layers["norm"] = _get_normalization(norm, filters_, self.version)
 
-        skip_res = cfg.dec_skip_last_residual() and index == len(self._filters) - 1
+        skip_res = cfg.dec_skip_last_residual() and index == len(self.filters) - 1
         if not is_mask and res_blocks and not skip_res:
             layers["act"] = nn.LeakyReLU(0.2, inplace=True)
             for i in range(res_blocks):
@@ -686,13 +686,13 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         The upscale layers for the selected layer indices and the upscale layers for the mask
         path if learn_mask is selected
         """
-        assert self._in_channels > 0 and self._filters, "Input size must be set before calling"
+        assert self._in_channels > 0 and self.filters, "Input size must be set before calling"
 
         learn_mask = cfg_loss.learn_mask()
         method = T.cast(UpsampleT, cfg.dec_upscale_method())
 
         start_idx, end_idx = (0, -1) if layer_indices is None else layer_indices
-        end_idx = len(self._filters) if end_idx == -1 else end_idx
+        end_idx = len(self.filters) if end_idx == -1 else end_idx
 
         layers: dict[str, nn.Module] = {}
         mask_layers: dict[str, nn.Module] = {}
@@ -1005,91 +1005,68 @@ class FullyConnected(nn.Module):
         return out[0] if len(out) == 1 else tuple(out)
 
 
-class Inter(nn.Module):
+class Inter():
     """ Builds the Fully Connected layers for Phaze-A
+
+    Note
+    ----
+    This a standard object rather than an nn.Module to work around each of 2 potential (cosmetic)
+    issues: 1) The shared inter will be registered twice if this is an nn.module. Whilst the object
+    is identical, this leads to duplication in the state_dict which makes weight porting tricky. 2)
+    If we build inters for all sides within a single nn.Module, the summary blows out displaying
+    each layer for all sides, which is also not what we want
 
     Parameters
     ----------
+    num_identities
+        The number of identities the model is being trained on
     input_shape
         The input shape to the FC layers
-    shared
-        Whether to have a shared FC layer. ``Full`` has a fully shared layer. ``Half`` places the
-        shared data into identity 0's FC layer
-    upscales
-        The number of decoder upscales to place in the FC layers
     version
         The plugin version. Versions less than 1.0 means that the model was created in Keras.
         Versions 1.0 and above are created in Torch.
-    shared_inter
-        The shared intermediate layer to use if required and not the first Inter instance being
-        created otherwise ``None``
     """
-    def __init__(self,  # pylint:disable=too-many-locals,too-many-positional-arguments,too-many-arguments  # noqa[E501]
+    def __init__(self,
+                 num_identities: int,
                  input_shape: tuple[int, int, int] | tuple[int],
-                 shared: T.Literal["none", "full", "half"],
-                 upscales: int,
-                 version: float,
-                 shared_inter: FullyConnected | None = None) -> None:
+                 version: float) -> None:
         logger.debug(parse_class_init(locals()))
-        super().__init__()
-        model_output_size = cfg.output_size()
-        depth = cfg.fc_depth()
-        upsample_filters = cfg.fc_upsample_filters()
-        slope = cfg.fc_filter_slope()
-        dim = cfg.fc_dimensions()
-        upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
-        upsamples = cfg.fc_upsamples()
 
-        is_legacy = version < 1.0
+        self._model_output_size = cfg.output_size()
+        self._shared = T.cast(T.Literal["none", "full", "half"], cfg.shared_fc())
+        self._split = cfg.split_fc()
+        self._dim = cfg.fc_dimensions()
+        self._upscales = cfg.dec_upscales_in_fc()
+
+        if num_identities > 2 and self._shared == "half":
+            raise FaceswapError("half shared FC layer is not compatible with more than 2"
+                                "identities")
+        if version >= 1.0 and not self._split and self._shared != "none":
+            raise FaceswapError("Shared FC layer is only compatible with split FC layers")
+
+        upsamples = cfg.fc_upsamples()
+        upsampler = T.cast(UpsampleT, cfg.fc_upsampler())
+
         # Legacy used to just scale filters for mismatched fc_dims and output size. This leads to
         # awkward reshaping between fc_output and decoder input. Now we set the dimensional space
         # correctly staight out of the FC layers
-        scaled_dim = _scale_dim(model_output_size, dim)
-        final_dim = (dim if is_legacy else scaled_dim) * (upsamples + 1)
+        self._filters = self._get_filters(self._dim, upsamples, version)
+        self._upsample_filters = (
+            self._scale_filters(cfg.fc_upsample_filters(),  # For reshape in decoder
+                                self._dim * (upsamples + 1),
+                                cfg.output_size()) if version < 1.0
+            else cfg.fc_upsample_filters()  # We reshape here. Use supplied
+        )
 
-        min_filters = self._scale_filters(cfg.fc_min_filters(),
-                                          final_dim if is_legacy else dim,
-                                          model_output_size) * dim ** 2
-        max_filters = self._scale_filters(cfg.fc_max_filters(),
-                                          final_dim if is_legacy else dim,
-                                          model_output_size) * dim ** 2
-        filters = _get_curve(min_filters, max_filters, depth, slope)
-        if is_legacy:  # Need scaling for reshape in decoder
-            upsample_filters = self._scale_filters(cfg.fc_upsample_filters(),
-                                                   final_dim,
-                                                   model_output_size)
-
-        dim = dim if is_legacy else scaled_dim  # Handle reshape here for non-legacy
-
-        fc_out_shape = self._calculate_fc_output_shape(upsample_filters,
-                                                       upsamples,
-                                                       upsampler,
-                                                       filters[-1],
-                                                       dim)
-        out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if shared != "none"
-                     else fc_out_shape)
-        UPSCALE_GETTER.configure(fc_out_shape if upscales else out_shape, version)
-        out_channels = out_shape[0] if not upscales else UPSCALE_GETTER._filters[upscales - 1]
-        self.out_channels = out_channels * 2 if shared != "none" else out_channels
+        self.out_channels = self._configure_output(upsamples, upsampler, version)
         """ The number of output channels from the inter layer """
 
-        fc_args = (input_shape,
-                   dim,
-                   filters,
-                   upsample_filters,
-                   upscales,
-                   version)
+        self._shared_fc: None | nn.Module = None  # reference to shared for easier access
+        self.modules = self._build_modules(num_identities, input_shape, version)
+        """ The inter module/module list """
 
-        self.fc = FullyConnected(*fc_args)
-        # TODO: I do not like this. Find way to make all shared sit in one module
-        if shared_inter is not None:
-            object.__setattr__(self, "shared", shared_inter)  # Prevent re-registering
-        elif shared == "full":
-            self.shared = FullyConnected(*fc_args)
-        elif shared == "half":
-            self.shared = self.fc
-        else:
-            self.shared = None
+        if self._upscales:
+            UPSCALE_GETTER.update_filters(self._upscales)
 
     @classmethod
     def _scale_filters(cls, original_filters: int, dim: int, output_size: int) -> int:
@@ -1139,22 +1116,91 @@ class Inter(nn.Module):
                      upsample_filters, upsamples, upsampler, final_filters, dim, retval)
         return retval
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """ Forward pass through the intermediate layer
+    def _get_filters(self, dim: int, upsamples: int, version: float) -> list[int]:
+        """ Obtain the filters for each fc layer within each inter """
+        # Legacy used to just scale filters by the upscaled output dim. Now we just scale by the
+        # original dim
+        scale_dim = dim * (upsamples + 1) if version < 1.0 else dim
+        min_filters = self._scale_filters(cfg.fc_min_filters(),
+                                          scale_dim,
+                                          self._model_output_size) * dim ** 2
+        max_filters = self._scale_filters(cfg.fc_max_filters(),
+                                          scale_dim,
+                                          self._model_output_size) * dim ** 2
+        retval = _get_curve(min_filters, max_filters, cfg.fc_depth(), cfg.fc_filter_slope())
+        logger.debug("[Inter] Got filters: %s", retval)
+        return retval
+
+    def _configure_output(self,
+                          upsamples: int,
+                          upsampler: UpsampleT,
+                          version: float) -> int:
+        """ Obtain the final number of output channels from each inter and configure the
+        upscaler """
+        # Handle reshape here for non-legacy
+        real_dim = self._dim if version < 1.0 else _scale_dim(self._model_output_size, self._dim)
+        fc_out_shape = self._calculate_fc_output_shape(self._upsample_filters,
+                                                       upsamples,
+                                                       upsampler,
+                                                       self._filters[-1],
+                                                       real_dim)
+        out_shape = ((fc_out_shape[0] * 2, *fc_out_shape[1:]) if self._shared != "none"
+                     else fc_out_shape)
+        UPSCALE_GETTER.configure(fc_out_shape if self._upscales
+                                 else out_shape, version)
+        out_channels = (out_shape[0] if not self._upscales
+                        else UPSCALE_GETTER.filters[self._upscales - 1])
+        retval = out_channels * 2 if self._shared != "none" else out_channels
+        logger.debug("[Inter] output_channels: %s", retval)
+        return retval
+
+    def _build_modules(self,
+                       num_identities: int,
+                       input_shape,
+                       version) -> nn.ModuleList | nn.Module:
+        """ Build the inter module list"""
+        fc_args = (input_shape,
+                   self._dim,
+                   self._filters,
+                   self._upsample_filters,
+                   self._upscales,
+                   version)
+
+        modules = [FullyConnected(*fc_args)]
+        if not self._split:
+            return modules[0]
+
+        modules.extend([FullyConnected(*fc_args) for _ in range(num_identities - 1)])
+        if self._shared == "full":
+            self._shared_fc = FullyConnected(*fc_args)
+            modules.append(self._shared_fc)
+        elif self._shared == "half":
+            self._shared_fc = modules[0]
+
+        return nn.ModuleList(modules)
+
+    def __call__(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+        """ Forward pass through the intermediate layers
 
         Parameters
         ----------
         inputs
-            The input tensor to the Intermediate layer
+            The input tensors for each side to the Intermediate layers
 
         Returns
         -------
-        The output tensor from the Intermediate layer
+        The output tensor from each side's Intermediate layer
         """
-        x = self.fc(inputs)
-        if self.shared is None:
+        if self._split:
+            x = [inter(i) for inter, i in zip(T.cast(nn.ModuleList, self.modules)[:len(inputs)],
+                                              inputs)]
+        else:
+            x = [self.modules(i) for i in inputs]
+
+        if self._shared_fc is None:
             return x
-        return torch.concat([self.shared(inputs), x], dim=1)
+
+        return [torch.concat([self._shared_fc(i), y], dim=1) for i, y in zip(inputs, x)]
 
 
 class InterGBlock(nn.Sequential):
@@ -1346,7 +1392,10 @@ class PhazeA(ModelPlugin):
                          is_rgb=not is_bgr)
 
         self.encoder = Encoder(self.input_shape[1], version)
-        self.inter = self._build_inter()
+
+        self._inter = Inter(num_identities, self.encoder.output_shape, version)
+        self.inter = self._inter.modules  # Elevate to parent
+
         self.inter_gblock, self.gblock = self._build_gblock()
         self.decoder = self._build_decoder()
 
@@ -1404,39 +1453,13 @@ class PhazeA(ModelPlugin):
             raise FaceswapError(f"'{arch}' is not a valid choice for encoder architecture. Choose "
                                 f"one of {list(_MODEL_MAPPING.keys())}.")
 
-    def _build_inter(self) -> Inter | nn.ModuleList:
-        """ Build the intermediate layers """
-        shared = T.cast(T.Literal["none", "full", "half"], cfg.shared_fc())
-        upscales_in_fc = cfg.dec_upscales_in_fc()
-
-        if self.num_identities > 2 and shared == "half":
-            raise FaceswapError("half shared FC layer is not compatible with more than 2"
-                                "identities")
-        if self.version >= 1.0 and not self._split_fc and shared != "none":
-            raise FaceswapError("Shared FC layer is only compatible with split FC layers")
-
-        inter_args = (self.encoder.output_shape, shared, upscales_in_fc, self.version)
-
-        inter0 = Inter(*inter_args)
-
-        if not self._split_fc:
-            retval = inter0
-        else:
-            retval = nn.ModuleList([inter0] + [Inter(*inter_args, shared_inter=inter0.shared)
-                                               for _ in range(self.num_identities - 1)])
-        if shared != "none" and upscales_in_fc:
-            UPSCALE_GETTER.update_filters(upscales_in_fc)
-        return retval
-
     def _build_gblock(self) -> tuple[InterGBlock, GBlock | nn.ModuleList] | tuple[None, None]:
         """ Build the gblock """
         if not cfg.enable_gblock():
             return None, None
 
         inter = InterGBlock(self.encoder.output_shape, self.version)
-        content_channels = (T.cast(int, self.inter[0].out_channels)
-                            if isinstance(self.inter, nn.ModuleList)
-                            else self.inter.out_channels)
+        content_channels = self._inter.out_channels
         if not self._split_gblock:
             gblock = GBlock(cfg.fc_gblock_max_nodes(), content_channels)
         else:
@@ -1467,11 +1490,7 @@ class PhazeA(ModelPlugin):
         The output for each identity training through the model
         """
         encoded = [self.encoder(x) for x in inputs]
-
-        if self._split_fc:
-            x = [inter(enc) for inter, enc in zip(T.cast(nn.ModuleList, self.inter), encoded)]
-        else:
-            x = [self.inter(enc) for enc in encoded]
+        x = self._inter(encoded)
 
         if self.inter_gblock is not None and self.gblock is not None:
             styles = [self.inter_gblock(enc) for enc in encoded]
