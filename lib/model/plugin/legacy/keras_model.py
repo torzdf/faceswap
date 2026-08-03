@@ -311,9 +311,12 @@ class KerasConfigParser:
         if is_sequential and config.get("inbound_nodes"):
             return  # top-level Sequential with no outer context to resolve
 
-        inbounds: list[str] = list({arg["config"]["keras_history"][0]
-                                    for node in config["inbound_nodes"]
-                                    for arg in node["args"]})
+        inbound_set: set[str] = set()
+        for node in config["inbound_nodes"]:
+            for args in node["args"]:
+                args = args if isinstance(args, list) else [args]
+                inbound_set.update(a["config"]["keras_history"][0] for a in args)
+        inbounds = list(inbound_set)
 
         if is_sequential:
             assert len(inbounds) == 1  # Sequential models with multiple inputs not handled
@@ -322,15 +325,15 @@ class KerasConfigParser:
             in_layers = config["config"]["input_layers"]
             in_layers = in_layers if isinstance(in_layers[0], list) else [in_layers]
             in_names = [i[0] for i in in_layers]
-            assert len(in_names) == 1  # TODO sub-models with multiple inputs
 
         # Resolve a keras inbound node name to its standardized label, redirecting through the sub-
         # model's recorded output if 'name' is itself a sub-model.  We only need first input if
-        # multi for our purposes
-        mapped = next(mapping.get(outputs.get(name, name), name) for name in inbounds)
-        logger.debug("[KerasConfigParser] Mapping '%s' to '%s' for sub-model '%s'",
-                     in_names[0], mapped, config["name"])
-        mapping[in_names[0]] = mapped
+        # multi for our purposes, so we zip to shortest (in_names in this case)
+        for in_name, name in zip(in_names, inbounds):
+            mapped = mapping.get(outputs.get(name, name), name)
+            logger.info("[KerasConfigParser] Mapping '%s' to '%s' for sub-model '%s'",
+                        in_name, mapped, config["name"])
+            mapping[in_name] = mapped
 
     @classmethod
     def _flatten_sub_model(cls,
