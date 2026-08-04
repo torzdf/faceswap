@@ -791,7 +791,7 @@ class Encoder(nn.Sequential):
         module = sys.modules[__name__] if is_local else TVMods
         kwargs = mod_info.kwargs if mod_info.kwargs else {}
         kwargs["weights"] = kwargs.get("weights", "DEFAULT") if load_weights else None
-        if self._name.startswith("clipvVit"):
+        if self._name.startswith("clipv"):
             kwargs["input_size"] = input_size
         retval: nn.Module = getattr(module, name)(**kwargs)
 

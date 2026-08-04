@@ -331,8 +331,8 @@ class KerasConfigParser:
         # multi for our purposes, so we zip to shortest (in_names in this case)
         for in_name, name in zip(in_names, inbounds):
             mapped = mapping.get(outputs.get(name, name), name)
-            logger.info("[KerasConfigParser] Mapping '%s' to '%s' for sub-model '%s'",
-                        in_name, mapped, config["name"])
+            logger.debug("[KerasConfigParser] Mapping '%s' to '%s' for sub-model '%s'",
+                         in_name, mapped, config["name"])
             mapping[in_name] = mapped
 
     @classmethod
