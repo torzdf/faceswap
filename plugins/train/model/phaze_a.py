@@ -512,6 +512,35 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         return self.filters[-1]
 
     @classmethod
+    def _calculate_reshape(cls, input_shape: tuple[int, int, int]) -> None:
+        """ Calculate whether the input needs reshaping for the chosen model output size and set to
+        :attr:`_in_channels` and :attr:`_reshape_shape`
+
+        Parameters
+        ----------
+        input_shape
+            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
+        """
+        if cls.version >= 1.0:
+            # Legacy used to scale filters for mismatched fc_dims and output size. This leads to
+            # awkward reshaping between fc_output and decoder input. Now we just set the
+            # dimensional space correctly when creating the FC layers
+            cls._in_channels.append(input_shape[0])
+            logger.debug("[_UpscaleGetter] Set initial in_channel: %s", cls._in_channels)
+            return
+
+        old_dim = input_shape[-1]
+        new_dim = _scale_dim(cfg.output_size(), old_dim)
+
+        if new_dim == old_dim:
+            cls._in_channels.append(input_shape[0])
+        else:
+            cls._in_channels.append(int(np.prod(input_shape) // new_dim ** 2))
+            cls._reshape_shape = (cls._in_channels[0], new_dim, new_dim)
+        logger.debug("[_UpscaleGetter] Set initial in_channel: %s and reshape_shape: %s",
+                     cls._in_channels, cls._reshape_shape)
+
+    @classmethod
     def _calculate_filters(cls, input_shape: tuple[int, int, int]) -> None:
         """ Generate the filter curve
 
@@ -528,37 +557,9 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
                                  cfg.dec_filter_slope(),
                                  mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
                                              cfg.dec_slope_mode()))
-        cls._in_channels = cls.filters[:-1]
-        logger.debug("[_UpscaleGetter] Set filters: %s)", cls.filters)
-
-    @classmethod
-    def _calculate_reshape(cls, input_shape: tuple[int, int, int]) -> None:
-        """ Calculate whether the input needs reshaping for the chosen model output size and set to
-        :attr:`_in_channels` and :attr:`_reshape_shape`
-
-        Parameters
-        ----------
-        input_shape
-            The shape of the Tensor feeding the Upscale Blocks (output from Inter)
-        """
-        if cls.version >= 1.0:
-            # Legacy used to scale filters for mismatched fc_dims and output size. This leads to
-            # awkward reshaping between fc_output and decoder input. Now we just set the
-            # dimensional space correctly when creating the FC layers
-            cls._in_channels.insert(0, input_shape[0])
-            logger.debug("[_UpscaleGetter] Set in_channels: %s", cls._in_channels)
-            return
-
-        old_dim = input_shape[-1]
-        new_dim = _scale_dim(cfg.output_size(), old_dim)
-
-        if new_dim == old_dim:
-            cls._in_channels.insert(0, input_shape[0])
-        else:
-            cls._in_channels.insert(0, int(np.prod(input_shape) // new_dim ** 2))
-            cls._reshape_shape = (cls._in_channels[0], new_dim, new_dim)
-        logger.debug("[_UpscaleGetter] Set in_channels: %s and reshape_shape: %s",
-                     cls._in_channels, cls._reshape_shape)
+        cls._in_channels.extend(cls.filters[:-1])
+        logger.debug("[_UpscaleGetter] Set filters: %s (in_channels: %s))",
+                     cls.filters, cls._in_channels)
 
     @classmethod
     def configure(cls,
@@ -589,8 +590,8 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
                      fc_output_shape, upscales_in_fc, shared_fc, version, input_shape)
 
         cls.version = version
-        cls._calculate_filters(input_shape)
         cls._calculate_reshape(input_shape)
+        cls._calculate_filters(input_shape)
 
         if not upscales_in_fc or not shared_fc:
             return
@@ -1380,7 +1381,7 @@ class PhazeA(ModelPlugin):
         The plugin version. Versions less than 1.0 means that the model was created in Keras.
         Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, version=1.0) -> None:
+    def __init__(self, num_identities: int = 2, version=0.5) -> None:
         if cfg.output_size() % 16 != 0:
             raise FaceswapError("Phaze-A output shape must be a multiple of 16")
 
