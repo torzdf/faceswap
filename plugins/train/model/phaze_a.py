@@ -1381,7 +1381,7 @@ class PhazeA(ModelPlugin):
         The plugin version. Versions less than 1.0 means that the model was created in Keras.
         Versions 1.0 and above are created in Torch. Default: 1.0
     """
-    def __init__(self, num_identities: int = 2, version=0.5) -> None:
+    def __init__(self, num_identities: int = 2, version=1.0) -> None:
         if cfg.output_size() % 16 != 0:
             raise FaceswapError("Phaze-A output shape must be a multiple of 16")
 
