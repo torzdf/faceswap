@@ -268,20 +268,20 @@ class TrainHandler:
     model_folder
         Full path to load/save model weights
     save_interval
-        The number of steps between each model save
+        The number of steps between each model save. Default: 250
     snapshot_interval
-        The number of steps between full model checkpoint snapshots
+        The number of steps between full model checkpoint snapshots. Default: 25000
     config_file
-        The custom location to load configuration options from
+        The custom location to load configuration options from. Default: ``None``
     """
     def __init__(self,
                  name: str,
                  num_identities: int,
                  batch_size: int,
                  model_folder: str,
-                 save_interval: int,
-                 snapshot_interval: int,
-                 config_file: str) -> None:
+                 save_interval: int = 250,
+                 snapshot_interval: int = 25000,
+                 config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
 
         self.name = name
