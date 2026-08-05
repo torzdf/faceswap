@@ -99,7 +99,10 @@ class _EncoderInfo:  # pylint:disable=too-many-instance-attributes
 
 
 _CONVNEXT_APPEND = (("classifier", 0), )
-_EFF_NET_LEGACY = {"legacy_same_pad": True, "legacy_bn_eps": 1e-3, "legacy_bn_momentum": 0.01}
+_EFF_NET_LEGACY = {"legacy_scaling": (0, 1/255),  # Double scaling bug in legacy
+                   "legacy_same_pad": True,
+                   "legacy_bn_eps": 1e-3,
+                   "legacy_bn_momentum": 0.01}
 _EFF_NET_V2_LEGACY = {"legacy_scaling": (-1, 1), "legacy_same_pad": True, "legacy_bn_eps": 1e-3}
 _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "clipv_farl-b-16-16": _EncoderInfo(torch_name="~vit_b_16", kwargs={"weights": "FaRL-B-16-16"}),

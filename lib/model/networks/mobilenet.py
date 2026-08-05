@@ -188,6 +188,9 @@ def mobilenet_v3_small(weights: TVMobile.MobileNet_V3_Small_Weights | None = Non
                                  IRS(96, 3, 576, 96, False, "RE", 1, 1, width_mult)]
     last_channel = IRS.adjust_channels(1024, width_mult)  # C5
     model = TVMobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    # Minimalist version needs to replace beginning + end hardswish with relu
+    T.cast(nn.Sequential, model.features[0])[2] = nn.ReLU()
+    T.cast(nn.Sequential, model.features[-1])[2] = nn.ReLU()
     # TODO load weights here
     return model
 
@@ -221,6 +224,9 @@ def mobilenet_v3_large(weights: TVMobile.MobileNet_V3_Large_Weights | None = Non
                                  IRS(160, 3, 960, 160, False, "RE", 1, 1, width_mult)]
     last_channel = IRS.adjust_channels(1280, width_mult)  # C5
     model = TVMobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    # Minimalist version needs to replace beginning + end hardswish with relu
+    T.cast(nn.Sequential, model.features[0])[2] = nn.ReLU()
+    T.cast(nn.Sequential, model.features[-1])[2] = nn.ReLU()
     # TODO load weights here
     return model
 
