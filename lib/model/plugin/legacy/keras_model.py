@@ -9,6 +9,7 @@ import os
 import re
 import typing as T
 import zipfile
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import h5py
@@ -40,204 +41,245 @@ class LayerInfo:
 _ENC_PREFIX = "layers.functional.layers.functional.layers."
 
 
-def _iae_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-    """ Re-orders the intermediate layers for IAE models. Inters graph in order [both, B, A] but
-    build in order [A, B, Both] """
-    order = ["layers.input_layer",
-             "layers.functional.",
-             "layers.functional_2.",
-             "layers.functional_1.",
-             "layers.functional_3.",
-             "layers.concatenate",
-             "layers.functional_4."]
-    return {k: v
-            for model in order
-            for k, v in layers.items()
-            if k.startswith(model)}
-
-
-def _inception_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-    """ Re-orders imported layer names from Keras Applications InceptionResNet models from graph
-    order to build order. Fairly straightforward as default naming is used for all problematic
-    layers """
-    reorder = ["batch_normalization", "conv2d"]
-    current = {"Conv2D": 0, "BatchNormalization": 0}
-    backfill: dict[str, dict[int, LayerInfo]] = {"Conv2D": {}, "BatchNormalization": {}}
-    retval: dict[str, LayerInfo] = {}
-
-    for k, v in layers.items():
-        if not k.startswith(_ENC_PREFIX) or not any(v.layer_name.startswith(x) for x in reorder):
-            logger.debug("Retaining layer '%s' ('%s')", k, v.layer_name)
-            retval[k] = v
-            continue
-
-        while current[v.layer_type] in backfill[v.layer_type]:
-            lyr = backfill[v.layer_type].pop(current[v.layer_type])
-            logger.debug("Re-ordering layer '%s' ('%s')", lyr.weights_name, lyr.layer_name)
-            retval[lyr.weights_name] = lyr
-            current[v.layer_type] += 1
-
-        str_idx = v.layer_name.rsplit("_", maxsplit=1)[-1]
-        idx = int(str_idx) if str_idx.isdigit() else 0
-
-        if idx == current[v.layer_type]:
-            retval[k] = v
-            current[v.layer_type] += 1
-            logger.debug("Inserting layer '%s' ('%s')", k, v.layer_name)
-            continue
-
-        logger.debug("Holding layer '%s' ('%s')", k, v.layer_name)
-        backfill[v.layer_type][idx] = v
-
-    assert len(retval) == len(layers), "Not all layers handled"
-    return retval
-
-
-def _nasnet_reorder(layers: dict[str, LayerInfo]  # pylint:disable=too-many-locals
-                    ) -> dict[str, LayerInfo]:
-    """ Re-orders imported layer names from Keras Applications NasNet from graph order to build
-    order. Some fairly arbitrary re-ordering occurs, but fortunately layer labelling makes this a
-    bit easier """
-    sep_match = re.compile(r"^(separable)_conv_(\d)(?:_.*?(left|right)(\d))?.*_(\d+)$")
-    adj_match = re.compile(r"^(adjust|reduction)_(conv|bn)_.*?(\d+)$")
-    reorder_types = {"BatchNormalization", "Conv2D", "SeparableConv2D"}
-    type_order = ["adjust", "reduction", "separable"]
-    conv_order = ["conv", "bn"]
-    side_order = ["left", "right"]
-
-    sort_keys = {}
-    for k, v in layers.items():
-        if (not k.startswith("layers.functional.layers.functional.layers.")
-                or v.layer_type not in reorder_types):
-            continue
-
-        lyr = v.layer_name
-        block_add = 0 if "stem" in lyr else 3  # Numbering resets after stem
-        match = next((m for m in (sep_match.match(lyr), adj_match.match(lyr)) if m), None)
-        if not match:
-            continue
-
-        groups = match.groups()
-        order = [int(groups[-1]) + block_add,   # Ensure blocks ordered
-                 type_order.index(groups[0])]   # Ensure adjust, reduce, separable order
-
-        if len(groups) == 3:  # adjust/reduce
-            order.extend([conv_order.index(groups[1]), 0, 0])
-        else:   # separable
-            order.extend([int(groups[3]), side_order.index(groups[2]), int(groups[1])])
-
-        sort_keys[k] = order
-
-    sorted_keys = [k for k, _ in sorted(sort_keys.items(), key=lambda item: item[1])]
-
-    retval: dict[str, LayerInfo] = {}
-    while layers:
-        k = list(layers)[0]
-        if k not in sorted_keys:
-            v = layers.pop(k)
-            logger.debug("Retaining layer '%s' ('%s')", k, v.layer_name)
-            retval[k] = v
-            continue
-
-        pos_idx = sorted_keys.index(k)
-        for _ in range(pos_idx + 1):
-            k = sorted_keys.pop(0)
-            v = layers.pop(k)
-            logger.debug("Reordering layer '%s' ('%s')", k, v.layer_name)
-            retval[k] = v
-
-    return retval
-
-
-def _resnet_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-    """ Re-orders imported layer names from Keras Applications ResNet from graph order to build
-    order. This is not actually required, but we implemented accidentally, so might as well keep
-    it. Fortunately layer labelling makes this trivial """
-    block_ids = {k: re.findall(r"\d+", v.layer_name) for k, v in layers.items()
-                 if k.startswith(_ENC_PREFIX)}
-    re_order = {k: tuple(int(x) for x in v) for k, v in block_ids.items() if len(v) == 3}
-    ordered = [k[0] for k in sorted(re_order.items(), key=lambda x: x[1])]
-    order_iter = iter(ordered)
-    retval: dict[str, LayerInfo] = {}
-    for k, v in layers.items():
-        if k in ordered:
-            next_k = next(order_iter)
-            retval[next_k] = layers[next_k]
-        else:
-            retval[k] = v
-    return retval
-
-
-def _xception_reorder(layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-    """ Re-orders imported layer names from Keras Applications Xception from graph order to build
-    order. Skip layers need to be built prior to separable conv within each block """
-    reorder_types = {"BatchNormalization", "Conv2D", "SeparableConv2D"}
-    backfill: list[LayerInfo] = []
-    current_block = 0
-
-    def flush_backfill() -> None:
-        while backfill:
-            lyr = backfill.pop(0)
-            logger.debug("Reordering layer '%s' ('%s')", lyr.weights_name, lyr.layer_name)
-            retval[lyr.weights_name] = lyr
-
-    retval: dict[str, LayerInfo] = {}
-    for k, v in layers.items():
-        if not k.startswith(_ENC_PREFIX) or v.layer_type not in reorder_types:
-            logger.debug("Retaining layer '%s' ('%s')", k, v.layer_name)
-            retval[k] = v
-            continue
-
-        if v.layer_name.startswith("block"):
-            idx = int(v.layer_name.split("_")[0].replace("block", ""))
-            if current_block != idx:
-                flush_backfill()
-                current_block += 1
-            logger.debug("Holding layer '%s' ('%s')", k, v.layer_name)
-            backfill.append(v)
-            continue
-
-        logger.debug("Inserting layer '%s' ('%s')", k, v.layer_name)
-        retval[k] = v
-        if v.layer_name.startswith("batch_normalization"):
-            flush_backfill()
-            current_block += 1
-
-    flush_backfill()
-    assert not backfill, "Not all layers allocated"
-    return retval
-
-
-def reorder_layers(model: str, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-    """ Re-order the layers from Keras graph order to Keras construction order for those models
-    which require it for weight porting
+class LayerSorter:
+    """ Sorts keras layers when graph order does not correspond to build order
 
     Parameters
     ----------
-    model
-        The name of the model that the layers belong to
-    layers
-        The layers of the model that require reordering
-
-    Returns
-    -------
-    The reordered layers
+    state
+        The state dictionary for the keras model being migrated
     """
-    functions = {"iae": _iae_reorder,
-                 "inception_resnet_v2": _inception_reorder,
-                 "inception_v3": _inception_reorder,
-                 "nasnet_large": _nasnet_reorder,
-                 "nasnet_mobile": _nasnet_reorder,
-                 "resnet50": _resnet_reorder,
-                 "resnet101": _resnet_reorder,
-                 "resnet152": _resnet_reorder,
-                 "xception": _xception_reorder}
+    def __init__(self, state: dict[str, T.Any]) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._model = state["name"]
+        self._encoder = state["config"]["enc_architecture"] if self._model == "phaze_a" else None
+        self._functions = {"iae": self._iae_reorder,
+                           "inception_resnet_v2": self._inception_reorder,
+                           "inception_v3": self._inception_reorder,
+                           "nasnet_large": self._nasnet_reorder,
+                           "nasnet_mobile": self._nasnet_reorder,
+                           "phaze_a": self._phaze_a_reorder,
+                           "xception": self._xception_reorder}
 
-    if model not in functions:
+    @classmethod
+    def _order_layers(cls,
+                      layers: dict[str, LayerInfo],
+                      order: list[str]) -> dict[str, LayerInfo]:
+        """ Re-orders the layers according to the provided order list. Layers not in the order
+        list are returned in their original positions
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+        order
+            list of layer names that must be ordered in the returned dictionary
+
+        Returns
+        -------
+        The layers re-ordered according to the provided order list
+        """
+        ordered = {k: v
+                   for o in order
+                   for k, v in layers.items()
+                   if k == o}
+        order_iter = iter(ordered)
+
+        retval: dict[str, LayerInfo] = {}
+        for k, v in layers.items():
+            if k in ordered:
+                next_k = next(order_iter)
+                retval[next_k] = layers[next_k]
+            else:
+                retval[k] = v
+
+        return retval
+
+    def _iae_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+        """ Re-orders the intermediate layers for IAE models. Inters graph in order [both, B, A]
+        but build in order [A, B, Both]
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+
+        Returns
+        -------
+        The re-ordered layers
+        """
+        order = [layer
+                 for prefix in ["layers.functional_2.", "layers.functional_1."]
+                 for layer in layers
+                 if layer.startswith(prefix)]
+        return self._order_layers(layers, order)
+
+    def _inception_reorder(self, layers: dict[str, LayerInfo], v3=False) -> dict[str, LayerInfo]:
+        """ Re-orders imported layer names from Keras Applications InceptionResNet models from
+        graph order to build order. Fairly straightforward as default naming is used for all
+        problematic layers
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+        v3
+            ``True`` if the model is InceptionV3, ``False`` if InceptionResNetV2.
+            Default: ``False``
+
+        Returns
+        -------
+        The re-ordered layers
+        """
+        rename = {"mixed9_0": "mixed9",  # 1 badly named layer in inception v3
+                  "mixed9": "mixed9_1",
+                  "mixed9_1": "mixed9_2"} if v3 else {}
+
+        groups: dict[str, list[tuple[int, str]]] = defaultdict(list)
+        for key, layer in layers.items():
+            name = layer.layer_name
+            if not key.startswith(_ENC_PREFIX) or name.startswith("input_layer"):
+                continue
+
+            name = rename.get(name, name)
+            head, sep, tail = name.rpartition("_")
+            if sep and tail.isdigit():
+                groups[head].append((int(tail), key))
+            else:
+                groups[name].append((0, key))
+
+        order = [key
+                 for group in groups.values()
+                 for _, key in sorted(group)]
+        return self._order_layers(layers, order)
+
+    def _nasnet_reorder(self, layers: dict[str, LayerInfo]  # pylint:disable=too-many-locals
+                        ) -> dict[str, LayerInfo]:
+        """ Re-orders imported layer names from Keras Applications NasNet from graph order to build
+        order. Some fairly arbitrary re-ordering occurs, but fortunately layer labelling makes this
+        a bit easier
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+
+        Returns
+        -------
+        The re-ordered layers
+        """
+        sep_match = re.compile(r"^(separable)_conv_(\d)(?:_.*?(left|right)(\d))?.*_(\d+)$")
+        adj_match = re.compile(r"^(adjust|reduction)_(conv|bn)_.*?(\d+)$")
+        reorder_types = {"BatchNormalization", "Conv2D", "SeparableConv2D"}
+        type_order = ["adjust", "reduction", "separable"]
+        conv_order = ["conv", "bn"]
+        side_order = ["left", "right"]
+
+        sort_keys = {}
+        for k, v in layers.items():
+            if (not k.startswith("layers.functional.layers.functional.layers.")
+                    or v.layer_type not in reorder_types):
+                continue
+
+            lyr = v.layer_name
+            block_add = 0 if "stem" in lyr else 3  # Numbering resets after stem
+            match = next((m for m in (sep_match.match(lyr), adj_match.match(lyr)) if m), None)
+            if not match:
+                continue
+
+            groups = match.groups()
+            order = [int(groups[-1]) + block_add,   # Ensure blocks ordered
+                     type_order.index(groups[0])]   # Ensure adjust, reduce, separable order
+
+            if len(groups) == 3:  # adjust/reduce
+                order.extend([conv_order.index(groups[1]), 0, 0])
+            else:   # separable
+                order.extend([int(groups[3]), side_order.index(groups[2]), int(groups[1])])
+
+            sort_keys[k] = order
+
+        sorted_keys = [k for k, _ in sorted(sort_keys.items(), key=lambda item: item[1])]
+        return self._order_layers(layers, sorted_keys)
+
+    def _phaze_a_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+        """ Phaze-A has several configurations that require re-ordering
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+
+        Returns
+        -------
+        The re-ordered layers
+        """
+        if self._encoder in self._functions:
+            logger.debug("[LayerSorter] Sorting Phaze-A encoder: %s", self._encoder)
+            kwargs = {"v3": True} if self._encoder == "inception_v3" else {}
+            layers = self._functions[self._encoder](layers, **kwargs)
+
         return layers
 
-    logger.debug("Re-ordering layers for '%s'", model)
-    return functions[model](layers)
+    def _xception_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+        """ Re-orders imported layer names from Keras Applications Xception from graph order to
+        build order. Skip layers need to be built prior to separable conv within each block
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+
+        Returns
+        -------
+        The re-ordered layers
+        """
+        current_id = None
+        order = []
+        skips = []
+        block = []
+
+        for k, v in layers.items():
+            name = v.layer_name
+
+            if not k.startswith(_ENC_PREFIX) or name.startswith("input_layer"):
+                continue
+
+            if name.startswith("block"):
+                block_id = int(name.split("_")[0][5:])
+                if current_id is not None and block_id != current_id:
+                    logger.debug("[LayerSorter] Sorted xception block_id %s: %s",
+                                 current_id, [layers[k].layer_name for k in skips + block])
+                    order.extend(skips + block)
+                    skips.clear()
+                    block.clear()
+
+                current_id = block_id
+                block.append(k)
+            else:
+                skips.append(k)
+
+        logger.debug("[LayerSorter] Sorted xception block_id %s: %s",
+                     current_id, [layers[k].layer_name for k in skips + block])
+        order.extend(skips + block)
+        return self._order_layers(layers, order)
+
+    def sort(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+        """ Re-order the layers from Keras graph order to Keras construction order for those models
+        which require it for weight porting
+
+        Parameters
+        ----------
+        layers
+            The layers of the model that require reordering
+
+        Returns
+        -------
+        The reordered layers
+        """
+        if self._model not in self._functions:
+            return layers
+        logger.debug("[LayerSorter] Re-ordering layers: %s", self._model)
+        return self._functions[self._model](layers)
 
 
 class KerasConfigParser:
@@ -568,9 +610,7 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         -------
         The weights sorted into model creation order
         """
-        model = (self.state["config"]["enc_architecture"] if self.state["name"] == "phaze_a"
-                 else self.state["name"])
-        self.layers = reorder_layers(model, self.layers)
+        self.layers = LayerSorter(self.state).sort(self.layers)
 
         lookup: dict[str, list[str]] = {}
         # Remove normalization weights from the beginning of EffNet
@@ -636,7 +676,8 @@ class KerasModel:  # pylint:disable=too-few-public-methods
                          {k: v.shape for k, v in self.weights.items()})
 
             if "optimizer.pt" in name_list:
-                self._optimizer = torch.load(io.BytesIO(z_file.read("optimizer.pt")))
+                self._optimizer = torch.load(io.BytesIO(z_file.read("optimizer.pt")),
+                                             map_location="cpu")
                 logger.debug("[KerasModel] Loaded optimizer state: %s",
                              {k: v if k == "version" else type(v)
                               for k, v in self._optimizer.items()})
