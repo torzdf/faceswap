@@ -5,7 +5,8 @@ import logging
 import cv2
 import numpy as np
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 from . import cv2_dnn_defaults as cfg
 
@@ -32,8 +33,8 @@ class CV2DNNDetect(ExtractPlugin):
         -------
         The loaded cv2-DNN model
         """
-        weights = GetModel(model_filename=["resnet_ssd_v1.caffemodel", "resnet_ssd_v1.prototxt"],
-                           git_model_id=4)
+        weights = GetWeights(model_filename=["resnet_ssd_v1.caffemodel", "resnet_ssd_v1.prototxt"],
+                             git_model_id=4)
         model_path = weights.model_path
         assert isinstance(model_path, list)
         model = cv2.dnn.readNetFromCaffe(model_path[1], model_path[0])

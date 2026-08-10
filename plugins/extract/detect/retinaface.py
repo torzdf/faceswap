@@ -37,7 +37,8 @@ from torch.nn import functional as F
 import torchvision.models as tv_models
 import torchvision.models._utils as tv_utils
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 
 from . import retinaface_defaults as cfg
@@ -108,7 +109,7 @@ class RetinaFace(ExtractPlugin):
         backbone = T.cast(T.Literal["resnet", "mobilenet"], cfg.backbone())
         assert backbone in ("resnet", "mobilenet")
         vers = 1 if backbone == "resnet" else 2
-        weights = GetModel(f"retinaface_v{vers}.pth", 32).model_path
+        weights = GetWeights(f"retinaface_v{vers}.pth", 32).model_path
         assert isinstance(weights, str)
         return T.cast(RetinaFaceModel, self.load_torch_model(RetinaFaceModel(backbone), weights))
 

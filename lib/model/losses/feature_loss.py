@@ -10,7 +10,8 @@ from torch import nn
 from torchvision.models import alexnet, squeezenet1_1, vgg16, feature_extraction
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:
     from collections.abc import Callable
@@ -118,7 +119,7 @@ class _LPIPSTrunkNet(nn.Module):
                                                           return_nodes=T.cast(list[str],
                                                                               net_info.outputs))
         if self._load_weights:
-            weights_path = GetModel(net_info.model_name, net_info.model_id).model_path
+            weights_path = GetWeights(net_info.model_name, net_info.model_id).model_path
             assert isinstance(weights_path, str)
             weights = torch.load(weights_path)
             net.load_state_dict(weights)
@@ -202,7 +203,7 @@ class _LPIPSLinearNet(nn.Module):
         net = nn.ModuleList(layers)
 
         if self._load_weights:
-            weights_path = GetModel(net_info.model_name, net_info.model_id).model_path
+            weights_path = GetWeights(net_info.model_name, net_info.model_id).model_path
             assert isinstance(weights_path, str)
             weights = torch.load(weights_path)
             state = net.state_dict()

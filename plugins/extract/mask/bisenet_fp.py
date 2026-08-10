@@ -13,7 +13,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import FacePlugin
 from . import bisenet_fp_defaults as cfg
 
@@ -102,7 +103,7 @@ class BiSeNetFP(FacePlugin):
         -------
         The loaded BiSeNetFP model
         """
-        weights = GetModel(f"bisenet_face_parsing_v{self._git_version}.pth", 14).model_path
+        weights = GetWeights(f"bisenet_face_parsing_v{self._git_version}.pth", 14).model_path
         assert isinstance(weights, str)
         return T.cast(BiSeNet, self.load_torch_model(BiSeNet(5 if self._is_faceswap else 19),
                                                      weights,

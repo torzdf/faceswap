@@ -14,7 +14,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 from . import hrnet_defaults as cfg
 from .dark_decoder import Dark
@@ -108,7 +109,7 @@ class HRNet(ExtractPlugin):
         """
         # version = 2 if cfg.weights() == "standard" else 3
         version = 2
-        weights = GetModel(f"hrnet_landmark_v{version}.pth", 34).model_path
+        weights = GetWeights(f"hrnet_landmark_v{version}.pth", 34).model_path
         assert isinstance(weights, str)
         model = T.cast(HighResolutionNet, self.load_torch_model(
             HighResolutionNet(num_joints=68,

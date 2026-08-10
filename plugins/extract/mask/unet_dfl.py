@@ -22,7 +22,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import FacePlugin
 from . import unet_dfl_defaults as cfg
 
@@ -52,7 +53,7 @@ class UNetDFL(FacePlugin):
         -------
         The loaded UnetDFL model
         """
-        weights = GetModel("DFL_256_sigmoid_v2.pth", 6).model_path
+        weights = GetWeights("DFL_256_sigmoid_v2.pth", 6).model_path
         assert isinstance(weights, str)
         return T.cast(UnetDFL, self.load_torch_model(UnetDFL(), weights))
 

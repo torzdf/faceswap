@@ -8,7 +8,8 @@ import numpy as np
 from torch import nn
 from torch.nn import functional as F
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import FacePlugin
 from . import vgg_clear_defaults as cfg
 
@@ -37,7 +38,7 @@ class VGGClear(FacePlugin):
         -------
         The loaded VGGClear model
         """
-        weights = GetModel("Nirkin_300_softmax_v2.pth", 8).model_path
+        weights = GetWeights("Nirkin_300_softmax_v2.pth", 8).model_path
         assert isinstance(weights, str)
         return T.cast(VGGClearModel, self.load_torch_model(VGGClearModel(),
                                                            weights,

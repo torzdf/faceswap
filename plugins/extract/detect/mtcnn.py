@@ -10,7 +10,8 @@ import torch
 from torch import nn
 
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 
 from . import mtcnn_defaults as cfg
@@ -56,7 +57,7 @@ class MTCNN(ExtractPlugin):
         -------
         The paths to the downloaded MTCNN weights files
         """
-        model = GetModel(
+        model = GetWeights(
             model_filename=["mtcnn_det_v3.1.pt", "mtcnn_det_v3.2.pt", "mtcnn_det_v3.3.pt"],
             git_model_id=2)
         model_path = model.model_path

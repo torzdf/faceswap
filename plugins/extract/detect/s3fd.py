@@ -15,7 +15,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 from . import s3fd_defaults as cfg
 
@@ -44,7 +45,7 @@ class S3FD(ExtractPlugin):
         -------
         The path to the downloaded S3FD weights file
         """
-        model = GetModel(model_filename="s3fd_torch_v3.pth", git_model_id=11)
+        model = GetWeights(model_filename="s3fd_torch_v3.pth", git_model_id=11)
         model_path = model.model_path
         assert isinstance(model_path, str)
         return model_path
@@ -56,7 +57,7 @@ class S3FD(ExtractPlugin):
         -------
         The loaded S3FD model
         """
-        weights = GetModel(model_filename="s3fd_torch_v3.pth", git_model_id=11).model_path
+        weights = GetWeights(model_filename="s3fd_torch_v3.pth", git_model_id=11).model_path
         assert isinstance(weights, str)
         return T.cast(S3FDModel, self.load_torch_model(S3FDModel(), weights))
 

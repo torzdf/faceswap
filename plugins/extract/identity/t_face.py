@@ -7,7 +7,8 @@ import typing as T
 
 import numpy as np
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from lib.model.networks.insightface_resnet import ir_50, ir_101
 from plugins.extract.base import FacePlugin
 from . import t_face_defaults as cfg
@@ -49,7 +50,7 @@ class TFace(FacePlugin):
         # pylint:disable=duplicate-code
         model = ir_50 if self._backbone == "ir-50" else ir_101
         vers = 1 if self._backbone == "ir-50" else 2
-        weights = GetModel(f"tface_v{vers}.pth", 33).model_path
+        weights = GetWeights(f"tface_v{vers}.pth", 33).model_path
         assert isinstance(weights, str)
         input_size = T.cast(T.Literal[112, 224], self.input_size)
         assert input_size == 112

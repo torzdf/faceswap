@@ -29,7 +29,8 @@ import logging
 import cv2
 import numpy as np
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ class CV2DNNAlign(ExtractPlugin):
         -------
         The loaded cv2-DNN model
         """
-        weights = GetModel(model_filename="cnn-facial-landmark_v1.pb", git_model_id=1)
+        weights = GetWeights(model_filename="cnn-facial-landmark_v1.pb", git_model_id=1)
         model_path = weights.model_path
         assert isinstance(model_path, str)
         model = cv2.dnn.readNetFromTensorflow(model_path)

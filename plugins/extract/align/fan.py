@@ -13,7 +13,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from lib.utils import get_module_objects, GetModel
+from lib.model.weights import GetWeights
+from lib.utils import get_module_objects
 from plugins.extract.base import ExtractPlugin
 
 from . import fan_defaults as cfg
@@ -45,7 +46,7 @@ class FAN(ExtractPlugin):
         -------
         The loaded FAN model
         """
-        weights = GetModel("face-alignment-network_2d4_v4.pth", 13).model_path
+        weights = GetWeights("face-alignment-network_2d4_v4.pth", 13).model_path
         assert isinstance(weights, str)
         model = T.cast(FaceAlignmentNetwork,
                        self.load_torch_model(FaceAlignmentNetwork(num_stack=4,
