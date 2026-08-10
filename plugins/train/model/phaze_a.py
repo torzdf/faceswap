@@ -16,8 +16,8 @@ from torchvision import models as TVMods
 from lib.logger import parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy, InstanceNormLegacy, UpSampling2dLegacy
 from lib.model.layers import (
-    AdaIN, ChannelLayerNorm, ChannelRMSNorm, GaussianNoise, Reshape, ResidualBlock, UpscaleDNY,
-    Upscale2xBlock, UpscaleResizeImages, UpscaleSubpixel
+    AdaIN, ChannelLayerNorm, ChannelRMSNorm, GaussianNoise, Reshape, ResidualBlock,
+    UpscaleDNY, Upscale2xBlock, UpscaleResizeImages, UpscaleSubpixel
 )
 from lib.model.networks import (  # pylint:disable=unused-import  # noqa:F401
     convnext_xlarge, efficientnet_v2_b0, efficientnet_v2_b1, efficientnet_v2_b2,
@@ -153,8 +153,11 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
         torch_name="efficientnet_v2_m", default_size=480, **_EFF_NET_V2_LEGACY),
     "efficientnet_v2_l": _EncoderInfo(
         torch_name="efficientnet_v2_l", default_size=480, **_EFF_NET_V2_LEGACY),
-    "inception_resnet_v2": _EncoderInfo(
-        torch_name="~inception_resnet_v2", default_size=299, min_size=75, last_layer="conv2d_7b"),
+    "inception_resnet_v2": _EncoderInfo(torch_name="~inception_resnet_v2",
+                                        default_size=299,
+                                        min_size=75,
+                                        last_layer="conv2d_7b",
+                                        legacy_scaling=(-1, 1)),
     "inception_v3": _EncoderInfo(torch_name="inception_v3",
                                  default_size=299,
                                  min_size=75,
@@ -165,7 +168,8 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
                               last_layer="dw",
                               kwargs={"alpha": cfg.mobilenet_width(),
                                       "depth_multiplier": cfg.mobilenet_depth(),
-                                      "dropout": cfg.mobilenet_dropout()}),
+                                      "dropout": cfg.mobilenet_dropout()},
+                              legacy_scaling=(-1, 1)),
     "mobilenet_v2": _EncoderInfo(torch_name="mobilenet_v2",
                                  kwargs={"width_mult": cfg.mobilenet_width()},
                                  legacy_scaling=(-1, 1)),
@@ -182,24 +186,40 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "nasnet_large": _EncoderInfo(torch_name="~nasnet_large",
                                  kwargs={"include_top": False},
                                  default_size=331,
+                                 legacy_scaling=(-1, 1),
                                  enforce_for_weights=True),  # TODO check
-    "nasnet_mobile": _EncoderInfo(
-        torch_name="~nasnet_mobile", kwargs={"include_top": False}, enforce_for_weights=True),  # TODO check
-    "resnet50": _EncoderInfo(torch_name="~resnet50", kwargs={"include_top": False}),
-    "resnet101": _EncoderInfo(torch_name="~resnet101", kwargs={"include_top": False}),
-    "resnet152": _EncoderInfo(torch_name="~resnet152", kwargs={"include_top": False}),
+    "nasnet_mobile": _EncoderInfo(torch_name="~nasnet_mobile",
+                                  kwargs={"include_top": False},
+                                  legacy_scaling=(-1, 1),
+                                  enforce_for_weights=True),  # TODO check
+    "resnet50": _EncoderInfo(torch_name="~resnet50",
+                             kwargs={"include_top": False},
+                             legacy_scaling=(-1, 1)),
+    "resnet101": _EncoderInfo(torch_name="~resnet101",
+                              kwargs={"include_top": False},
+                              legacy_scaling=(-1, 1)),
+    "resnet152": _EncoderInfo(torch_name="~resnet152",
+                              kwargs={"include_top": False},
+                              legacy_scaling=(-1, 1)),
     "resnet50_v1_5": _EncoderInfo(torch_name="resnet50", last_layer="layer4"),
     "resnet101_v1_5": _EncoderInfo(torch_name="resnet101", last_layer="layer4"),
     "resnet152_v1_5": _EncoderInfo(torch_name="resnet152", last_layer="layer4"),
-    "resnet50_v2": _EncoderInfo(torch_name="~resnet50_v2", kwargs={"include_top": False}),
-    "resnet101_v2": _EncoderInfo(torch_name="~resnet101_v2", kwargs={"include_top": False}),
-    "resnet152_v2": _EncoderInfo(torch_name="~resnet152_v2", kwargs={"include_top": False}),
+    "resnet50_v2": _EncoderInfo(torch_name="~resnet50_v2",
+                                kwargs={"include_top": False},
+                                legacy_scaling=(-1, 1)),
+    "resnet101_v2": _EncoderInfo(torch_name="~resnet101_v2",
+                                 kwargs={"include_top": False},
+                                 legacy_scaling=(-1, 1)),
+    "resnet152_v2": _EncoderInfo(torch_name="~resnet152_v2",
+                                 kwargs={"include_top": False},
+                                 legacy_scaling=(-1, 1)),
     "vgg16": _EncoderInfo(torch_name="vgg16", legacy_scaling=(0, 255), legacy_bgr=True),
     "vgg19": _EncoderInfo(torch_name="vgg19", legacy_scaling=(0, 255), legacy_bgr=True),
     "xception": _EncoderInfo(torch_name="~xception",
                              min_size=71,
                              default_size=299,
-                             last_layer="act4"),
+                             last_layer="act4",
+                             legacy_scaling=(-1, 1)),
     "fs_original": _EncoderInfo(torch_name="", min_size=32, default_size=1024)
     }
 

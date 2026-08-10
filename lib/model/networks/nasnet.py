@@ -599,8 +599,9 @@ class NASNetA(nn.Module):  # pylint:disable=too-many-instance-attributes
                                filters * filter_multiplier ** 2,
                                num_blocks)
         self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.AvgPool2d(7, stride=1, padding=0)
+        self.pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout()
+        self.flatten = nn.Flatten()
         if include_top:
             self.fc = nn.Linear(24 * filters, num_classes)
 
@@ -639,8 +640,7 @@ class NASNetA(nn.Module):  # pylint:disable=too-many-instance-attributes
         The output tensor for the logits
         """
         x = T.cast(torch.Tensor, self.pool(features))
-        x = x.view(x.size(0), -1)
-        return self.fc(self.dropout(x))
+        return self.fc(self.dropout(self.flatten(x)))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Forward pass through NasNetAMobile
@@ -654,7 +654,6 @@ class NASNetA(nn.Module):  # pylint:disable=too-many-instance-attributes
         -------
         The output tensor from NasNetAMobile
         """
-        x = inputs * 2. - 1.  # Legacy Keras scaling
         x = self.features_forward(inputs)
         if self.include_top:
             x = self.logits_forward(x)

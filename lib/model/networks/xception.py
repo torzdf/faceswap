@@ -203,6 +203,7 @@ class Xception(nn.Module):  # pylint: disable=too-many-instance-attributes
             self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
         elif global_pool == "max":
             self.global_pool = nn.AdaptiveMaxPool2d((1, 1))
+        self.flatten = nn.Flatten()
         self.fc = nn.Linear(num_features, num_classes)
 
     def forward_features(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -264,6 +265,7 @@ class Xception(nn.Module):  # pylint: disable=too-many-instance-attributes
         x = self.global_pool(inputs)
         if self.drop_rate:
             F.dropout(x, self.drop_rate, training=self.training)
+        x = self.flatten(x)
         return x if pre_logits else self.fc(x)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -278,8 +280,7 @@ class Xception(nn.Module):  # pylint: disable=too-many-instance-attributes
         -------
         The output tensor from XceptionNet
         """
-        x = inputs * 2. - 1.  # legacy Keras scaling
-        x = self.forward_features(x)
+        x = self.forward_features(inputs)
         x = self.forward_head(x)
         return x
 

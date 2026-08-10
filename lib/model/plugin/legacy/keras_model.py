@@ -42,7 +42,10 @@ _ENC_PREFIX = "layers.functional.layers.functional.layers."
 
 
 class LayerSorter:
-    """ Sorts keras layers when graph order does not correspond to build order
+    """ Sorts keras layers when graph order does not correspond to Torch build order. Weights
+    matcher works by finding the next available Keras weights of the same shape as the currently
+    processing Torch weights, so the order does not need to be exact, but it needs to be good
+    enough for this algorhythm to select the correct weights
 
     Parameters
     ----------

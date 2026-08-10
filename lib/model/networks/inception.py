@@ -339,6 +339,7 @@ class InceptionResnetV2(nn.Module):  # pylint:disable=too-many-instance-attribut
             self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
         elif global_pool == "max":
             self.global_pool = nn.AdaptiveMaxPool2d((1, 1))
+        self.flatten = nn.Flatten()
         self.fc = nn.Linear(num_features, num_classes)
 
     def forward(self, inputs: torch.Tensor):
@@ -353,9 +354,8 @@ class InceptionResnetV2(nn.Module):  # pylint:disable=too-many-instance-attribut
         -------
         The output tensor from the Inception ResNet V2
         """
-        x = inputs * 2. - 1.  # Keras compatibility
         # features
-        x = self.conv2d_1a(x)
+        x = self.conv2d_1a(inputs)
         x = self.conv2d_2a(x)
         x = self.conv2d_2b(x)
         x = self.maxpool_3a(x)
@@ -374,6 +374,7 @@ class InceptionResnetV2(nn.Module):  # pylint:disable=too-many-instance-attribut
         # Head
         if self.global_pool is not None:
             x = self.global_pool(x)
+        x = self.flatten(x)
         return self.fc(x)
 
 

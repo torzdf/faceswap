@@ -129,9 +129,8 @@ class MobileNet(nn.Module):
         self.classifier = nn.Sequential(OrderedDict([
             ("pool", nn.AdaptiveAvgPool2d(1)),
             ("dropout", nn.Dropout(dropout)),
-            ("flatten", nn.Flatten()),
-            ("fc", nn.Linear(out_channels[-1] * depth_multiplier, classes))
-            ]))
+            ("fc", nn.Conv2d(out_channels[-1] * depth_multiplier, classes, 1)),
+            ("softmax", nn.Softmax())]))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Forward pass through MobileNet
@@ -145,9 +144,8 @@ class MobileNet(nn.Module):
         -------
         The output tensor from the MobileNet
         """
-        x = inputs * 2. - 1.  # Legacy Keras scaling
-        x = self.dw(self.conv1(x))
-        return self.classifier(x)
+        x = self.dw(self.conv1(inputs))
+        return self.classifier(x).view(x.shape[0], -1)
 
 
 def mobilenet(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> MobileNet:
@@ -191,6 +189,7 @@ def mobilenet_v3_small(weights: TVMobile.MobileNet_V3_Small_Weights | None = Non
     # Minimalist version needs to replace beginning + end hardswish with relu
     T.cast(nn.Sequential, model.features[0])[2] = nn.ReLU()
     T.cast(nn.Sequential, model.features[-1])[2] = nn.ReLU()
+    T.cast(nn.Sequential, model.classifier)[1] = nn.ReLU()
     # TODO load weights here
     return model
 
@@ -227,6 +226,8 @@ def mobilenet_v3_large(weights: TVMobile.MobileNet_V3_Large_Weights | None = Non
     # Minimalist version needs to replace beginning + end hardswish with relu
     T.cast(nn.Sequential, model.features[0])[2] = nn.ReLU()
     T.cast(nn.Sequential, model.features[-1])[2] = nn.ReLU()
+    T.cast(nn.Sequential, model.classifier)[1] = nn.ReLU()
+
     # TODO load weights here
     return model
 

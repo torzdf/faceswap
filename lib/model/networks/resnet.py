@@ -274,8 +274,7 @@ class ResNet(nn.Module):
         -------
         The output tensor from ResNet
         """
-        x = inputs * 2. - 1.  # Legacy Keras scaling
-        x = self.pool1(self.conv1(x))
+        x = self.pool1(self.conv1(inputs))
         x = self.post(self.blocks(x))
         return self.classifier(x)
 
