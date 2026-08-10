@@ -46,7 +46,9 @@ class FAN(ExtractPlugin):
         -------
         The loaded FAN model
         """
-        weights = GetWeights("face-alignment-network_2d4_v4.pth", 13).model_path
+        weights = GetWeights("face-alignment-network_2d4.pth",
+                             version=4,
+                             git_model_id=13).model_path
         assert isinstance(weights, str)
         model = T.cast(FaceAlignmentNetwork,
                        self.load_torch_model(FaceAlignmentNetwork(num_stack=4,

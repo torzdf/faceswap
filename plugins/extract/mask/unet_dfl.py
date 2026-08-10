@@ -53,7 +53,7 @@ class UNetDFL(FacePlugin):
         -------
         The loaded UnetDFL model
         """
-        weights = GetWeights("DFL_256_sigmoid_v2.pth", 6).model_path
+        weights = GetWeights("DFL_256_sigmoid.pth", version=2, git_model_id=6).model_path
         assert isinstance(weights, str)
         return T.cast(UnetDFL, self.load_torch_model(UnetDFL(), weights))
 

@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from torchvision.models import inception as tv_incept
 
 from lib.logger import parse_class_init
+from lib.model.weights import GetWeights
 from lib.utils import get_module_objects
 
 logger = logging.getLogger(__name__)
@@ -387,8 +388,15 @@ def inception_resnet_v2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T
     weights
         "DEFAULT" to load imagenet trained weights
     """
+    if weights is not None and weights != "DEFAULT":
+        logger.warning("Invalid weights type: '%s'. Falling back to 'DEFAULT'", weights)
+        weights = "DEFAULT"
     retval = InceptionResnetV2(**kwargs)
-    # TODO port weights and load here
+    if weights == "DEFAULT":
+        weights_file = GetWeights("inception_resnet_v2_imagenet").model_path
+        assert isinstance(weights_file, str)
+        state_dict = torch.load(weights_file, map_location="cpu")
+        retval.load_state_dict(state_dict)
     return retval
 
 

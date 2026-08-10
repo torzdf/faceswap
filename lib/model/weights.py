@@ -2,7 +2,6 @@
 """ Handles the downloading of model weights files from remote resources and caching locally """
 from __future__ import annotations
 
-import abc
 import logging
 import os
 import sys
@@ -29,9 +28,12 @@ class GetWeights():
     ----------
     model_filename
         The name of the model to be loaded (see notes below)
-    git_model_id
+    version
+        The version ID of the weights to load. Default: 0
+    git_model_id, optional
         The second digit in the github tag that identifies this model. See
-        https://github.com/deepfakes-models/faceswap-models for more information
+        https://github.com/deepfakes-models/faceswap-models for more information. Default:
+        ``None`` (load from huggingface)
 
     Notes
     ------
@@ -50,17 +52,19 @@ class GetWeights():
     >>> model_downloader = GetWeights("s3fd_keras_v2.h5", 11)
     """
 
-    def __init__(self, model_filename: str | list[str], git_model_id: int) -> None:
+    def __init__(self, model_filename: str | list[str],
+                 version: int = 0,
+                 git_model_id: int | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        if not isinstance(model_filename, list):
-            model_filename = [model_filename]
-        self._model_filename = model_filename
+        self._model_filename = self._get_model_filename(model_filename, version)
+        self._version = version
         self._cache_dir = os.path.join(PROJECT_ROOT, ".fs_cache")
         self._get(git_model_id)
 
     @property
     def _model_full_name(self) -> str:
-        """The full model name from the filename(s)."""
+        """The full model name from the filename(s). This is any common prefix (for zips with
+        multiple files) or the filename, with the extension removed """
         common_prefix = os.path.commonprefix(self._model_filename)
         retval = os.path.splitext(common_prefix)[0]
         logger.trace("[GetWeights] full name: %s", repr(retval))  # type:ignore[attr-defined]
@@ -92,6 +96,30 @@ class GetWeights():
         logger.trace("[GetWeights] exists: %s", repr(retval))  # type:ignore[attr-defined]
         return retval
 
+    @classmethod
+    def _get_model_filename(cls, filenames: list[str] | str, version: int) -> list[str]:
+        """ nstructs the full model filename(s) by appending the version number to each input
+        filename if version is greater than 0
+
+        Parameters
+        ----------
+        filenames
+            The input model filename(s). Can be a single string or a list of strings.
+        version
+            The version number to append to each filename
+
+        Returns
+        -------
+        A list of fully constructed filenames with the version number appended.
+        """
+        retval = filenames if isinstance(filenames, list) else [filenames]
+        if version:
+            split = [os.path.splitext(x) for x in retval]
+            retval = [f"{fname}_v{version}{ext}" for fname, ext in split]
+        logger.debug("[GetWeights] Model '%s' filename from version %s: %s",
+                     filenames, version, retval)
+        return retval
+
     def _get(self, git_model_id: int | None) -> None:
         """Check the model exists, if not, download the model, unzip it and place it in the
         model's cache folder.
@@ -106,50 +134,42 @@ class GetWeights():
             logger.debug("[GetWeights] Model exists: %s", repr(self.model_path))
             return
 
-        if git_model_id is not None:
-            GithubDownloader(self._cache_dir,
-                             self._model_full_name,
-                             git_model_id).download()
+        if git_model_id is None:
+            weights_from_huggingface(self._cache_dir, self._model_full_name)
         else:
-            raise ValueError("No model ID provided for download.")
+            weights_from_github(self._cache_dir, self._model_full_name, git_model_id)
 
 
-class Downloader(abc.ABC):
+class Downloader:
     """ Downloads a zipped model file from the given resource and de-compresses it to faceswap's
     cache
 
     Parameters
     ----------
-    folder
+    destination_folder
         The directory to cache the model in
-    model_name
-        The full path to the extracted location
     url
-        The URL to download the zip file from
+        The URL to download the zip file from. The filename must be derivable from the end of the
+        URL
     retries
         Number of times to retry downloading before failing. Default: 6
     chunk_size
         Chunk size for downloading and unzipping. Default: 1024
     """
     def __init__(self,
-                 folder: str,
-                 model_path: str,
+                 destination_folder: str,
                  url: str,
                  retries: int = 6,
                  chunk_size: int = 1024) -> None:
         logger.debug(parse_class_init(locals()))
-        self._cache_dir = folder
-        self._model_path = model_path
+        self._cache_dir = destination_folder
+        assert os.path.splitext(url)[-1] == ".zip"
         self._url = url
+        self._model_name = os.path.basename(os.path.splitext(url)[0])
+        self._model_zip_path = os.path.join(self._cache_dir, os.path.basename(url))
+
         self._retries = retries
         self._chunk_size = chunk_size
-
-    @property
-    def _model_zip_path(self) -> str:
-        """ The full path to downloaded zip file. """
-        retval = os.path.join(self._cache_dir, f"{self._model_path}.zip")
-        logger.trace("[GetWeights] zip path: %s", repr(retval))  # type:ignore[attr-defined]
-        return retval
 
     @property
     def _url_partial_size(self) -> int:
@@ -195,8 +215,7 @@ class Downloader(abc.ABC):
 
     def _download_model(self) -> None:
         """ Download the model zip from github to the cache folder. """
-        logger.info("Downloading model: '%s' from: %s",
-                    os.path.basename(self._model_path), self._url)
+        logger.info("Downloading model: '%s' from: %s", self._model_name, self._url)
         for attempt in range(self._retries):
             try:
                 downloaded_size = self._url_partial_size
@@ -255,7 +274,7 @@ class Downloader(abc.ABC):
 
     def _unzip_model(self) -> None:
         """ Unzip the model file to the cache folder """
-        logger.info("Extracting: '%s'", os.path.basename(self._model_path))
+        logger.info("Extracting: '%s'", self._model_name)
         try:
             with zipfile.ZipFile(self._model_zip_path, "r") as zip_file:
                 self._write_model(zip_file)
@@ -270,7 +289,12 @@ class Downloader(abc.ABC):
         os.remove(self._model_zip_path)
 
 
-class GithubDownloader(Downloader):
+def weights_from_github(folder: str,
+                        model_name: str,
+                        git_model_id: int,
+                        repo: str = "deepfakes-models/faceswap-models",
+                        retries=6,
+                        chunk_size=1024) -> None:
     """ Download a model from deepfakes-models releases and unzip to the cache path.
 
     Parameters
@@ -278,10 +302,13 @@ class GithubDownloader(Downloader):
     folder
         The directory to cache the model in
     model_name
-        The full path to the extracted location
+        The name of the model without the file extension. For zips that contain multiple models
+        this will be the common prefix. Otherwise it will be the filename.
     git_model_id
         The second digit in the github tag that identifies this model. See
         https://github.com/deepfakes-models/faceswap-models for more information
+    repo
+        The Github repository identifier. Default: "deepfakes-models/faceswap-models"
     retries
         Number of times to retry downloading before failing. Default: 6
     chunk_size
@@ -303,29 +330,65 @@ class GithubDownloader(Downloader):
     >>> from lib.utils import GetWeights
     >>> model_downloader = GetWeights("s3fd_keras_v2.h5", 11)
     """
-    def __init__(self,
-                 folder: str,
-                 model_path: str,
-                 git_model_id: int,
-                 retries=6,
-                 chunk_size=1024) -> None:
-        logger.debug(parse_class_init(locals()))
+    url_base = f"https://github.com/{repo}/releases/download"
+    version = int(model_name[model_name.rfind("_") + 2:])
+    tag = f"v{git_model_id}.{version}"
+    url = f"{url_base}/{tag}/{model_name}.zip"
+    Downloader(folder, url, retries=retries, chunk_size=chunk_size).download()
 
-        url_base = "https://github.com/deepfakes-models/faceswap-models/releases/download"
 
-        version = int(model_path[model_path.rfind("_") + 2:])
-        tag = f"v{git_model_id}.{version}"
+def weights_from_huggingface(folder: str,
+                             model_name: str,
+                             repo: str = "deepfakes/faceswap",
+                             version: int = 0,
+                             retries: int = 6,
+                             chunk_size: int = 1024) -> None:
+    """ Download a model from HuggingFace and unzip to the cache path.
 
-        url = f"{url_base}/{tag}/{model_path}.zip"
+    Parameters
+    ----------
+    folder
+        The directory to cache the model in
+    model_name
+        The name of the model without the file extension. For zips that contain multiple models
+        this will be the common prefix. Otherwise it will be the filename.
+    repo
+        The HuggingFace repository identifier. Default: "deepfakes/faceswap"
+    version
+        The version ID of the model. Default: 0
+    retries
+        Number of times to retry downloading before failing. Default: 6
+    chunk_size
+        Chunk size for downloading and unzipping. Default: 1024
 
-        super().__init__(folder, model_path, url, retries=retries, chunk_size=chunk_size)
+    Example
+    -------
+    >>> from lib.utils import HuggingFaceDownloader
+    >>> model_downloader = HuggingFaceDownloader(
+    ...     folder=".fs_cache",
+    ...     model_name="resnet50",
+    ...     repo="deepfakes/faceswap",
+    ...     version=0,
+    ... )
+    """
+    url_base = "https://huggingface.co"
+    model_file = model_name if version == 0 else f"{model_name}_v{version}"
+    url = f"{url_base}/buckets/{repo}/resolve/{model_file}.zip"
+    Downloader(folder, url, retries=retries, chunk_size=chunk_size).download()
 
 
 __all__ = get_module_objects(__name__)
 
 
 if __name__ == "__main__":
-    m = GetWeights(
-        model_filename=["mtcnn_det_v3.1.pt", "mtcnn_det_v3.2.pt", "mtcnn_det_v3.3.pt"],
-        git_model_id=2)
+    # m = GetWeights(
+    #    model_filename=["mtcnn_det_v3.1.pt", "mtcnn_det_v3.2.pt", "mtcnn_det_v3.3.pt"],
+    #    git_model_id=2)
+    from lib.logger import log_setup
+    log_setup("TRACE", "", "")
+
+    # m = GetWeights("mobilenet_imagenet.pth", 0, git_model_id=None)
+    m = GetWeights(model_filename=["resnet_ssd.caffemodel", "resnet_ssd.prototxt"],
+                   version=1,
+                   git_model_id=4)
     print(m.model_path)

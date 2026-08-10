@@ -54,7 +54,7 @@ class CV2DNNAlign(ExtractPlugin):
         -------
         The loaded cv2-DNN model
         """
-        weights = GetWeights(model_filename="cnn-facial-landmark_v1.pb", git_model_id=1)
+        weights = GetWeights(model_filename="cnn-facial-landmark.pb", version=1, git_model_id=1)
         model_path = weights.model_path
         assert isinstance(model_path, str)
         model = cv2.dnn.readNetFromTensorflow(model_path)

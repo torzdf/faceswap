@@ -33,7 +33,8 @@ class CV2DNNDetect(ExtractPlugin):
         -------
         The loaded cv2-DNN model
         """
-        weights = GetWeights(model_filename=["resnet_ssd_v1.caffemodel", "resnet_ssd_v1.prototxt"],
+        weights = GetWeights(model_filename=["resnet_ssd.caffemodel", "resnet_ssd.prototxt"],
+                             version=1,
                              git_model_id=4)
         model_path = weights.model_path
         assert isinstance(model_path, list)

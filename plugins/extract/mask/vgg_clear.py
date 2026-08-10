@@ -38,7 +38,7 @@ class VGGClear(FacePlugin):
         -------
         The loaded VGGClear model
         """
-        weights = GetWeights("Nirkin_300_softmax_v2.pth", 8).model_path
+        weights = GetWeights("Nirkin_300_softmax.pth", version=2, git_model_id=8).model_path
         assert isinstance(weights, str)
         return T.cast(VGGClearModel, self.load_torch_model(VGGClearModel(),
                                                            weights,

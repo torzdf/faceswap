@@ -109,7 +109,7 @@ class RetinaFace(ExtractPlugin):
         backbone = T.cast(T.Literal["resnet", "mobilenet"], cfg.backbone())
         assert backbone in ("resnet", "mobilenet")
         vers = 1 if backbone == "resnet" else 2
-        weights = GetWeights(f"retinaface_v{vers}.pth", 32).model_path
+        weights = GetWeights("retinaface.pth", version=vers, git_model_id=32).model_path
         assert isinstance(weights, str)
         return T.cast(RetinaFaceModel, self.load_torch_model(RetinaFaceModel(backbone), weights))
 

@@ -109,7 +109,7 @@ class HRNet(ExtractPlugin):
         """
         # version = 2 if cfg.weights() == "standard" else 3
         version = 2
-        weights = GetWeights(f"hrnet_landmark_v{version}.pth", 34).model_path
+        weights = GetWeights("hrnet_landmark.pth", version=version, git_model_id=34).model_path
         assert isinstance(weights, str)
         model = T.cast(HighResolutionNet, self.load_torch_model(
             HighResolutionNet(num_joints=68,

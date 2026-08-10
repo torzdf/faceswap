@@ -50,7 +50,7 @@ class TFace(FacePlugin):
         # pylint:disable=duplicate-code
         model = ir_50 if self._backbone == "ir-50" else ir_101
         vers = 1 if self._backbone == "ir-50" else 2
-        weights = GetWeights(f"tface_v{vers}.pth", 33).model_path
+        weights = GetWeights("tface.pth", version=vers, git_model_id=33).model_path
         assert isinstance(weights, str)
         input_size = T.cast(T.Literal[112, 224], self.input_size)
         assert input_size == 112

@@ -45,7 +45,7 @@ class S3FD(ExtractPlugin):
         -------
         The path to the downloaded S3FD weights file
         """
-        model = GetWeights(model_filename="s3fd_torch_v3.pth", git_model_id=11)
+        model = GetWeights(model_filename="s3fd_torch.pth", version=3, git_model_id=11)
         model_path = model.model_path
         assert isinstance(model_path, str)
         return model_path
@@ -57,7 +57,9 @@ class S3FD(ExtractPlugin):
         -------
         The loaded S3FD model
         """
-        weights = GetWeights(model_filename="s3fd_torch_v3.pth", git_model_id=11).model_path
+        weights = GetWeights(model_filename="s3fd_torch.pth",
+                             version=3,
+                             git_model_id=11).model_path
         assert isinstance(weights, str)
         return T.cast(S3FDModel, self.load_torch_model(S3FDModel(), weights))
 

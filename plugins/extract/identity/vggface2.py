@@ -60,7 +60,7 @@ class VGGFace2(FacePlugin):
         The loaded VGGFace2 model
         """
         # pylint:disable=duplicate-code
-        weights = GetWeights("vggface2_resnet50_v3.pth", 10).model_path
+        weights = GetWeights("vggface2_resnet50.pth", version=3, git_model_id=10).model_path
         assert isinstance(weights, str)
         return T.cast(VGGFace2Model, self.load_torch_model(VGGFace2Model(), weights))
 

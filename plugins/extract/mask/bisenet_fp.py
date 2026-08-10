@@ -103,7 +103,9 @@ class BiSeNetFP(FacePlugin):
         -------
         The loaded BiSeNetFP model
         """
-        weights = GetWeights(f"bisenet_face_parsing_v{self._git_version}.pth", 14).model_path
+        weights = GetWeights("bisenet_face_parsing.pth",
+                             version=self._git_version,
+                             git_model_id=14).model_path
         assert isinstance(weights, str)
         return T.cast(BiSeNet, self.load_torch_model(BiSeNet(5 if self._is_faceswap else 19),
                                                      weights,

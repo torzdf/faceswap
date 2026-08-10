@@ -45,29 +45,29 @@ class NetInfo:
 
 
 _NETS = {"alex": NetInfo(model_id=15,
-                         model_name="alexnet_imagenet_no_top_v2.pth",
+                         model_name="alexnet_imagenet_no_top.pth",
                          net=alexnet,
                          outputs=[f"features.{i}" for i in (0, 3, 6, 8, 10)],
                          pad_amount=[2, 2, 1, 1, 1]),
          "squeeze": NetInfo(model_id=16,
-                            model_name="squeezenet_imagenet_no_top_v2.pth",
+                            model_name="squeezenet_imagenet_no_top.pth",
                             net=squeezenet1_1,
                             outputs=[f"features.{i}" for i in (0, 4, 7, 9, 10, 11, 12)],
                             pad_amount=1),
          "vgg16": NetInfo(model_id=17,
-                          model_name="vgg16_imagenet_no_top_v2.pth",
+                          model_name="vgg16_imagenet_no_top.pth",
                           net=vgg16,
                           outputs=[f"features.{i}" for i in (2, 7, 14, 21, 29)],
                           pad_amount=1)}
 
 _LINEAR = {"alex": NetInfo(model_id=18,
-                           model_name="alexnet_lpips_v2.pth",
+                           model_name="alexnet_lpips.pth",
                            outputs=[64, 192, 384, 256, 256]),
            "squeeze": NetInfo(model_id=19,
-                              model_name="squeezenet_lpips_v2.pth",
+                              model_name="squeezenet_lpips.pth",
                               outputs=[64, 128, 256, 384, 384, 512, 512]),
            "vgg16": NetInfo(model_id=20,
-                            model_name="vgg16_lpips_v2.pth",
+                            model_name="vgg16_lpips.pth",
                             outputs=[64, 128, 256, 512, 512])}
 
 
@@ -119,7 +119,9 @@ class _LPIPSTrunkNet(nn.Module):
                                                           return_nodes=T.cast(list[str],
                                                                               net_info.outputs))
         if self._load_weights:
-            weights_path = GetWeights(net_info.model_name, net_info.model_id).model_path
+            weights_path = GetWeights(net_info.model_name,
+                                      version=2,
+                                      git_model_id=net_info.model_id).model_path
             assert isinstance(weights_path, str)
             weights = torch.load(weights_path)
             net.load_state_dict(weights)
@@ -203,7 +205,9 @@ class _LPIPSLinearNet(nn.Module):
         net = nn.ModuleList(layers)
 
         if self._load_weights:
-            weights_path = GetWeights(net_info.model_name, net_info.model_id).model_path
+            weights_path = GetWeights(net_info.model_name,
+                                      version=2,
+                                      git_model_id=net_info.model_id).model_path
             assert isinstance(weights_path, str)
             weights = torch.load(weights_path)
             state = net.state_dict()

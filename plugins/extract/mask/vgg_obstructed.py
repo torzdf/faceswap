@@ -40,7 +40,7 @@ class VGGObstructed(FacePlugin):
         -------
         The loaded VGGObstructed model
         """
-        weights = GetWeights("Nirkin_500_softmax_v2.pth", 5).model_path
+        weights = GetWeights("Nirkin_500_softmax.pth", version=2, git_model_id=5).model_path
         assert isinstance(weights, str)
         return T.cast(VGGObstructedModel, self.load_torch_model(VGGObstructedModel(),
                                                                 weights,
