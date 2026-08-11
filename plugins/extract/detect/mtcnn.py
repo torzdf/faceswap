@@ -58,9 +58,8 @@ class MTCNN(ExtractPlugin):
         The paths to the downloaded MTCNN weights files
         """
         model = GetWeights(
-            model_filename=["mtcnn_det.1.pt", "mtcnn_det.2.pt", "mtcnn_det.3.pt"],
-            version=3,
-            git_model_id=2)
+            model_filename=["mtcnn_pnet.pt", "mtcnn_rnet.pt", "mtcnn_onet.pt"],
+            version=0)
         model_path = model.model_path
         assert isinstance(model_path, list)
         return model_path

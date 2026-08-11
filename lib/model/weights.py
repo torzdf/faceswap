@@ -69,7 +69,7 @@ class GetWeights():
     def _model_identifier(self) -> str:
         """The full model name from the filename(s). This is any common prefix (for zips with
         multiple files) or the filename, with the extension removed """
-        common_prefix = os.path.commonprefix(self._filenames)
+        common_prefix = os.path.commonprefix(self._filenames).rstrip("_")
         retval = os.path.splitext(common_prefix)[0]
         logger.trace("[GetWeights] full name: %s", repr(retval))  # type:ignore[attr-defined]
         return retval
