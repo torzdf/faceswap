@@ -38,18 +38,22 @@ class GetWeights():
     Notes
     ------
     Models must have a certain naming convention: `<model_name>_v<version_number>.<extension>`
-    (eg: `s3fd_v1.pb`).
+    (eg: `s3fd_v1.pb`). The version number should not be passed as part of the model filename, it
+    will be automatically added to the model file by the given version ID. For example for the 3rd
+    version of s3fd.pth you would request:
+    GetWeights("s3fd_keras.pth", 3, 11)
+    This will return the file s3fd_keras_v3.pth
 
     Multiple models can exist within the model_filename. They should be passed as a list and follow
-    the same naming convention as above. Any differences in filename should occur AFTER the version
-    number: `<model_name>_v<version_number><differentiating_information>.<extension>` (eg:
-    `["mtcnn_det_v1.1.py", "mtcnn_det_v1.2.py", "mtcnn_det_v1.3.py"]`, `["resnet_ssd_v1.caffemodel"
+    the same naming convention as above. Any differences in filename should occur BEFORE the
+    version number: `<model_name><differentiating_information>_v<version_number>.<extension>` (eg:
+    `["mtcnn_det.1_v1.py", "mtcnn_det.2_v1.py", "mtcnn_det.3_v1.py"]`, `["resnet_ssd_v1.caffemodel"
     ,"resnet_ssd_v1.prototext"]`
 
     Example
     -------
     >>> from lib.utils import GetWeights
-    >>> model_downloader = GetWeights("s3fd_keras_v2.h5", 11)
+    >>> model_downloader = GetWeights("s3fd_keras.h5", 2)
     """
 
     def __init__(self, model_filename: str | list[str],
@@ -62,7 +66,7 @@ class GetWeights():
         self._get(git_model_id)
 
     @property
-    def _model_full_name(self) -> str:
+    def _model_identifier(self) -> str:
         """The full model name from the filename(s). This is any common prefix (for zips with
         multiple files) or the filename, with the extension removed """
         common_prefix = os.path.commonprefix(self._model_filename)
@@ -77,9 +81,9 @@ class GetWeights():
         Example
         -------
         >>> from lib.utils import GetWeights
-        >>> model_downloader = GetWeights("s3fd_keras_v2.h5", 11)
+        >>> model_downloader = GetWeights("s3fd_keras.pth", 2)
         >>> model_downloader.model_path
-        '/path/to/s3fd_keras_v2.h5'
+        '/path/to/s3fd_keras_v2.pth'
         """
         paths = [os.path.join(self._cache_dir, fname) for fname in self._model_filename]
         retval: str | list[str] = paths[0] if len(paths) == 1 else paths
@@ -98,7 +102,7 @@ class GetWeights():
 
     @classmethod
     def _get_model_filename(cls, filenames: list[str] | str, version: int) -> list[str]:
-        """ nstructs the full model filename(s) by appending the version number to each input
+        """ constructs the full model filename(s) by appending the version number to each input
         filename if version is greater than 0
 
         Parameters
@@ -135,9 +139,9 @@ class GetWeights():
             return
 
         if git_model_id is None:
-            weights_from_huggingface(self._cache_dir, self._model_full_name)
+            weights_from_huggingface(self._cache_dir, self._model_identifier)
         else:
-            weights_from_github(self._cache_dir, self._model_full_name, git_model_id)
+            weights_from_github(self._cache_dir, self._model_identifier, git_model_id)
 
 
 class Downloader:
@@ -151,6 +155,8 @@ class Downloader:
     url
         The URL to download the zip file from. The filename must be derivable from the end of the
         URL
+    display_url
+        The Repo URL to display for logging. Default "" (empty string: use download URL)
     retries
         Number of times to retry downloading before failing. Default: 6
     chunk_size
@@ -159,25 +165,65 @@ class Downloader:
     def __init__(self,
                  destination_folder: str,
                  url: str,
+                 display_url: str = "",
                  retries: int = 6,
                  chunk_size: int = 1024) -> None:
         logger.debug(parse_class_init(locals()))
         self._cache_dir = destination_folder
         assert os.path.splitext(url)[-1] == ".zip"
         self._url = url
-        self._model_name = os.path.basename(os.path.splitext(url)[0])
+        self._display_url = display_url if display_url else url
+        self._model_name = os.path.basename(url)
         self._model_zip_path = os.path.join(self._cache_dir, os.path.basename(url))
 
         self._retries = retries
         self._chunk_size = chunk_size
 
     @property
-    def _url_partial_size(self) -> int:
+    def _downloaded_bytes(self) -> int:
         """ How many bytes have already been downloaded. """
         zip_file = self._model_zip_path
         retval = os.path.getsize(zip_file) if os.path.exists(zip_file) else 0
         logger.trace("[GetWeights] Partial size: %s", retval)  # type:ignore[attr-defined]
         return retval
+
+    def _validate_zip(self, expected_length: int) -> None:
+        """ Validate that the downloaded zip is the correct size and is not corrupt
+
+        Parameters
+        ----------
+        expected_length
+            The number of bytes that the zip file should be
+
+        Raises
+        ------
+        RuntimeError if zip file failed validation
+        """
+        final_size = self._downloaded_bytes
+        logger.info("Validating: '%s'...", os.path.basename(self._model_zip_path))
+        logger.debug("[GetWeights] Downloaded '%s'. Expected: %s, got: %s",
+                     os.path.basename(self._model_zip_path), expected_length, final_size)
+
+        if final_size < expected_length:
+            raise RuntimeError("Truncated download. Resuming")
+
+        is_error = False
+        if final_size > expected_length:
+            is_error = True
+        elif not zipfile.is_zipfile(self._model_zip_path):
+            is_error = True
+        else:
+            try:
+                with zipfile.ZipFile(self._model_zip_path) as zf:
+                    is_error = zf.testzip() is not None
+            except zipfile.BadZipFile:
+                is_error = True
+
+        if is_error and os.path.exists(self._model_zip_path):
+            os.remove(self._model_zip_path)
+
+        if is_error:
+            raise RuntimeError("Corrupted download. Retrying")
 
     def _write_zipfile(self, response: HTTPResponse, downloaded_size: int) -> None:
         """ Write the model zip file to disk.
@@ -193,16 +239,18 @@ class Downloader:
         content_length = "0" if content_length is None else content_length
         length = int(content_length) + downloaded_size
         if length == downloaded_size:
+            self._validate_zip(length)
             logger.info("Zip already exists. Skipping download")
             return
         write_type = "wb" if downloaded_size == 0 else "ab"
-        assert tqdm is not None
+
         with open(self._model_zip_path, write_type) as out_file:
             p_bar = tqdm(desc="Downloading",
                          unit="B",
                          total=length,
                          unit_scale=True,
-                         unit_divisor=1024)
+                         unit_divisor=1024,
+                         leave=False)
             if downloaded_size != 0:
                 p_bar.update(downloaded_size)
             while True:
@@ -213,12 +261,14 @@ class Downloader:
                 out_file.write(buffer)
             p_bar.close()
 
+        self._validate_zip(length)
+
     def _download_model(self) -> None:
         """ Download the model zip from github to the cache folder. """
-        logger.info("Downloading model: '%s' from: %s", self._model_name, self._url)
+        logger.info("Downloading: '%s' from: %s", self._model_name, self._display_url)
         for attempt in range(self._retries):
             try:
-                downloaded_size = self._url_partial_size
+                downloaded_size = self._downloaded_bytes
                 req = request.Request(self._url)
                 if downloaded_size != 0:
                     req.add_header("Range", f"bytes={downloaded_size}-")
@@ -228,7 +278,7 @@ class Downloader:
                     self._write_zipfile(response, downloaded_size)
                 break
             except (socket_error, socket_timeout,
-                    urlliberror.HTTPError, urlliberror.URLError) as err:
+                    urlliberror.HTTPError, urlliberror.URLError, RuntimeError) as err:
                 if attempt + 1 < self._retries:
                     logger.warning("Error downloading model (%s). Retrying %s of %s...",
                                    str(err), attempt + 2, self._retries)
@@ -257,7 +307,8 @@ class Downloader:
                      unit="B",
                      total=length,
                      unit_scale=True,
-                     unit_divisor=1024)
+                     unit_divisor=1024,
+                     leave=False)
         for fname in f_names:
             out_fname = os.path.join(self._cache_dir, fname)
             logger.debug("[GetWeights] Extracting from: '%s' to '%s'",
@@ -274,7 +325,7 @@ class Downloader:
 
     def _unzip_model(self) -> None:
         """ Unzip the model file to the cache folder """
-        logger.info("Extracting: '%s'", self._model_name)
+        logger.info("Extracting: '%s'...", self._model_name)
         try:
             with zipfile.ZipFile(self._model_zip_path, "r") as zip_file:
                 self._write_model(zip_file)
@@ -313,28 +364,13 @@ def weights_from_github(folder: str,
         Number of times to retry downloading before failing. Default: 6
     chunk_size
         Chunk size for downloading and unzipping. Default: 1024
-
-    Notes
-    ------
-    Models must have a certain naming convention: `<model_name>_v<version_number>.<extension>`
-    (eg: `s3fd_v1.pb`).
-
-    Multiple models can exist within the model_filename. They should be passed as a list and follow
-    the same naming convention as above. Any differences in filename should occur AFTER the version
-    number: `<model_name>_v<version_number><differentiating_information>.<extension>` (eg:
-    `["mtcnn_det_v1.1.py", "mtcnn_det_v1.2.py", "mtcnn_det_v1.3.py"]`, `["resnet_ssd_v1.caffemodel"
-    ,"resnet_ssd_v1.prototext"]`
-
-    Example
-    -------
-    >>> from lib.utils import GetWeights
-    >>> model_downloader = GetWeights("s3fd_keras_v2.h5", 11)
     """
-    url_base = f"https://github.com/{repo}/releases/download"
+    url_base = f"https://github.com/{repo}/releases"
     version = int(model_name[model_name.rfind("_") + 2:])
     tag = f"v{git_model_id}.{version}"
-    url = f"{url_base}/{tag}/{model_name}.zip"
-    Downloader(folder, url, retries=retries, chunk_size=chunk_size).download()
+    dsp_url = f"{url_base}/{tag}"
+    url = f"{url_base}/download/{tag}/{model_name}.zip"
+    Downloader(folder, url, display_url=dsp_url, retries=retries, chunk_size=chunk_size).download()
 
 
 def weights_from_huggingface(folder: str,
@@ -373,22 +409,9 @@ def weights_from_huggingface(folder: str,
     """
     url_base = "https://huggingface.co"
     model_file = model_name if version == 0 else f"{model_name}_v{version}"
-    url = f"{url_base}/buckets/{repo}/resolve/{model_file}.zip"
-    Downloader(folder, url, retries=retries, chunk_size=chunk_size).download()
+    dsp_url = f"{url_base}/buckets/{repo}"
+    url = f"{dsp_url}/resolve/{model_file}.zip"
+    Downloader(folder, url, display_url=dsp_url, retries=retries, chunk_size=chunk_size).download()
 
 
 __all__ = get_module_objects(__name__)
-
-
-if __name__ == "__main__":
-    # m = GetWeights(
-    #    model_filename=["mtcnn_det_v3.1.pt", "mtcnn_det_v3.2.pt", "mtcnn_det_v3.3.pt"],
-    #    git_model_id=2)
-    from lib.logger import log_setup
-    log_setup("TRACE", "", "")
-
-    # m = GetWeights("mobilenet_imagenet.pth", 0, git_model_id=None)
-    m = GetWeights(model_filename=["resnet_ssd.caffemodel", "resnet_ssd.prototxt"],
-                   version=1,
-                   git_model_id=4)
-    print(m.model_path)
