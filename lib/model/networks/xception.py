@@ -15,6 +15,8 @@ import torch.nn.functional as F
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
+from .torch_vision import load_imagenet_weights
+
 logger = logging.getLogger(__name__)
 
 _BN_EPS = 1e-3
@@ -294,7 +296,7 @@ def xception(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> Xc
         "DEFAULT" to load imagenet trained weights
     """
     retval = Xception(**kwargs)
-    # TODO port weights and load here
+    load_imagenet_weights(retval, weights, "xception_imagenet.pth")
     return retval
 
 

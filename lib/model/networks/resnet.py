@@ -16,6 +16,8 @@ from torch import nn
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
+from .torch_vision import load_imagenet_weights
+
 logger = logging.getLogger(__name__)
 
 
@@ -291,7 +293,8 @@ def resnet50(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> Re
     blocks = [3, 4, 6, 3]
     version = kwargs.pop("version", 1)
     retval = ResNet(filters, blocks, version=version, **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["classifier"]
+    load_imagenet_weights(retval, weights, "resnet50_imagenet.pth", skip=skip)
     return retval
 
 
@@ -307,7 +310,8 @@ def resnet101(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> R
     blocks = [3, 4, 23, 3]
     version = kwargs.pop("version", 1)
     retval = ResNet(filters, blocks, version=version, **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["classifier"]
+    load_imagenet_weights(retval, weights, "resnet101_imagenet.pth", skip=skip)
     return retval
 
 
@@ -323,7 +327,8 @@ def resnet152(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> R
     blocks = [3, 8, 36, 3]
     version = kwargs.pop("version", 1)
     retval = ResNet(filters, blocks, version=version, **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["classifier"]
+    load_imagenet_weights(retval, weights, "resnet152_imagenet.pth", skip=skip)
     return retval
 
 
@@ -339,7 +344,8 @@ def resnet50_v2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) ->
     blocks = [3, 4, 6, 3]
     version = kwargs.pop("version", 2)
     retval = ResNet(filters, blocks, version=version, **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["classifier"]
+    load_imagenet_weights(retval, weights, "resnet50_v2_imagenet.pth", skip=skip)
     return retval
 
 
@@ -355,7 +361,8 @@ def resnet101_v2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -
     blocks = [3, 4, 23, 3]
     version = kwargs.pop("version", 2)
     retval = ResNet(filters, blocks, version=version, **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["classifier"]
+    load_imagenet_weights(retval, weights, "resnet101_v2_imagenet.pth", skip=skip)
     return retval
 
 
@@ -371,7 +378,8 @@ def resnet152_v2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -
     blocks = [3, 8, 36, 3]
     version = kwargs.pop("version", 2)
     retval = ResNet(filters, blocks, version=version, **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["classifier"]
+    load_imagenet_weights(retval, weights, "resnet152_v2_imagenet.pth", skip=skip)
     return retval
 
 

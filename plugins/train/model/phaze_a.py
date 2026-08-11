@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code,too-many-lines
 
 # TODO summaries instance counts + call per instance counts can be wrong
-# TODO warn when some layers could not load weights (imgnet + FS loading) [clipV]
+# TODO model weights porting for structure
 
 
 UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
@@ -64,12 +64,12 @@ class _EncoderInfo:  # pylint:disable=too-many-instance-attributes
         When the Torch model does not have a feats Sequential model, then this is the last layer
         that should be included in the encoder. All following layers are replaced with an
         nn.Identity() layer. Default: ``None`` (use feats Sequential model)
-    enforce_for_weights
-        ``True`` if the input size for the model must be forced to the default size when loading
-        imagenet weights, otherwise ``False``. Default: ``False``
     layer_append
         Mapping of additional layers from the classifier that should be included in the model:
         (layer_name, index | None). Default: ``None`` (no additional layers)
+    legacy_enforce_for_weights
+        Some models forced the input size for models under Keras, which is not necessary
+        in torch. ``True`` if the model forced input size in Keras. Default: ``False``
     legacy_scaling
         The float scaling that the Keras version of the model expected. Default: `(0, 1)`
     legacy_bgr
@@ -89,7 +89,7 @@ class _EncoderInfo:  # pylint:disable=too-many-instance-attributes
     min_size: int = 32
     kwargs: dict[str, T.Any] | None = None
     last_layer: str | None = None
-    enforce_for_weights: bool = False
+    legacy_enforce_for_weights: bool = False
     layer_append: tuple[tuple[str, int | None], ...] | None = None
     legacy_scaling: tuple[int, int] = (0, 1)
     legacy_bgr: bool = False
@@ -161,7 +161,6 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
     "inception_v3": _EncoderInfo(torch_name="inception_v3",
                                  default_size=299,
                                  min_size=75,
-                                 kwargs={"aux_logits": False},  # Match keras
                                  last_layer="Mixed_7c",
                                  legacy_scaling=(-1, 1)),
     "mobilenet": _EncoderInfo(torch_name="~mobilenet",
@@ -187,11 +186,11 @@ _MODEL_MAPPING: dict[str, _EncoderInfo] = {
                                  kwargs={"include_top": False},
                                  default_size=331,
                                  legacy_scaling=(-1, 1),
-                                 enforce_for_weights=True),  # TODO check
+                                 legacy_enforce_for_weights=True),
     "nasnet_mobile": _EncoderInfo(torch_name="~nasnet_mobile",
                                   kwargs={"include_top": False},
                                   legacy_scaling=(-1, 1),
-                                  enforce_for_weights=True),  # TODO check
+                                  legacy_enforce_for_weights=True),
     "resnet50": _EncoderInfo(torch_name="~resnet50",
                              kwargs={"include_top": False},
                              legacy_scaling=(-1, 1)),
@@ -775,18 +774,11 @@ class Encoder(nn.Sequential):
         super().__init__()
 
         arch = cfg.enc_architecture()
-        load_imagenet_weights = cfg.enc_load_weights()
         inc_bottleneck = cfg.bottleneck_in_encoder()
 
         self._name = snake_to_camel_case(arch)
         mod_info = _MODEL_MAPPING[arch]
-
-        if version < 1.0:  # No need to load weights if we are bringing in a legacy trained model
-            load_imagenet_weights = False
-        if load_imagenet_weights and not mod_info.torch_name:
-            logger.warning("Loading ImageNet weights is not supported for '%s'. "
-                           "Weights will be randomly initialized", self._name)
-            load_imagenet_weights = False
+        load_imagenet_weights = self._should_load_imagenet(version, mod_info.torch_name)
 
         self.legacy_scaling = mod_info.legacy_scaling if version < 1.0 else (0, 1)
         setattr(self,
@@ -801,6 +793,19 @@ class Encoder(nn.Sequential):
     def _backbone(self) -> nn.Module:
         """ The encoder backbone """
         return getattr(self, self._name)
+
+    @classmethod
+    def _should_load_imagenet(cls, version: float, torch_name: str) -> bool:
+        """ Determines whether to load ImageNet weights for the given model. """
+        retval = cfg.enc_load_weights()
+        if version < 1.0:  # No need to load weights if we are bringing in a legacy trained model
+            retval = False
+        if retval and not torch_name:
+            logger.warning("[%s] Loading ImageNet weights not supported. "
+                           "Weights will be randomly initialized",
+                           snake_to_camel_case(cfg.enc_architecture()))
+            retval = False
+        return retval
 
     def _get_backbone(self,
                       mod_info: _EncoderInfo,
@@ -819,6 +824,8 @@ class Encoder(nn.Sequential):
         kwargs["weights"] = kwargs.get("weights", "DEFAULT") if load_weights else None
         if self._name.startswith("clipv"):
             kwargs["input_size"] = input_size
+        if load_weights:
+            logger.info("[%s] Loading imagenet weights", self._name)
         retval: nn.Module = getattr(module, name)(**kwargs)
 
         if version < 1.0 and (mod_info.legacy_same_pad
@@ -1466,7 +1473,7 @@ class PhazeA(ModelPlugin):
         The pixel dimension of the input image
         """
         arch = cfg.enc_architecture()
-        enforce_size = _MODEL_MAPPING[arch].enforce_for_weights
+        enforce_size = _MODEL_MAPPING[arch].legacy_enforce_for_weights and version < 1.0
         default_size = _MODEL_MAPPING[arch].default_size
         scaling = cfg.enc_scaling() / 100
         min_size = _MODEL_MAPPING[arch].min_size

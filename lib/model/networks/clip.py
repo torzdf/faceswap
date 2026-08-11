@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from lib.model.layers import QuickGELU
+from lib.model.weights import GetWeights
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
@@ -38,31 +39,44 @@ class ViTConfig:
         Width of the visual encoder layers
     patch
         Size of the patches to be extracted from the images. Only used for Visual encoder.
-    git_id
-        The id of the model weights file stored in deepfakes_models repo if they exist. Default: 0
+    weights
+        Available imagenet weights for the config
     """
     embed_dim: int
     resolution: int
     num_layers: int
     width: int
     patch: int
-    git_id: int = 0
+    weights: dict[str, str]
 
 
 MODEL_CONFIG: dict[TypeModels, ViTConfig] = {
-    "ViT-B-16": ViTConfig(
-        embed_dim=512, resolution=224, num_layers=12, width=768, patch=16, git_id=26),
-    "ViT-B-32": ViTConfig(
-        embed_dim=512, resolution=224, num_layers=12, width=768, patch=32, git_id=27),
-    "ViT-L-14": ViTConfig(
-        embed_dim=768, resolution=224, num_layers=24, width=1024, patch=14, git_id=28),
-    "ViT-L-14-336px": ViTConfig(
-        embed_dim=768, resolution=336, num_layers=24, width=1024, patch=14, git_id=29)}
-# TODO fix below for weight loading
-#    "FaRL-B-16-16": ViTConfig(
-#        embed_dim=512, resolution=224, num_layers=12, width=768, patch=16, git_id=30),
-#    "FaRL-B-16-64": ViTConfig(
-#        embed_dim=512, resolution=224, num_layers=12, width=768, patch=16, git_id=31)}
+    "ViT-B-16": ViTConfig(embed_dim=512,
+                          resolution=224,
+                          num_layers=12,
+                          width=768,
+                          patch=16,
+                          weights={"DEFAULT": "clip_vit_b16_imagenet.pth",
+                                   "FaRL-B-16-16": "clip_vit_b16_farl_16.pth",
+                                   "FaRL-B-16-64": "clip_vit_b16_farl_64.pth"}),
+    "ViT-B-32": ViTConfig(embed_dim=512,
+                          resolution=224,
+                          num_layers=12,
+                          width=768,
+                          patch=32,
+                          weights={"DEFAULT": "clip_vit_b32_imagenet.pth"}),
+    "ViT-L-14": ViTConfig(embed_dim=768,
+                          resolution=224,
+                          num_layers=24,
+                          width=1024,
+                          patch=14,
+                          weights={"DEFAULT": "clip_vit_l14_imagenet.pth"}),
+    "ViT-L-14-336px": ViTConfig(embed_dim=768,
+                                resolution=336,
+                                num_layers=24,
+                                width=1024,
+                                patch=14,
+                                weights={"DEFAULT": "clip_vit_l14_336_imagenet.pth"})}
 
 
 # ################## #
@@ -225,6 +239,30 @@ def _get_vision_net(resolution: int | None, config: ViTConfig) -> VisualTransfor
                              patch_size=config.patch)
 
 
+def _prepare_model(weights: T.Literal["DEFAULT", "FaRL-B-16-16", "FaRL-B-16-64"] | None,
+                   conf: ViTConfig,
+                   input_size: int | None) -> VisualTransformer:
+    """ Prepare a model with the given configuration and weights """
+    if weights is not None and weights not in conf.weights:
+        logger.warning("Invalid weights type: '%s'. Falling back to 'DEFAULT'", weights)
+        weights = "DEFAULT"
+
+    retval = _get_vision_net(input_size, conf)
+    if weights is not None:
+        weights_file = GetWeights(conf.weights[weights]).model_path
+        assert isinstance(weights_file, str)
+        state_dict: OrderedDict[str, torch.Tensor] = torch.load(weights_file, map_location="cpu")
+
+        strict = True
+        if input_size != 224:
+            logger.warning("[ClipV] Positional Embedding weights not loaded as input size != "
+                           "224px. All other layers loaded.")
+            del state_dict["positional_embedding"]
+            strict = False
+        retval.load_state_dict(state_dict, strict=strict)
+    return retval
+
+
 def vit_b_16(weights: T.Literal["DEFAULT", "FaRL-B-16-16", "FaRL-B-16-64"] | None = None,
              input_size: int | None = None) -> VisualTransformer:
     """ Obtain a B16 Visual Transformer Model
@@ -237,9 +275,7 @@ def vit_b_16(weights: T.Literal["DEFAULT", "FaRL-B-16-16", "FaRL-B-16-64"] | Non
         "DEFAULT" to load imagenet trained weights or "FaRL-B-16-16"/"FaRL-B-16-64" for FaRL
         weights
     """
-    retval = _get_vision_net(input_size, MODEL_CONFIG["ViT-B-16"])
-    # TODO port weights and load here
-    return retval
+    return _prepare_model(weights, MODEL_CONFIG["ViT-B-16"], input_size)
 
 
 def vit_b_32(weights: T.Literal["DEFAULT"] | None = None,
@@ -253,9 +289,7 @@ def vit_b_32(weights: T.Literal["DEFAULT"] | None = None,
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    retval = _get_vision_net(input_size, MODEL_CONFIG["ViT-B-32"])
-    # TODO port weights and load here
-    return retval
+    return _prepare_model(weights, MODEL_CONFIG["ViT-B-32"], input_size)
 
 
 def vit_l_14(weights: T.Literal["DEFAULT"] | None = None,
@@ -269,9 +303,7 @@ def vit_l_14(weights: T.Literal["DEFAULT"] | None = None,
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    retval = _get_vision_net(input_size, MODEL_CONFIG["ViT-L-14"])
-    # TODO port weights and load here
-    return retval
+    return _prepare_model(weights, MODEL_CONFIG["ViT-L-14"], input_size)
 
 
 def vit_l_14_336px(weights: T.Literal["DEFAULT"] | None = None,
@@ -285,9 +317,7 @@ def vit_l_14_336px(weights: T.Literal["DEFAULT"] | None = None,
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    retval = _get_vision_net(input_size, MODEL_CONFIG["ViT-L-14-336px"])
-    # TODO port weights and load here
-    return retval
+    return _prepare_model(weights, MODEL_CONFIG["ViT-L-14-336px"], input_size)
 
 
 __all__ = get_module_objects(__name__)

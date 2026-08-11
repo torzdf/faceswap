@@ -17,6 +17,8 @@ from lib.logger import parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import get_module_objects
 
+from .torch_vision import load_imagenet_weights
+
 logger = logging.getLogger(__name__)
 
 
@@ -679,7 +681,8 @@ def nasnet_large(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -
                      num_blocks=num_blocks,
                      skip_reduction=skip_reduction,
                      **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["fc"]
+    load_imagenet_weights(retval, weights, "nasnet_large_imagenet.pth", skip=skip)
     return retval
 
 
@@ -702,7 +705,8 @@ def nasnet_mobile(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) 
                      num_blocks=num_blocks,
                      skip_reduction=skip_reduction,
                      **kwargs)
-    # TODO port weights and load here
+    skip = None if kwargs.get("include_top", True) else ["fc"]
+    load_imagenet_weights(retval, weights, "nasnet_mobile_imagenet.pth", skip=skip)
     return retval
 
 

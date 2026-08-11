@@ -10,12 +10,14 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
-import torchvision.models.mobilenetv3 as TVMobile
+import torchvision.models.mobilenetv3 as tv_mobile
 from torchvision.models.mobilenetv3 import InvertedResidualConfig as IRS
 
 from lib.logger import parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import get_module_objects
+
+from .torch_vision import load_imagenet_weights
 
 logger = logging.getLogger(__name__)
 
@@ -157,20 +159,20 @@ def mobilenet(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> M
         "DEFAULT" to load imagenet trained weights
     """
     retval = MobileNet(**kwargs)
-    # TODO port weights and load here
+    load_imagenet_weights(retval, weights, "mobilenet_imagenet.pth")
     return retval
 
 
-def mobilenet_v3_small(weights: TVMobile.MobileNet_V3_Small_Weights | None = None,
+def mobilenet_v3_small(weights: tv_mobile.MobileNet_V3_Small_Weights | None = None,
                        progress: bool = True,
-                       **kwargs: T.Any) -> TVMobile.MobileNetV3:
+                       **kwargs: T.Any) -> tv_mobile.MobileNetV3:
     """ Override TorchVision MobileNetV3 - Small to handle minimilist variant """
     minimalist = kwargs.pop("minimalist", False)
     if not minimalist:
-        return TVMobile.mobilenet_v3_small(weights=weights, progress=progress, **kwargs)
+        return tv_mobile.mobilenet_v3_small(weights=weights, progress=progress, **kwargs)
 
     width_mult = kwargs.pop("width_mult", 1.0)
-    if weights is not None and width_mult != 1.0:  # TODO confirm
+    if weights is not None and width_mult != 1.0:
         raise ValueError("ImageNet weights can only be loaded when mobilenet_width is set to 1.0")
 
     inverted_residual_setting = [IRS(16, 3, 16, 16, False, "RE", 2, 1, width_mult),  # C1
@@ -185,25 +187,30 @@ def mobilenet_v3_small(weights: TVMobile.MobileNet_V3_Small_Weights | None = Non
                                  IRS(96, 3, 576, 96, False, "RE", 1, 1, width_mult),
                                  IRS(96, 3, 576, 96, False, "RE", 1, 1, width_mult)]
     last_channel = IRS.adjust_channels(1024, width_mult)  # C5
-    model = TVMobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    retval = tv_mobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
     # Minimalist version needs to replace beginning + end hardswish with relu
-    T.cast(nn.Sequential, model.features[0])[2] = nn.ReLU()
-    T.cast(nn.Sequential, model.features[-1])[2] = nn.ReLU()
-    T.cast(nn.Sequential, model.classifier)[1] = nn.ReLU()
-    # TODO load weights here
-    return model
+    T.cast(nn.Sequential, retval.features[0])[2] = nn.ReLU()
+    T.cast(nn.Sequential, retval.features[-1])[2] = nn.ReLU()
+    T.cast(nn.Sequential, retval.classifier)[1] = nn.ReLU()
+
+    load_imagenet_weights(retval,
+                          T.cast(T.Literal["DEFAULT"] | None, weights),
+                          "mobilenet_v3_small_minimalistic_imagenet.pth")
+    return retval
 
 
-def mobilenet_v3_large(weights: TVMobile.MobileNet_V3_Large_Weights | None = None,
-                       progress: bool = True,
-                       **kwargs: T.Any) -> TVMobile.MobileNetV3:
+def mobilenet_v3_large(
+        weights: tv_mobile.MobileNet_V3_Large_Weights | T.Literal["DEFAULT"] | None = None,
+        progress: bool = True,
+        **kwargs: T.Any
+        ) -> tv_mobile.MobileNetV3:
     """ Override TorchVision MobileNetV3 - Large to handle minimilist variant """
     minimalist = kwargs.pop("minimalist", False)
     if not minimalist:
-        return TVMobile.mobilenet_v3_large(weights=weights, progress=progress, **kwargs)
+        return tv_mobile.mobilenet_v3_large(weights=weights, progress=progress, **kwargs)
 
     width_mult = kwargs.pop("width_mult", 1.0)
-    if weights is not None and width_mult != 1.0:  # TODO confirm
+    if weights is not None and width_mult != 1.0:
         raise ValueError("ImageNet weights can only be loaded when mobilenet_width is set to 1.0")
 
     inverted_residual_setting = [IRS(16, 3, 16, 16, False, "RE", 1, 1, width_mult),
@@ -222,14 +229,16 @@ def mobilenet_v3_large(weights: TVMobile.MobileNet_V3_Large_Weights | None = Non
                                  IRS(160, 3, 960, 160, False, "RE", 1, 1, width_mult),
                                  IRS(160, 3, 960, 160, False, "RE", 1, 1, width_mult)]
     last_channel = IRS.adjust_channels(1280, width_mult)  # C5
-    model = TVMobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    retval = tv_mobile.MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
     # Minimalist version needs to replace beginning + end hardswish with relu
-    T.cast(nn.Sequential, model.features[0])[2] = nn.ReLU()
-    T.cast(nn.Sequential, model.features[-1])[2] = nn.ReLU()
-    T.cast(nn.Sequential, model.classifier)[1] = nn.ReLU()
+    T.cast(nn.Sequential, retval.features[0])[2] = nn.ReLU()
+    T.cast(nn.Sequential, retval.features[-1])[2] = nn.ReLU()
+    T.cast(nn.Sequential, retval.classifier)[1] = nn.ReLU()
 
-    # TODO load weights here
-    return model
+    load_imagenet_weights(retval,
+                          T.cast(T.Literal["DEFAULT"] | None, weights),
+                          "mobilenet_v3_large_minimalistic_imagenet.pth")
+    return retval
 
 
 __all__ = get_module_objects(__name__)

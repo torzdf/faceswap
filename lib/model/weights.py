@@ -60,7 +60,7 @@ class GetWeights():
                  version: int = 0,
                  git_model_id: int | None = None) -> None:
         logger.debug(parse_class_init(locals()))
-        self._model_filename = self._get_model_filename(model_filename, version)
+        self._filenames = self._get_model_filenames(model_filename, version)
         self._version = version
         self._cache_dir = os.path.join(PROJECT_ROOT, ".fs_cache")
         self._get(git_model_id)
@@ -69,7 +69,7 @@ class GetWeights():
     def _model_identifier(self) -> str:
         """The full model name from the filename(s). This is any common prefix (for zips with
         multiple files) or the filename, with the extension removed """
-        common_prefix = os.path.commonprefix(self._model_filename)
+        common_prefix = os.path.commonprefix(self._filenames)
         retval = os.path.splitext(common_prefix)[0]
         logger.trace("[GetWeights] full name: %s", repr(retval))  # type:ignore[attr-defined]
         return retval
@@ -85,7 +85,7 @@ class GetWeights():
         >>> model_downloader.model_path
         '/path/to/s3fd_keras_v2.pth'
         """
-        paths = [os.path.join(self._cache_dir, fname) for fname in self._model_filename]
+        paths = [os.path.join(self._cache_dir, fname) for fname in self._filenames]
         retval: str | list[str] = paths[0] if len(paths) == 1 else paths
         logger.trace("[GetWeights] path: %s", repr(retval))  # type:ignore[attr-defined]
         return retval
@@ -101,7 +101,7 @@ class GetWeights():
         return retval
 
     @classmethod
-    def _get_model_filename(cls, filenames: list[str] | str, version: int) -> list[str]:
+    def _get_model_filenames(cls, filenames: list[str] | str, version: int) -> list[str]:
         """ constructs the full model filename(s) by appending the version number to each input
         filename if version is greater than 0
 

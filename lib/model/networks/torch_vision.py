@@ -3,14 +3,17 @@
 compatible with faceswap """
 from __future__ import annotations
 
+from collections import OrderedDict
 import logging
 import typing as T
 
+import torch
 from torch import nn
-from torchvision import models as TVMods
+from torchvision import models as tv_mods
 
 from lib.utils import get_module_objects
 from lib.model.layers_legacy import Conv2dLegacy
+from lib.model.weights import GetWeights
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +76,49 @@ def patch_legacy(model: nn.Module,
                          parent=model)
 
 
+def load_imagenet_weights(model: nn.Module,
+                          weights: T.Literal["DEFAULT"] | None,
+                          file_name: str,
+                          skip: list[str] | None = None) -> None:
+    """ Load ImageNet weights into the model if specified. The weights must have the key "DEFAULT"
+    to load ImageNet weights or ``None`` to not load any weights.
+
+    Parameters
+    ----------
+    model
+        The model to load weights into.
+    weights
+        The weights to load. If "DEFAULT", load the default ImageNet weights.
+        If None, do not load any weights.
+    file_name
+        The name of the weights file.
+    skip
+
+    """
+    if weights is None:
+        return
+
+    if weights != "DEFAULT":
+        logger.warning("Invalid weights type: '%s'. Falling back to 'DEFAULT'", weights)
+        weights = "DEFAULT"
+
+    weights_file = GetWeights(file_name).model_path
+    assert isinstance(weights_file, str)
+
+    state_dict: OrderedDict[str, torch.Tensor] = torch.load(weights_file,
+                                                            map_location="cpu")
+
+    strict = True
+    if skip is not None and any(x.startswith(y) for y in skip for x in state_dict):
+        state_dict = OrderedDict((k, v) for k, v in state_dict.items()
+                                 if not any(k.startswith(y) for y in skip))
+        strict = False
+
+    model.load_state_dict(state_dict, strict=strict)
+
+
 def convnext_xlarge(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
-                    ) -> TVMods.convnext.ConvNeXt:
+                    ) -> tv_mods.convnext.ConvNeXt:
     """ ConvNext X-Large settings from Keras that does not exit in Torch
 
     Parameters
@@ -82,18 +126,19 @@ def convnext_xlarge(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    block_setting = [TVMods.convnext.CNBlockConfig(256, 512, 3),
-                     TVMods.convnext.CNBlockConfig(512, 1024, 3),
-                     TVMods.convnext.CNBlockConfig(1024, 2048, 27),
-                     TVMods.convnext.CNBlockConfig(2048, None, 3)]
+    block_setting = [tv_mods.convnext.CNBlockConfig(256, 512, 3),
+                     tv_mods.convnext.CNBlockConfig(512, 1024, 3),
+                     tv_mods.convnext.CNBlockConfig(1024, 2048, 27),
+                     tv_mods.convnext.CNBlockConfig(2048, None, 3)]
     stochastic_depth_prob = kwargs.pop("stochastic_depth_prob", 0.5)
-    retval = TVMods.convnext.ConvNeXt(block_setting, stochastic_depth_prob, **kwargs)
-    # TODO port weights and load here
+    retval = tv_mods.convnext.ConvNeXt(block_setting, stochastic_depth_prob, **kwargs)
+
+    load_imagenet_weights(retval, weights, "convnext_xlarge_imagenet.pth")
     return retval
 
 
 def efficientnet_v2_b0(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
-                       ) -> TVMods.efficientnet.EfficientNet:
+                       ) -> tv_mods.efficientnet.EfficientNet:
     """ EfficientNetV2_b0 settings from Keras that does not exit in Torch
 
     Parameters
@@ -101,23 +146,22 @@ def efficientnet_v2_b0(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
     weights
         "DEFAULT" to load imagenet trained weights
     """
-    inverted_residual_setting = [TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
-                                 TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
-                                 TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
-                                 TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
+    inverted_residual_setting = [tv_mods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 1),
+                                 tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 2),
+                                 tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 2),
+                                 tv_mods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3),
+                                 tv_mods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5),
+                                 tv_mods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8)]
     dropout = kwargs.pop("dropout", 0.2)
-    retval = TVMods.efficientnet.EfficientNet(
+    retval = tv_mods.efficientnet.EfficientNet(
         inverted_residual_setting, dropout, last_channel=1280, **kwargs
     )
-
-    # TODO port weights and load here
+    load_imagenet_weights(retval, weights, "efficientnet_v2_b0_imagenet.pth")
     return retval
 
 
 def efficientnet_v2_b1(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
-                       ) -> TVMods.efficientnet.EfficientNet:
+                       ) -> tv_mods.efficientnet.EfficientNet:
     """ EfficientNetV2_b1 settings from Keras that does not exit in Torch
 
     Parameters
@@ -126,23 +170,23 @@ def efficientnet_v2_b1(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
         "DEFAULT" to load imagenet trained weights
     """
     inverted_residual_setting = [
-        TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 2),
-        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 3),
-        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 3),
-        TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, depth_mult=1.1),
-        TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, depth_mult=1.1),
-        TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, depth_mult=1.1)
+        tv_mods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 2),
+        tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 3),
+        tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 48, 3),
+        tv_mods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, depth_mult=1.1),
+        tv_mods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, depth_mult=1.1),
+        tv_mods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, depth_mult=1.1)
     ]
     dropout = kwargs.pop("dropout", 0.2)
-    retval = TVMods.efficientnet.EfficientNet(
+    retval = tv_mods.efficientnet.EfficientNet(
         inverted_residual_setting, dropout, last_channel=1280, **kwargs
     )
-    # TODO port weights and load here
+    load_imagenet_weights(retval, weights, "efficientnet_v2_b1_imagenet.pth")
     return retval
 
 
 def efficientnet_v2_b2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
-                       ) -> TVMods.efficientnet.EfficientNet:
+                       ) -> tv_mods.efficientnet.EfficientNet:
     """ EfficientNetV2_b2 settings from Keras that does not exit in Torch
 
     Parameters
@@ -151,23 +195,23 @@ def efficientnet_v2_b2(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
         "DEFAULT" to load imagenet trained weights
     """
     inverted_residual_setting = [
-        TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 2),
-        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 3),
-        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 56, 3),
-        TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, width_mult=1.1, depth_mult=1.2),
-        TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, width_mult=1.1, depth_mult=1.2),
-        TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, width_mult=1.1, depth_mult=1.2)
+        tv_mods.efficientnet.FusedMBConvConfig(1, 3, 1, 32, 16, 2),
+        tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 32, 3),
+        tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 32, 56, 3),
+        tv_mods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, width_mult=1.1, depth_mult=1.2),
+        tv_mods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, width_mult=1.1, depth_mult=1.2),
+        tv_mods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, width_mult=1.1, depth_mult=1.2)
     ]
     dropout = kwargs.pop("dropout", 0.2)
-    retval = TVMods.efficientnet.EfficientNet(
+    retval = tv_mods.efficientnet.EfficientNet(
         inverted_residual_setting, dropout, last_channel=1408, **kwargs
     )
-    # TODO port weights and load here
+    load_imagenet_weights(retval, weights, "efficientnet_v2_b2_imagenet.pth")
     return retval
 
 
 def efficientnet_v2_b3(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any
-                       ) -> TVMods.efficientnet.EfficientNet:
+                       ) -> tv_mods.efficientnet.EfficientNet:
     """ EfficientNetV2_b3 settings from Keras that does not exit in Torch
 
     Parameters
@@ -176,18 +220,18 @@ def efficientnet_v2_b3(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.
         "DEFAULT" to load imagenet trained weights
     """
     inverted_residual_setting = [
-        TVMods.efficientnet.FusedMBConvConfig(1, 3, 1, 40, 16, 2),
-        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 40, 3),
-        TVMods.efficientnet.FusedMBConvConfig(4, 3, 2, 40, 56, 3),
-        TVMods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, width_mult=1.2, depth_mult=1.4),
-        TVMods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, width_mult=1.2, depth_mult=1.4),
-        TVMods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, width_mult=1.2, depth_mult=1.4)
+        tv_mods.efficientnet.FusedMBConvConfig(1, 3, 1, 40, 16, 2),
+        tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 16, 40, 3),
+        tv_mods.efficientnet.FusedMBConvConfig(4, 3, 2, 40, 56, 3),
+        tv_mods.efficientnet.MBConvConfig(4, 3, 2, 48, 96, 3, width_mult=1.2, depth_mult=1.4),
+        tv_mods.efficientnet.MBConvConfig(6, 3, 1, 96, 112, 5, width_mult=1.2, depth_mult=1.4),
+        tv_mods.efficientnet.MBConvConfig(6, 3, 2, 112, 192, 8, width_mult=1.2, depth_mult=1.4)
     ]
     dropout = kwargs.pop("dropout", 0.2)
-    retval = TVMods.efficientnet.EfficientNet(
+    retval = tv_mods.efficientnet.EfficientNet(
         inverted_residual_setting, dropout, last_channel=1536, **kwargs
         )
-    # TODO port weights and load here
+    load_imagenet_weights(retval, weights, "efficientnet_v2_b3_imagenet.pth")
     return retval
 
 
