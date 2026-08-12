@@ -1073,7 +1073,7 @@ class FullyConnected(nn.Module):
         return out[0] if len(out) == 1 else tuple(out)
 
 
-class Inter():
+class Inter():  # pylint:disable=too-many-instance-attributes
     """ Builds the Fully Connected layers for Phaze-A
 
     Note
@@ -1105,6 +1105,7 @@ class Inter():
         self._split = cfg.split_fc()
         self._dim = cfg.fc_dimensions()
         self._upsamples = cfg.fc_upsamples()
+        self._mask_output = False
 
         if num_identities > 2 and self._shared == "half":
             raise FaceswapError("half shared FC layer is not compatible with more than 2"
@@ -1205,7 +1206,7 @@ class Inter():
 
         return retval
 
-    def configure_upscales(self, upscales: int, version: float) -> None:
+    def configure_upscales(self, upscales: int, version: float, learn_mask: bool) -> None:
         """ Insert decoder upscales into the FC layers + update the inter out_shape if required
 
         Parameters
@@ -1215,10 +1216,16 @@ class Inter():
         version
             The plugin version. Versions less than 1.0 means that the model was created in Keras.
             Versions 1.0 and above are created in Torch.
+        learn_mask
+            ``True`` if learn mask is enabled. If ``True`` and there are at least 1 decoder upscale
+            in the FC layer, then the output is marked as split to output the face and the mask
         """
         if not upscales:
             return
 
+        self._mask_output = learn_mask + upscales > 0
+        if self._mask_output:
+            logger.debug("[Inter] Setting mask output for learn_mask + decoder upscales")
         for mod in T.cast(list[FullyConnected], self.modules):
             mod.append_upscales(upscales, version)
 
@@ -1233,7 +1240,8 @@ class Inter():
                      self.out_shape, out_shape, upscales)
         self.out_shape = out_shape
 
-    def __call__(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+    def __call__(self, inputs: list[torch.Tensor]
+                 ) -> list[torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]]:
         """ Forward pass through the intermediate layers
 
         Parameters
@@ -1243,18 +1251,26 @@ class Inter():
 
         Returns
         -------
-        The output tensor from each side's Intermediate layer
+        The output tensor from each side's Intermediate layer. If there are decoder upscales in FC
+        and learn_mask is enabled this will be a tuple of the face and mask outputs from each
+        upscale
         """
         if self._split:
-            x = [inter(i) for inter, i in zip(self.modules[:len(inputs)], inputs)]
+            x:  list[torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]] = [
+                inter(i) for inter, i in zip(self.modules[:len(inputs)], inputs)]
         else:
             x = [self.modules[0](i) for i in inputs]
 
         if self._shared_id < 0:
             return x
 
-        return [torch.concat([self.modules[self._shared_id](i), y], dim=1)
-                for i, y in zip(inputs, x)]
+        shared = [self.modules[self._shared_id](i) for i in inputs]
+        if not self._mask_output:
+            return [torch.concat([s, y], dim=1) for s, y in zip(shared, x)]
+
+        return T.cast(list[tuple[torch.Tensor, torch.Tensor]],
+                      [tuple(torch.concat([i, j], dim=1) for i, j in zip(s, y))
+                       for s, y in zip(shared, x)])
 
 
 class InterGBlock(nn.Sequential):
@@ -1397,8 +1413,9 @@ class Decoder(nn.ModuleDict):
                                             padding="same"))
             up.add_module("act", nn.Sigmoid())
             self.add_module(key, up)
+        self._mask_input = self.learn_mask and upscales_in_fc > 0
 
-    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def forward(self, inputs: torch.Tensor | tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
         """ Call the Phaze-A Decoder(s)
 
         Parameters
@@ -1410,6 +1427,9 @@ class Decoder(nn.ModuleDict):
         -------
         The output tensors from the Phaze-A Decoder(s)
         """
+        if self._mask_input:
+            return tuple(mod(inp) for mod, inp in zip(self.children(),
+                                                      T.cast(tuple[torch.Tensor, ...], inputs)))
         return tuple(module(inputs) for module in self.values())
 
 
@@ -1454,7 +1474,7 @@ class PhazeA(ModelPlugin):
                                  upscales_in_fc,
                                  self._shared_fc,
                                  version)
-        self._inter.configure_upscales(upscales_in_fc, version)
+        self._inter.configure_upscales(upscales_in_fc, version, cfg_loss.learn_mask())
 
         self.inter_gblock, self.gblock = self._build_gblock()
         self.decoder = self._build_decoder()
