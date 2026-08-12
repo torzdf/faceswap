@@ -565,13 +565,16 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
                      cls._in_channels, cls._reshape_shape)
 
     @classmethod
-    def _calculate_filters(cls, input_shape: tuple[int, int, int]) -> None:
+    def _calculate_filters(cls, input_shape: tuple[int, int, int], shared_upscales: int) -> None:
         """ Generate the filter curve
 
         Parameters
         ----------
         input_shape
             The shape of the Tensor feeding the Upscale Blocks (output from Inter)
+        shared_upscales
+            The number of upscales (at the beginning of the chain) that are shared within the FC
+            layers so require halving of filters (prior to concatenated output)
         """
         dim = input_shape[-1] if cls._reshape_shape is None else cls._reshape_shape[-1]
         upscales = int(np.log2(cfg.output_size() / dim))
@@ -581,6 +584,11 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
                                  cfg.dec_filter_slope(),
                                  mode=T.cast(T.Literal["full", "cap_max", "cap_min"],
                                              cfg.dec_slope_mode()))
+        if shared_upscales:
+            for i in range(shared_upscales):
+                cls.filters[i] //= 2
+                logger.debug("[_UpscaleGetter] halving filter %s for %s shared fc upscales to %s",
+                             i, shared_upscales, cls.filters[i])
         cls._in_channels.extend(cls.filters[:-1])
         logger.debug("[_UpscaleGetter] Set filters: %s (in_channels: %s))",
                      cls.filters, cls._in_channels)
@@ -609,23 +617,26 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
         if shared_fc and not upscales_in_fc:  # Input shape is the concatenated inters
             input_shape = (input_shape[0] * 2, *input_shape[1:])
 
+        shared_upscales = upscales_in_fc if shared_fc and version >= 1.0 else 0
         logger.debug("[_UpscaleGetter] Configuring (fc_output_shape: %s, upscales_in_fc: %s, "
-                     "shared_fc: %s, version: %s). Input shape: %s",
-                     fc_output_shape, upscales_in_fc, shared_fc, version, input_shape)
+                     "shared_fc: %s, shared_upscales: %s, version: %s). Input shape: %s",
+                     fc_output_shape,
+                     upscales_in_fc,
+                     shared_fc,
+                     shared_upscales,
+                     version,
+                     input_shape)
 
         cls.version = version
         cls._calculate_reshape(input_shape)
-        cls._calculate_filters(input_shape)
+        cls._calculate_filters(input_shape, shared_upscales)
 
         if not upscales_in_fc or not shared_fc:
             return
 
-        # When upscales are in fully connected layers and there are shared fully connected layers
-        # the first in_channel for the decoder upscale requires doubling for the concatenated
-        # output.
-        # TODO: This unnecessarily blows out filters, but is a legacy hangover. Halving filters
-        # for shared upscales in fc would make sense, but as putting upscales in FC for shared FC
-        # doesn't make a lot of sense, it's probably not worth handling
+        # When upscales are in fully connected layers and there are shared fully connected layers;
+        # the first in_channel for the decoder upscale requires doubling for the concatenated inter
+        # output
         out_idx = upscales_in_fc - 1
         filters = cls.filters[out_idx] * 2
         logger.debug("[_UpscaleGetter] Updating in_channels from %s to %s for %s upscales in fc",
@@ -649,9 +660,7 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             nn.Conv2d(self.filters[0], self.filters[0], 3, padding=1),
             nn.LeakyReLU(0.2, inplace=True))
 
-    def _upscale_block(self,
-                       index: int,
-                       is_mask: bool = False) -> nn.Sequential:
+    def _upscale_block(self, index: int, is_mask: bool = False) -> nn.Sequential:
         """ Upscale block for Phaze-A Decoder.
 
         Uses requested upscale method, adds requested regularization and activation function.
@@ -706,7 +715,8 @@ class _UpscaleGetter:  # pylint:disable=too-many-instance-attributes
             layers["act"] = nn.LeakyReLU(0.2, inplace=True)
         return nn.Sequential(OrderedDict(layers))
 
-    def __call__(self, layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
+    def __call__(self,
+                 layer_indices: tuple[int, int] | None = None) -> dict[str, nn.Sequential]:
         """ Obtain the upscaling layers
 
         Parameters
@@ -1212,8 +1222,11 @@ class Inter():
         for mod in T.cast(list[FullyConnected], self.modules):
             mod.append_upscales(upscales, version)
 
-        # TODO halve upscale filters in shared
-        out_shape = (UPSCALE_GETTER.filters[upscales - 1] * (2 if self._shared != "none" else 1),
+        # Legacy models with upscales in shared FC doubled the channels count due to the concat so
+        # this is handled here. New models now halve the number of filters within each shared
+        # upscale so that the size out of Inters is consistent regardless of shared upscales
+        mult = 2 if version < 1.0 and self._shared != "none" else 1
+        out_shape = (UPSCALE_GETTER.filters[upscales - 1] * mult,
                      self.out_shape[1] * (upscales + 1),
                      self.out_shape[2] * (upscales + 1))
         logger.debug("[Inter] Updated output shape from %s to %s for %s upscales",
