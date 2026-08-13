@@ -55,7 +55,7 @@ class LayerSorter:
     def __init__(self, state: dict[str, T.Any]) -> None:
         logger.debug(parse_class_init(locals()))
         self._model = state["name"]
-        self._encoder = state["config"]["enc_architecture"] if self._model == "phaze_a" else None
+        self._config = state["config"]
         self._functions = {"iae": self._iae_reorder,
                            "inception_resnet_v2": self._inception_reorder,
                            "inception_v3": self._inception_reorder,
@@ -204,6 +204,24 @@ class LayerSorter:
         sorted_keys = [k for k, _ in sorted(sort_keys.items(), key=lambda item: item[1])]
         return self._order_layers(layers, sorted_keys)
 
+    def _phaze_a_shared_inter_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
+        """ The 3 inters are built in order A, Shared, B in Keras but A, B, Shared in Torch
+
+        Parameters
+        ----------
+        layers
+            The layers to be re-ordered
+
+        Returns
+        -------
+        The re-ordered layers
+        """
+        ordered = [k
+                   for i in ["layers.functional_1", "layers.functional_3", "layers.functional_2"]
+                   for k in layers
+                   if k.startswith(i)]
+        return self._order_layers(layers, ordered)
+
     def _phaze_a_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
         """ Phaze-A has several configurations that require re-ordering
 
@@ -216,11 +234,14 @@ class LayerSorter:
         -------
         The re-ordered layers
         """
-        if self._encoder in self._functions:
-            logger.debug("[LayerSorter] Sorting Phaze-A encoder: %s", self._encoder)
-            kwargs = {"v3": True} if self._encoder == "inception_v3" else {}
-            layers = self._functions[self._encoder](layers, **kwargs)
+        encoder = self._config["enc_architecture"]
+        if encoder in self._functions:
+            logger.debug("[LayerSorter] Sorting Phaze-A encoder: %s", encoder)
+            kwargs = {"v3": True} if encoder == "inception_v3" else {}
+            layers = self._functions[encoder](layers, **kwargs)
 
+        if self._config["shared_fc"] == "full" and self._config["split_fc"] is True:
+            layers = self._phaze_a_shared_inter_reorder(layers)
         return layers
 
     def _xception_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:

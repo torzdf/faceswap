@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class InstanceNormLegacy(nn.Module):
-    """A stripped down instance normalization that mimics Keras' epsilon, beta and gamma
+    """ A stripped down instance normalization that mimics Keras' epsilon, beta and gamma
     implementation. Don't use for new models. Use nn.InstanceNorm2d instead
 
     Parameters
@@ -36,7 +36,7 @@ class InstanceNormLegacy(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1))  # beta
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the legacy keras instance normalization layer
+        """ Forward pass through the legacy keras instance normalization layer
 
         Parameters
         ----------
@@ -160,7 +160,7 @@ class Conv2dLegacy(nn.Conv2d):
 
 
 class UpSampling2dLegacy(nn.Module):
-    """Upsampling layer to match Keras behavior. Do not use this for new models
+    """ Upsampling layer to match Keras behavior. Do not use this for new models
 
     Parameters
     ----------

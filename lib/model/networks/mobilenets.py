@@ -14,6 +14,7 @@ import torchvision.models.mobilenetv3 as tv_mobile
 from torchvision.models.mobilenetv3 import InvertedResidualConfig as IRS
 
 from lib.logger import parse_class_init
+from lib.model.layers import Reshape
 from lib.model.layers_legacy import Conv2dLegacy
 from lib.utils import get_module_objects
 
@@ -132,7 +133,8 @@ class MobileNet(nn.Module):
             ("pool", nn.AdaptiveAvgPool2d(1)),
             ("dropout", nn.Dropout(dropout)),
             ("fc", nn.Conv2d(out_channels[-1] * depth_multiplier, classes, 1)),
-            ("softmax", nn.Softmax())]))
+            ("softmax", nn.Softmax()),
+            ("reshape", Reshape((classes, ), is_contiguous=False))]))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """ Forward pass through MobileNet
@@ -147,7 +149,7 @@ class MobileNet(nn.Module):
         The output tensor from the MobileNet
         """
         x = self.dw(self.conv1(inputs))
-        return self.classifier(x).view(x.shape[0], -1)
+        return self.classifier(x)
 
 
 def mobilenet(weights: T.Literal["DEFAULT"] | None = None, **kwargs: T.Any) -> MobileNet:

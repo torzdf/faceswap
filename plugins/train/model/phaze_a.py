@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from torch import nn
-from torchvision import models as TVMods
+from torchvision import models as tv_mods
 
 from lib.logger import parse_class_init
 from lib.model.layers_legacy import Conv2dLegacy, InstanceNormLegacy, UpSampling2dLegacy
@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 # pylint:disable=duplicate-code,too-many-lines
 
 # TODO summaries instance counts + call per instance counts can be wrong
-# TODO model weights porting for structure
 
 
 UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
@@ -47,7 +46,7 @@ UpsampleT = T.Literal["resize_images", "subpixel", "upscale_dny",
 
 @dataclass
 class _EncoderInfo:  # pylint:disable=too-many-instance-attributes
-    """ Contains model configuration options for various Phaze-A Encoders.
+    """ Contains model configuration options for various Phaze-A Encoder.
 
     Parameters
     ----------
@@ -829,7 +828,7 @@ class Encoder(nn.Sequential):
 
         is_local = mod_info.torch_name.startswith("~")
         name = mod_info.torch_name[1:] if is_local else mod_info.torch_name
-        module = sys.modules[__name__] if is_local else TVMods
+        module = sys.modules[__name__] if is_local else tv_mods
         kwargs = mod_info.kwargs if mod_info.kwargs else {}
         kwargs["weights"] = kwargs.get("weights", "DEFAULT") if load_weights else None
         if self._name.startswith("clipv"):
@@ -1264,13 +1263,14 @@ class Inter():  # pylint:disable=too-many-instance-attributes
         if self._shared_id < 0:
             return x
 
+        print(self._shared_id)
         shared = [self.modules[self._shared_id](i) for i in inputs]
         if not self._mask_output:
-            return [torch.concat([s, y], dim=1) for s, y in zip(shared, x)]
+            return [torch.concat([y, s], dim=1) for y, s in zip(x, shared)]
 
         return T.cast(list[tuple[torch.Tensor, torch.Tensor]],
-                      [tuple(torch.concat([i, j], dim=1) for i, j in zip(s, y))
-                       for s, y in zip(shared, x)])
+                      [tuple(torch.concat([i, j], dim=1) for i, j in zip(y, s))
+                       for y, s in zip(x, shared)])
 
 
 class InterGBlock(nn.Sequential):
