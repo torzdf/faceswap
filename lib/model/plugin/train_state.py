@@ -41,6 +41,11 @@ class _Config:
         return f"{self.__class__.__name__}(plugin_path={repr(self._import_path)})"
 
     @property
+    def config(self) -> dict[str, T.Any]:
+        """ The currently set values for all config items """
+        return {k: v() for k, v in self._config.items()}
+
+    @property
     def session_config(self) -> dict[str, T.Any]:
         """ The currently set values for any updatable config items """
         return {k: v() for k, v in self._config.items() if k in self._updatable}
@@ -165,17 +170,12 @@ class State:  # pylint:disable=too-many-instance-attributes
     ----------
     plugin_path
         The relative import path to the model plugin's module from the faceswap root
-    batch_size
-        The batch size that the model is to be trained at, if opening for a training session,
-        otherwise ``None``. Default: ``None``
     """
-    def __init__(self, plugin_path: str, batch_size: int | None = None) -> None:
+    def __init__(self, plugin_path: str) -> None:
         logger.debug(parse_class_init(locals()))
-        self._repr = (f"{self.__class__.__name__}(plugin_path={repr(plugin_path)}, "
-                      f"batch_size={batch_size}")
+        self._repr_obj = (f"{self.__class__.__name__}(plugin_path={repr(plugin_path)})")
 
         self.plugin_name = plugin_path.rsplit(".")[-1].replace("_", "-")
-        self._batch_size = batch_size
         self.lr_finder = -1.0
         """ The value discovered from the learning rate finder. -1 if no value stored """
         self._sessions: dict[int, Session] = {}
@@ -191,7 +191,12 @@ class State:  # pylint:disable=too-many-instance-attributes
 
     def __repr__(self) -> str:
         """ Cleaner logging """
-        return self._repr
+        return self._repr_obj
+
+    @property
+    def config(self) -> dict[str, T.Any]:
+        """ The currently set values for all config items """
+        return self._config.config
 
     @property
     def plugin_version(self) -> float:
@@ -259,7 +264,26 @@ class State:  # pylint:disable=too-many-instance-attributes
                 "config": self._config.state_dict(),
                 "version": _VERSION}
 
-    def step(self) -> None:
+    def add_new_session(self, batch_size: int) -> None:
+        """ Add a new training session with the specified batch size
+
+        Parameters
+        ----------
+        batch_size
+            The number of faces to process per training iteration for this session
+        """
+        session_id = self.session_id + 1
+        config = self._config.session_config
+        self._sessions[session_id] = Session(batch_size, config)
+        logger.debug("[State] Created training session %s: batch_size: %s, session: %s",
+                     session_id, batch_size, self._sessions[session_id])
+
+    def increment_iterations(self) -> None:
+        """ Increment the session and total iterations by 1 """
+        self._total_steps += 1
+        self._sessions[self.session_id].iterations += 1
+
+    def step(self) -> None:  # TODO remove once we've done LRF
         """ Increment the session and total steps
 
         Parameters

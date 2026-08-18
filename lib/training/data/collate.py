@@ -30,31 +30,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AugmentOptions:
-    """Options denoting enabled and disabled augmentation options when data loading
-
-    Parameters
-    ----------
-    augment_color
-        ``True`` to perform color augmentation otherwise ``False``
-    flip
-        ``True`` to perform image flipping otherwise ``False``
-    warp
-        ``False`` to disable warping ``True`` to enable warping
-    cache_landmarks
-        ``True`` to cache landmarks from the other side for Warp to landmarks
-    """
-    augment_color: bool
-    """``True`` to perform color augmentation otherwise ``False``"""
-    flip: bool
-    """``False`` to disable warping ``True`` to enable warping"""
-    warp: bool
-    """``False`` to disable warping ``True`` to enable warping"""
-    cache_landmarks: bool
-    """``True`` to cache landmarks from the other side for Warp to landmarks"""
-
-
-@dataclass
 class BatchMeta:
     """Dataclass that holds meta information required for training a batch of images
 
@@ -312,8 +287,14 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         The pixel sizes of the model output
     color_order
         The color order that the model expects
-    config
-        The training augmentation configuration options
+    augment_color
+        ``True`` to perform color augmentation otherwise ``False``
+    flip
+        ``True`` to perform image flipping otherwise ``False``
+    warp
+        ``False`` to disable warping ``True`` to enable warping
+    cache_landmarks
+        ``True`` to cache landmarks from the other side for Warp to landmarks
     landmarks
         The landmark matching object for the (A and B) sides of the model if warp_to_landmarks is
         enabled otherwise ``None``
@@ -321,13 +302,16 @@ class Collate:  # pylint:disable=too-many-instance-attributes
     _mask_types = ("mask_face", "mask_eye", "mask_mouth")
     """The masks that are stacked to the end of the targets in the order they are stacked"""
 
-    def __init__(self,
+    def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
                  num_inputs: int,
                  batch_size: int,
                  input_size: int,
                  output_sizes: tuple[int, ...],
                  color_order: T.Literal["bgr", "rgb"],
-                 config: AugmentOptions,
+                 augment_color: bool,
+                 flip: bool,
+                 warp: bool,
+                 cache_landmarks: bool,
                  landmarks: LandmarkMatcher | None) -> None:
         logger.debug(parse_class_init(locals()))
         self._name = f"{self.__class__.__name__}"
@@ -336,7 +320,10 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         self._input_size = input_size
         self._output_sizes = output_sizes
         self._color_order = color_order.lower()
-        self._config = config
+        self._aug_config = {"augment_color": augment_color,
+                            "flip": flip,
+                            "warp": warp,
+                            "cache_landmarks": cache_landmarks}
 
         # For Warp to Landmarks
         self._landmarks = landmarks
@@ -349,10 +336,14 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = {f"{k}"[1:]: format_array(v) if isinstance(v, np.ndarray) else v
-                  for k, v in self.__dict__.items()
-                  if k in ("_input_size", "_output_sizes", "_color_order",
-                           "_config", "_landmarks")}
+        params = {}
+        for k, v in self.__dict__.items():
+            if k == "_config":
+                params |= self._aug_config
+                continue
+            if k not in ("_input_size", "_output_sizes", "_color_order", "_landmarks"):
+                continue
+            params[f"{k}"[1:]] = format_array(v) if isinstance(v, np.ndarray) else v
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
@@ -446,7 +437,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         position 0 are the source points. position 1 the randomly selected closest match points.
         ``None`` if Warp to Landmarks is disabled
         """
-        if not self._config.warp or self._landmarks is None:
+        if not self._aug_config["warp"] or self._landmarks is None:
             return None
         assert indices.shape[0] == 2, "Only 2 inputs allowed for WTL"
         return self._landmarks.get_close_landmarks(indices)
@@ -482,12 +473,12 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         batch = batch.reshape(-1, *shape)
         landmarks = self._get_landmarks_pairs(indices)
 
-        if self._config.augment_color:
+        if self._aug_config["augment_color"]:
             batch[..., :3] = self._aug.color_adjust(batch[..., :3])
 
         self._aug.transform(batch, landmarks)
 
-        if self._config.flip:
+        if self._aug_config["flip"]:
             self._aug.random_flip(batch, landmarks)
         if self._color_order == "rgb":
             batch[..., :3] = batch[..., [2, 1, 0]]
@@ -495,12 +486,12 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         targets, masks = self._create_targets(batch)
 
         feed = batch[..., :3]
-        if self._config.warp and landmarks is not None and self._landmarks is not None:
+        if self._aug_config["warp"] and landmarks is not None and self._landmarks is not None:
             feed = self._aug.warp(feed,
                                   to_landmarks=True,
                                   batch_src_points=landmarks[:, 0],
                                   batch_dst_points=landmarks[:, 1])
-        elif self._config.warp:
+        elif self._aug_config["warp"]:
             feed = self._aug.warp(feed, to_landmarks=False)
 
         if self._resize_inputs:

@@ -9,7 +9,7 @@ import numpy as np
 from tensorboard.compat.proto import event_pb2
 from torch.utils.tensorboard import SummaryWriter
 
-from lib.training import tensorboard as mod_tb
+from lib.training.units import tensorboard_unit as mod_tb
 
 # pylint:disable=protected-access,invalid-name
 

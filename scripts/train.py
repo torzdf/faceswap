@@ -11,19 +11,25 @@ from threading import Event
 
 import cv2
 import numpy as np
+from torch.utils.data import RandomSampler, DistributedSampler
 
 from lib.gui.utils.image import TRAINING_PREVIEW
 from lib.image import read_image_meta
 from lib.keypress import KBHit
 from lib.logger import parse_class_init
 from lib.multithreading import MultiThread, FSThread
+from lib.utils import PROJECT_ROOT
 
 from lib.training import Preview, PreviewBuffer, TriggerType
-from lib.training.data import AugmentOptions, get_label
-from lib.model.plugin.handler import TrainHandler
-from lib.training.train import Trainer
+from lib.training.data import get_label, TrainLoader
+from lib.training.units import PreviewUnit, TensorBoardUnit, TimelapseUnit
+# from lib.training.evaluate import Preview
+from lib.model.plugin.handler import FaceswapModel
+from lib.training.training_loop import TrainingLoop
 from lib.utils import (FaceswapError, get_image_paths, get_module_objects,
                        handle_deprecated_cli_opts)
+
+from plugins.plugin_loader import PluginLoader
 
 
 if T.TYPE_CHECKING:
@@ -32,6 +38,8 @@ if T.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+# TODO exit requested message should come before commencing save
 
 class Train():
     """The Faceswap Training Process.
@@ -52,11 +60,12 @@ class Train():
         logger.debug(parse_class_init(locals()))
         self._args = handle_deprecated_cli_opts(arguments)
 
-        if self._args.summary:
-            # If just outputting summary we don't need to initialize anything
-            self._timelapse = False
-            self._images = [self._args.input_a, self._args.input_b]  # Just need count for summary
-            return
+        self._model = FaceswapModel(self._args.trainer,
+                                    self._args.model_dir,
+                                    len([self._args.input_a, self._args.input_b]),  # 2 for now
+                                    load_optimizer=not self._args.summary,
+                                    config_file=self._args.config_file)
+        self._output_summary()
 
         self._images = self._get_images()
         self._timelapse = self._set_timelapse()
@@ -68,6 +77,13 @@ class Train():
         self._stop: bool = False
         self._save_now: bool = False
         self._preview = PreviewInterface(self._args.preview)
+
+    def _output_summary(self) -> None:
+        """ Output a summary of the model. Exit if model summary option was selected """
+        self._model.info.summary(None if self._args.summary
+                                 else logger.verbose)  # type:ignore[attr-defined]
+        if self._args.summary:
+            sys.exit(0)
 
     @classmethod
     def _validate_image_counts(cls, side: str, num_images: int) -> None:
@@ -148,7 +164,7 @@ class Train():
         return retval
 
     def _set_timelapse(self) -> bool:
-        """Validate timelapse settings
+        """ Validate timelapse settings
 
         Returns
         -------
@@ -160,7 +176,7 @@ class Train():
             raise FaceswapError("To enable the timelapse, you have to supply both the parameters "
                                 "--timelapse-input-A and --timelapse-input-B.")
 
-        timelapse_folders = [self._args.timelapse_input_a, self._args.timelapse_input_b]
+        timelapse_folders: list[str] = [self._args.timelapse_input_a, self._args.timelapse_input_b]
 
         for idx, folder in enumerate(timelapse_folders):
             side = "a" if idx == 0 else "b"
@@ -181,51 +197,93 @@ class Train():
         logger.debug("[Train] Timelapse enabled")
         return True
 
-    def _load_trainer(self) -> Trainer:
+    def _get_loader(self,
+                    input_size: int,
+                    output_shapes: list[list[tuple[int, int, int]]],
+                    is_rgb: bool,
+                    sampler: type[RandomSampler] | type[DistributedSampler]) -> TrainLoader:
+        """ Get the data loader for training the model
+
+        Parameters
+        ----------
+        input_size
+            The input size of the model
+        output_shapes
+            The shape of each output from the model ([sideA[outputs], sideB[outputs], ...])
+        is_rgb
+            ``True`` if the model is trained as RGB. ``False`` if as BGR
+
+        Returns
+        -------
+        The loader for feeding the model's training loop
+        """
+        out_sizes = [[x[1] for x in side if x[0] != 1] for side in output_shapes]
+        num_sides = len(self._images)
+        assert len(out_sizes) % num_sides == 0, (
+            f"Output count ({len(out_sizes)}) doesn't match number of inputs ({num_sides})")
+
+        assert len(set(x for side in out_sizes
+                       for x in side)) == len(out_sizes[0]), "Sizes for each output must match"
+
+        retval = TrainLoader(folders=self._images,
+                             batch_size=self._args.batch_size,
+                             input_size=input_size,
+                             output_sizes=tuple(out_sizes[0]),
+                             color_order="rgb" if is_rgb else "bgr",
+                             augment_color=not self._args.no_augment_color,
+                             flip=not self._args.no_flip,
+                             warp=not self._args.no_warp,
+                             cache_landmarks=self._args.warp_to_landmarks,
+                             sampler=sampler)
+        logger.debug("[TrainingLoop] data loader: %s", retval)
+        return retval
+
+    def _load_trainer(self) -> TrainingLoop:
         """Load the trainer requested for training.
 
         Returns
         -------
         The model training loop with the requested trainer plugin loaded for the requested model
         """
-        logger.debug("[Train] Loading Trainer")
-        trainer = ("distributed" if self._args.distributed and not self._args.summary
-                   else "original")
-        if trainer == "distributed":
+        logger.debug("[Train] Loading TrainingLoop")
+        trainer_name = ("distributed" if self._args.distributed and not self._args.summary
+                        else "original")
+        if trainer_name == "distributed":
             import torch  # pylint:disable=import-outside-toplevel
             gpu_count = torch.cuda.device_count()
             if gpu_count < 2:
                 logger.warning("Distributed selected but fewer than 2 GPUs detected. Switching "
                                "to Original")
-                trainer = "original"
+                trainer_name = "original"
 
-        aug_opts = AugmentOptions(augment_color=not self._args.no_augment_color,
-                                  flip=not self._args.no_flip,
-                                  warp=not self._args.no_warp,
-                                  cache_landmarks=self._args.warp_to_landmarks)
-        handler = TrainHandler(self._args.trainer,
-                               len(self._images),
-                               batch_size=self._args.batch_size,
-                               model_folder=self._args.model_dir,
-                               save_interval=self._args.save_interval,
-                               snapshot_interval=self._args.snapshot_interval,
-                               config_file=self._args.config_file)
-        tl_folders = [self._args.timelapse_input_a,
-                      self._args.timelapse_input_b] if self._timelapse else None
-        retval = Trainer(trainer_name=trainer,
-                         data_folders=self._images,
-                         model_handler=handler,
-                         augment_opts=aug_opts,
-                         warmup_steps=self._args.warmup,
-                         no_logs=self._args.no_logs,
-                         preview=(self._args.preview or
-                                  self._args.write_image or
-                                  self._args.redirect_gui),
-                         timelapse_folders=tl_folders,
-                         summary=self._args.summary,
-                         lr_finder=self._args.use_lr_finder)
-        logger.debug("[Train] Loaded Trainer")
-        return retval
+        trainer = PluginLoader.get_trainer(trainer_name)(self._model.plugin, self._args.batch_size)
+        loader = self._get_loader(self._model.info.input_size,
+                                  self._model.info.output_shapes,
+                                  self._model.plugin.is_rgb,
+                                  trainer.sampler)
+        loop = TrainingLoop(faceswap_model=self._model,
+                            trainer=trainer,
+                            loader=loader,
+                            warmup_steps=self._args.warmup,
+                            save_interval=self._args.save_interval,
+                            snapshot_interval=self._args.snapshot_interval,
+                            lr_finder=self._args.use_lr_finder)
+
+        if not self._args.no_logs:
+            loop.add_unit(TensorBoardUnit(self._args.model_dir,
+                                          self._model.name,
+                                          self._model.state.session_id + 1))
+
+        if self._args.preview or self._args.write_image or self._args.redirect_gui:
+            loop.add_unit(PreviewUnit(self._model, self._images))
+
+        if self._timelapse:
+            in_ = [self._args.timelapse_input_a, self._args.timelapse_input_b]
+            out = os.path.join(self._args.model_dir, f"{self._model.name}_timelapse")
+            loop.add_unit(TimelapseUnit(self._model, in_, out))
+
+        logger.debug("[Train] Loaded TrainingLoop %s", loop)
+        return loop
 
     def process(self) -> None:
         """The entry point for triggering the Training Process.
@@ -248,10 +306,10 @@ class Train():
         -------
         The background thread for running training
         """
-        logger.debug("[Train] Launching Trainer thread")
+        logger.debug("[Train] Launching TrainingLoop thread")
         thread = MultiThread(target=self._training)
         thread.start()
-        logger.debug("[Train] Launched Trainer thread")
+        logger.debug("[Train] Launched TrainingLoop thread")
         return thread
 
     def _end_thread(self, thread: MultiThread, err: bool) -> None:
@@ -301,7 +359,7 @@ class Train():
         except Exception as err:
             raise err
 
-    def _run_training_cycle(self, trainer: Trainer) -> None:
+    def _run_training_cycle(self, trainer: TrainingLoop) -> None:
         """Perform the training cycle.
 
         Handles the background training, updating previews/time-lapse on each save interval,
@@ -478,17 +536,16 @@ class Train():
         """
         logger.debug("[Train] Updating preview: (name: %s)", name)
         try:
-            script_path = os.path.realpath(os.path.dirname(sys.argv[0]))
             if self._args.write_image:
                 logger.debug("[Train] Saving preview to disk")
                 img = "training_preview.png"
-                img_file = os.path.join(script_path, img)
+                img_file = os.path.join(PROJECT_ROOT, img)
                 cv2.imwrite(img_file, image)  # pylint:disable=no-member
                 logger.debug("[Train] Saved preview to: '%s'", img)
             if self._args.redirect_gui:
                 logger.debug("[Train] Generating preview for GUI")
                 img = TRAINING_PREVIEW
-                img_file = os.path.join(script_path, "lib", "gui", ".cache", "preview", img)
+                img_file = os.path.join(PROJECT_ROOT, "lib", "gui", ".cache", "preview", img)
                 cv2.imwrite(img_file, image)  # pylint:disable=no-member
                 logger.debug("[Train] Generated preview for GUI: '%s'", img_file)
             if self._args.preview:

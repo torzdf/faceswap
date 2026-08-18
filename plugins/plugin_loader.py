@@ -14,7 +14,7 @@ if T.TYPE_CHECKING:
     from collections.abc import Callable
     from plugins.extract.base import ExtractPlugin
     from plugins.train.model.base import ModelPlugin
-    from plugins.train.trainer.base import TrainerBase
+    from plugins.train.trainer.base import TrainerPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,7 @@ class PluginLoader():
         return getattr(module, ttl)
 
     @staticmethod
-    def get_trainer(name: str, disable_logging: bool = False) -> type[TrainerBase]:
+    def get_trainer(name: str, disable_logging: bool = False) -> type[TrainerPlugin]:
         """Return requested training trainer plugin
 
         Parameters

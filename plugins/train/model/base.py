@@ -30,10 +30,13 @@ class ModelPlugin(nn.Module, abc.ABC):
     """
     def __init__(self,
                  num_identities: int,
-                 input_size: int,
-                 version: float,
+                 input_size: int | None = None,
+                 version: float | None = None,
                  is_rgb: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
+        assert input_size is not None, "input_size should be provided by plugin"
+        assert version is not None, "version should be provided by plugin"
+
         self.num_identities = num_identities
         self.version = version
         self.input_shape = (3, input_size, input_size)

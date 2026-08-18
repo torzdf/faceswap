@@ -11,7 +11,6 @@ from torch import nn
 
 from lib.logger import parse_class_init
 from lib.model.initializers import icnr, ConvolutionAware
-from lib.training.optimizer import Optimizer
 from lib.utils import get_module_objects
 
 from plugins.plugin_loader import PluginLoader
@@ -22,108 +21,13 @@ from .saving import ModelIO
 from .train_state import State
 
 if T.TYPE_CHECKING:
-    from lib.training.train import LossHandler
+    from lib.training.units import OptimizerUnit
     from plugins.train.model.base import ModelPlugin
-    from plugins.train.train_config import Optimizer as OptConfig
-    from plugins.train.trainer.base import TrainerBase
     from .model_info import Layer
 
 
 logger = logging.getLogger(__name__)
 
-
-class FaceswapModel:
-    """Holds the model and state information on a Faceswap model for serialization.
-
-    Note
-    ----
-    load_state_dict() must be called to load the plugin. This should be called with an empty
-    dictionary if creating a fresh model
-
-    Parameters
-    ----------
-    name
-        The name of the Faceswap model plugin to load
-    num_identities
-        The number of identities that the model is to be created for
-    batch_size
-        The batch size that the model is to be trained at, if opening for a training session,
-        otherwise ``None``. Default: ``None``
-    config_file
-        The custom location to load configuration options from or ``None`` if default location
-    """
-    def __init__(self,
-                 name: str,
-                 num_identities: int,
-                 batch_size: int | None = None,
-                 config_file: str | None = None) -> None:
-        logger.debug(parse_class_init(locals()))
-        mod_cfg.load_config(config_file=config_file)  # Set global config
-        self._name = f"[{self.__class__.__name__}.{name}]"
-
-        self.name = name.replace("-", "_")
-        """The plugin name of the model to load"""
-        self._num_identities = num_identities
-
-        self.state = State(PluginLoader.get_model_path(name, module=True), batch_size=batch_size)
-        self._plugin: ModelPlugin | None = None
-
-    def state_dict(self) -> dict[T.Literal["model", "state", "version"], float | dict[str, T.Any]]:
-        """Get the Faceswap model's state_dict"""
-        retval: dict[T.Literal["model", "state", "version"], float | dict[str, T.Any]] = {
-            "version": 1.0,
-            "model": self.plugin.state_dict(),
-            "state": self.state.state_dict()
-            }
-        return retval
-
-    @property
-    def plugin(self) -> ModelPlugin:
-        """The loaded Faceswap plugin"""
-        assert self._plugin is not None, "load_state_dict must be called"
-        return self._plugin
-
-    def load_state_dict(self, state_dict: dict[T.Literal["model", "state", "version"],
-                                               float | dict[str, T.Any]]) -> None:
-        """Load the contents of the given state dict into this object. If a state key is provided
-        within the state_dict then the model will be initialized with the given settings.
-
-        If no keys are provided the model is loaded with the current global configuration settings
-
-        Parameters
-        ----------
-        state_dict
-            The Faceswap model's state_dict to load
-        """
-        logger.debug("%s version: %s, state_dict keys: %s",
-                     self._name, state_dict.get("version"), list(state_dict))
-        if self._plugin is not None:
-            raise RuntimeError(f"Model plugin '{self.name}' has already been loaded")
-
-        plugin_kwargs: dict[str, T.Any] = {"num_identities": self._num_identities}
-        if "state" in state_dict:
-            logger.info("%s Loading plugin from saved config", self._name)
-            self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
-            plugin_kwargs["version"] = self.state.plugin_version
-
-        self._plugin = PluginLoader.get_model(self.name)(**plugin_kwargs)
-        if "state" not in state_dict:
-            self.state.set_plugin_version(self._plugin.version)
-
-        if "model" in state_dict:
-            logger.debug("%s Loading weights from saved model", self._name)
-            self._plugin.load_state_dict(T.cast(dict[str, T.Any], state_dict["model"]))
-
-    def to(self, device: torch.Device) -> None:
-        """Load the model and optimizer to the given device
-
-        Parameters
-        ----------
-        device
-            The device to load the model and optimizer to
-        """
-        logger.debug("%s Model to: %s", self._name, device)
-        self.plugin.to(device)
 
 
 class TrainConfigure:
@@ -131,8 +35,8 @@ class TrainConfigure:
 
     Parameters
     ----------
-    model_info
-        The information about the loaded model's structure
+    model
+        The faceswap model object to be configured
     icnr_init
         ``True`` to initialize convolutions prior to up-scales with ICNR
     conv_aware_init
@@ -141,12 +45,12 @@ class TrainConfigure:
         ``True`` to apply reflect padding to convolutions
     """
     def __init__(self,
-                 model_info: Info,
+                 model: FaceswapModel,
                  icnr_init: bool,
                  conv_aware_init: bool,
                  reflect_padding: bool) -> None:
         logger.debug(parse_class_init(locals()))
-        self._info = model_info
+        self._model = model
         self._init = {"icnr": icnr_init, "conv_aware": conv_aware_init}
         self._reflect_padding = reflect_padding
 
@@ -170,7 +74,7 @@ class TrainConfigure:
         if layer.type == "Conv2d":
             return collected + [layer]
         for lyr in layer.input_layers:
-            return self._get_prev_conv(self._info.structure[lyr], collected)
+            return self._get_prev_conv(self._model.info.structure[lyr], collected)
         return collected
 
     def _apply_initializers(self, model: ModelPlugin) -> None:
@@ -186,7 +90,7 @@ class TrainConfigure:
             return
         # TODO prevent running on ImageNet weights load
         conv_aware = ConvolutionAware()
-        icnr_conv = [x.name for v in self._info.structure.values()
+        icnr_conv = [x.name for v in self._model.info.structure.values()
                      if v.type == "PixelShuffle"
                      for x in self._get_prev_conv(v)] if self._init["icnr"] else []
         for k, v in model.named_modules():
@@ -240,18 +144,239 @@ class TrainConfigure:
                          name, pad, module.kernel_size, module.stride, module.padding_mode)
             module.padding_mode = "reflect"
 
-    def configure(self, model: ModelPlugin) -> None:
-        """Configure the given faceswap model with the user provided settings
+    def configure(self) -> None:
+        """Configure the given faceswap model with the user provided settings """
+        self._apply_initializers(self._model.plugin)
+        self._apply_reflect_padding(self._model.plugin)
+        # TODO MSG
+        logger.debug("[TrainingLoop] Configured model")
+
+
+class FaceswapModel:
+    """ A container for a loaded or newly created Faceswap model plugin
+
+    This class manages the lifecycle of faceswap models, including loading saved checkpoints,
+    creating new instances, handling model configuration, and handling state management. It serves
+    as the interface between the training and inference systems and the underlying neural network
+    plugins.
+
+    Parameters
+    ----------
+    name
+        The identifier/name of the model to load (plugin name)
+    model_dir
+        Directory path where model weights are stored/loaded from
+    num_identities
+        Number of identity mappings in this model
+    load_optimizer
+        ``True`` to attempt loading optimizer state from disk. Only works if a previous checkpoint
+        exists with saved optimizer state. Default: ``False``
+    config_file
+        Optional path to additional configuration file for this model
+
+    Attributes
+    ----------
+    name
+        The normalized plugin name (with dashes replaced by underscores)
+    io
+        ModelIO handler for loading/saving operations on this model's weights and state
+    state
+        State object tracking iterations, session progress, training metadata and model
+        configuration
+    plugin
+        The underlying torch.nn.Module that performs the actual face swapping
+    """
+    def __init__(self,
+                 name: str,
+                 model_dir: str,
+                 num_identities: int,
+                 load_optimizer: bool = False,
+                 config_file: str | None = None) -> None:
+        logger.debug(parse_class_init(locals()))
+
+        mod_cfg.load_config(config_file=config_file)  # Set global config
+
+        self._load_optimizer = load_optimizer
+        self._conf_file = config_file
+        self._log_name = f"[{self.__class__.__name__}.{name}]"
+        self._info: Info | None = None
+
+        self.name = name.replace("-", "_")
+        """ The plugin name of the model to load """
+        self.state = State(PluginLoader.get_model_path(name, module=True))
+        """ The training and configuration state of the model """
+        self.io = ModelIO(name, model_dir)
+        """ Handles loading and saving operations for the model and associated files """
+        self.plugin, opt_state = self._load_plugin(num_identities)
+        """ The loaded Faceswap plugin """
+
+        self._configure()
+
+        # Temporary cache of the optimizer state_dict for holding between loading model weights
+        # and loading optimizer weights to prevent needing to load from disk twice """
+        self._opt_state: dict[str, T.Any] | None = opt_state if load_optimizer else None
+
+
+    def __repr__(self) -> str:
+        """ String representation of the FaceswapModel for debugging and logging """
+        params = {"name": repr(self.name.replace("-", "_")),
+                  "model_dir": repr(os.path.dirname(self.io.checkpoint_path)),
+                  "num_identities": repr(self.plugin.num_identities),
+                  "load_optimizer": repr(self._load_optimizer),
+                  "config_file": repr(self._conf_file)}
+        s_params = ", ".join(f"{k}={v}" for k, v in params.items())
+        return f"{self.__class__.__name__}({s_params})"
+
+    @property
+    def info(self) -> Info:
+        """ Information about the currently loaded Faceswap Model. This provides metadata about
+        layers, shapes, and model structure. """
+        if self._info is None:
+            self._info = Info(self.plugin)
+        return self._info
+
+    def _create_new(self, num_identities: int) -> ModelPlugin:
+        """ Create a new Faceswap model plugin from scratch
+
+        Used when no saved checkpoint exists. Creates a fresh instance with the
+        specified number of identities for the current global configuration.
 
         Parameters
         ----------
-        model
-            The Faceswap model to configure for training
+        num_identities
+            The number of identity mappings for this model
+
+        Returns
+        -------
+        A new ModelPlugin instance
         """
-        self._apply_initializers(model)
-        self._apply_reflect_padding(model)
-        # TODO MSG
-        logger.debug("[Trainer] Configured model")
+        logger.debug("[TrainHandler] No state_dict to load. Creating new model")
+        plugin = PluginLoader.get_model(self.name)(num_identities=num_identities)
+        self.state.set_plugin_version(plugin.version)
+        return plugin
+
+    def _load_existing(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any] | None]:
+        """ Load a saved Faceswap model from disk
+
+        Loads both the model weights and state dictionary. If no state is found in
+        the checkpoint, falls back to creating a new model with default parameters.
+
+        Parameters
+        ----------
+        num_identities
+            The number of identities expected by this model
+
+        Returns
+        -------
+        A tuple containing (model_plugin, optimizer_state) where optimizer_state may
+        be ``None`` if not present in the checkpoint or this is a fresh model
+
+        Notes
+        -----
+        Only loads state_dict entries for "model", "state", and "version" from disk.
+        Optimizer weights are returned separately to allow selective loading.
+        """
+        state_dict = self.io.load()
+        if "state" not in state_dict:
+            logger.warning("%s No state found in saved config. Loading from model defaults.",
+                           self._log_name)
+            return self._create_new(num_identities), None
+
+        logger.info("%s Loading plugin from saved config", self._log_name)
+        self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
+        plugin = PluginLoader.get_model(self.name)(num_identities=num_identities,
+                                                   version=self.state.plugin_version)
+        plugin.load_state_dict(state_dict["model"])
+        self.state.load_state_dict(state_dict["state"])
+        return plugin, state_dict.get("optimizer")
+
+    def _load_plugin(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any] | None]:
+        """ Determine whether to create new model or load existing one
+
+        Checks if a checkpoint file exists at the model path. Creates fresh instance
+        on first run, loads saved weights on subsequent runs.
+
+        Parameters
+        ----------
+        num_identities
+            Required number of identity mappings for this model
+
+        Returns
+        -------
+        A tuple containing (model_plugin, optimizer_state) where `optimizer_state` is ``None``
+        unless previously saved and `load_optimizer` was ``True``
+
+        Notes
+        -----
+        Optimizer state is only cached temporarily during training initialization to avoid loading
+        from disk twice.
+        """
+        if not self.io.file_exists:
+            return self._create_new(num_identities), None
+        return self._load_existing(num_identities)
+
+    def _configure(self) -> None:
+        """ Configure the model for training based on initialization settings
+
+        Applies ICNR initialization, conv_aware_init, and reflect_padding according
+        to state configuration. Skips these operations if weights were loaded from
+        disk (to preserve trained weights). Calls TrainConfigure.configure() to apply
+        all settings in one step.
+        """
+        icnr = False if self.io.file_exists else self.state.config.get("icnr_init", False)
+        conv = False if self.io.file_exists else self.state.config.get("conv_aware_init", False)
+        reflect = self.state.config.get("reflect_padding", False)
+        TrainConfigure(self,
+                       icnr_init=icnr,
+                       conv_aware_init=conv,
+                       reflect_padding=reflect).configure()
+
+    def state_dict(self) -> dict[str, T.Any]:
+        """ Get the model's complete state dictionary
+
+        Returns a dictionary containing the plugin weights, training state, and version.
+        Does NOT include optimizer state by default - use get_state_dict() with
+        with_optimizer=True for that.
+
+        Returns
+        -------
+        A dict with keys: "model", "state", "version" representing all trainable
+        parameters and configuration of this Faceswap model
+        """
+        return {"version": 1.0,
+                "model": self.plugin.state_dict(),
+                "state": self.state.state_dict()}
+
+    def pop_optimizer_state(self) -> dict[str, T.Any] | None:
+        """ Retrieve and clear cached optimizer state dictionary
+
+        Returns the temporary optimizer state that was captured during model loading.
+        After calling this method, subsequent access will raise AttributeError since
+        _opt_state is explicitly deleted to prevent accidental reuse.
+
+        Returns
+        -------
+        The optimizer state dictionary if available (from load_optimizer=True), or None
+        if no optimizer state exists
+        """
+        retval = self._opt_state
+        del self._opt_state  # De-reference so we get an attribute error if accessed again
+        return retval
+
+    def to(self, device: torch.Device) -> None:
+        """ Move the model plugin to a different computational device
+
+        Transfers all parameters and buffers of the underlying neural network module
+        from CPU/GPU to the specified device. Does not affect state dictionaries or
+        configuration objects.
+
+        Parameters
+        ----------
+        device
+            The target torch.Device (cuda:X, cpu,mps:0, etc.) where model should live
+        """
+        logger.debug("%s Model to: %s", self._log_name, device)
+        self.plugin.to(device)
 
 
 class TrainHandler:
@@ -259,196 +384,127 @@ class TrainHandler:
 
     Parameters
     ----------
-    name
-        The name of the Faceswap model plugin to load
-    num_identities
-        The number of identities that the model is to be created for
-    batch_size
-        The batch size that the model is to be trained at
-    model_folder
-        Full path to load/save model weights
+    faceswap_model
+        The object that holds the Faceswap Torch nn.module, its state and its io operations
+    optimizer
+        The optimizer to use for training
+    icnr_init
+        ``True`` to initialize convolutions prior to up-scales with ICNR
+    conv_aware_init
+        ``True`` to apply conv_aware_init to all convolutions
+    reflect_padding
+        ``True`` to apply reflect padding to convolutions
     save_interval
         The number of steps between each model save. Default: 250
     snapshot_interval
         The number of steps between full model checkpoint snapshots. Default: 25000
-    config_file
-        The custom location to load configuration options from. Default: ``None``
     """
     def __init__(self,
-                 name: str,
-                 num_identities: int,
-                 batch_size: int,
-                 model_folder: str,
+                 faceswap_model: FaceswapModel,
+                 optimizer: OptimizerUnit,
+                 icnr_init: bool,
+                 conv_aware_init: bool,
+                 reflect_padding: bool,
                  save_interval: int = 250,
-                 snapshot_interval: int = 25000,
-                 config_file: str | None = None) -> None:
+                 snapshot_interval: int = 25000) -> None:
         logger.debug(parse_class_init(locals()))
-
-        self.name = name
-        """The name of the model plugin"""
-        self.batch_size = batch_size
-        """The batch size that is configured for training"""
-
         self._save_interval = save_interval
         self._snapshot_interval = snapshot_interval
-
-        self._model = FaceswapModel(name,
-                                    num_identities,
-                                    batch_size=batch_size,
-                                    config_file=config_file)
-        self._io = ModelIO(self._model.name, model_folder)
+        self._model = faceswap_model
         self._lrf_steps = 0
 
-        self._opt_state: dict[T.Literal["version", "optimizer", "scaler", "lrf_scheduler"],
-                              float | dict[str, T.Any]] | None = None
-        """Temporary cache of the optimizer state_dict for holding between loading model weights
-        and loading optimizer weights to prevent needing to load from disk twice"""
-        self._optimizer: Optimizer
+        self._configure_model(icnr_init, conv_aware_init, reflect_padding)
+        self._optimizer = self._load_optimizer(faceswap_model, optimizer)
+
+        self._model.plugin.train()
 
     @property
     def model(self) -> ModelPlugin:
-        """The currently loaded Faceswap Model"""
+        """ The currently loaded Faceswap Model """
         return self._model.plugin
 
     @property
+    def info (self) -> Info:
+        """ Holds information about currently loaded Faceswap Model"""
+        return self._model.info
+
+    @property
     def total_iterations(self) -> int:
-        """The total number of iterations that the model has trained"""
+        """ The total number of iterations that the model has trained """
         return self._model.state.iterations
 
     @property
     def session_id(self) -> int:
-        """The current session ID. If training has not yet commenced, this will be the last session
+        """ The current session ID. If training has not yet commenced, this will be the last session
         ID trained. If the first training step has been reached, this will be the currently
-        training session ID"""
+        training session ID """
         return self._model.state.session_id
 
     @property
     def model_folder(self) -> str:
-        """The folder that is being used to save the Faceswap model's weights"""
-        return os.path.dirname(self._io.checkpoint_path)
+        """ The folder that is being used to save the Faceswap model's weights """
+        return os.path.dirname(self._model.io.checkpoint_path)
 
     @property
     def checkpoint_file(self) -> str:
-        """The full path to where full checkpoints are saved"""
-        return self._io.checkpoint_path
+        """ The full path to where full checkpoints are saved """
+        return self._model.io.checkpoint_path
 
     @property
     def model_exists(self) -> bool:
-        """``True`` if a model weights file/checkpoint exists within the save folder"""
-        return self._io.file_exists
+        """ ``True`` if a model weights file/checkpoint exists within the save folder """
+        return self._model.io.file_exists
 
     @property
-    def optimizer(self) -> Optimizer:
-        """The configured optimizer in use"""
+    def optimizer(self) -> OptimizerUnit:
+        """ The configured optimizer in use """
         return self._optimizer
 
-    def load_state_dict(self, cache_optimizer_state: bool = False) -> None:
-        """Load the state from disk and set to the Model and State objects. Also loads Optimizer
-        weights if one is attached to this object.
+    @classmethod
+    def _load_optimizer(cls, model: FaceswapModel, optimizer: OptimizerUnit
+                        ) -> OptimizerUnit:
+        """ Load the optimizer weights if they exist
 
         Parameters
         ----------
-        cache_optimizer_state
-            ``True`` to cache the optimizer state for later loading. Default: ``False``
-        """
-        logger.debug("[TrainHandler] Loading state_dict: %s", self._model)
-        state_dict = self._io.load(model=self._model)
-        self._model.load_state_dict({k: v for k, v in state_dict.items() if k != "optimizer"})
-
-        if not state_dict:
-            logger.debug("[TrainHandler] No state_dict to load")
-            return
-
-        if "optimizer" not in state_dict:
-            return
-
-        opt_state = T.cast(dict[T.Literal["version", "optimizer", "scaler", "lrf_scheduler"],
-                                float | dict[str, T.Any]], state_dict["optimizer"])
-        if hasattr(self, "_optimizer"):
-            logger.debug("[TrainHandler] Loading optimizer state_dict: %s", self._optimizer)
-            self._optimizer.load_state_dict(opt_state)
-
-        if cache_optimizer_state:
-            logger.debug("[TrainHandler] Caching optimizer state: %s", list(opt_state))
-            self._opt_state = opt_state
-
-    def load_optimizer(self, config: type[OptConfig], mixed_precision: bool, warmup_steps: int
-                       ) -> Optimizer:
-        """Create the optimizer and load its weights if they exist
-
-        Parameters
-        ----------
-        config
-            The optimizer user configuration options
-        mixed_precision
-            ``True`` to train using mixed precision.
-        warmup_steps
-            The number of steps to warmup the learning rate for.
+        model
+            The faceswap model that is to be trained
+        optimizer
+            The optimizer to be used for training
 
         Returns
         -------
         The loaded optimizer
         """
-        self._optimizer = Optimizer(self.model, config, mixed_precision, warmup_steps)
-        if self._opt_state is None:
+        opt_state = model.pop_optimizer_state()
+        if opt_state is None:
             logger.debug("[TrainHandler] No optimizer state_dict to load:")
         else:
-            logger.debug("[TrainHandler] Loading optimizer state_dict: %s", list(self._opt_state))
-            self._optimizer.load_state_dict(self._opt_state)
-            del self._opt_state
-            self._opt_state = None
-        logger.debug("[TrainHandler] Loaded optimizer: %s", self._optimizer)
-        return self._optimizer
+            logger.debug("[TrainHandler] Loading optimizer state_dict: %s", list(opt_state))
+            optimizer.load_state_dict(opt_state)
+        logger.debug("[TrainHandler] Loaded optimizer: %s", optimizer)
+        return optimizer
 
-    def configure_model(self,
-                        trainer_name: str,
-                        model_info: Info,
-                        mixed_precision: bool,
-                        icnr_init: bool,
-                        conv_aware_init: bool,
-                        reflect_padding: bool,
-                        device: torch.Device) -> TrainerBase:
+    def _configure_model(self, icnr_init: bool, conv_aware_init: bool, reflect_padding: bool
+                         ) -> None:
         """Configure the model for training, applying any initialization and other post-build
-        routines. Place the model onto the training device and return the object responsible for
-        forward and backward passes through the model
+        routines.
 
         Parameters
         ----------
-        trainer_name
-            The name of the trainer plugin to use
-        model_info
-            The information about the loaded model's structure
-        mixed_precision
-            ``True`` for mixed precision training. ``False`` for full precision
         icnr_init
             ``True`` to initialize convolutions prior to up-scales with ICNR
         conv_aware_init
             ``True`` to apply conv_aware_init to all convolutions
         reflect_padding
             ``True`` to apply reflect padding to convolutions
-
-        Returns
-        -------
-        The trainer plugin containing the configured model on the training device
         """
-        is_new = not self._io.file_exists
-        configurator = TrainConfigure(model_info,
+        is_new = not self._model.io.file_exists
+        configurator = TrainConfigure(self._model,
                                       icnr_init and is_new,
                                       conv_aware_init and is_new,
                                       reflect_padding)
-        configurator.configure(self.model)
-        self._optimizer.to(device)
-        self._model.to(device)
-        self._model.plugin.train()
-        retval = PluginLoader.get_trainer(trainer_name)(self._model.plugin,
-                                                        self.batch_size,
-                                                        mixed_precision,
-                                                        str(device))
-        if mixed_precision:
-            logger.info("Enabled Auto Mixed Precision")
-
-        logger.debug("[TrainHandler] Configured model and trainer: %s", retval)
-        return retval
+        configurator.configure()
 
     def get_state_dict(self, with_optimizer: bool
                        ) -> dict[T.Literal["model", "state", "version", "optimizer"],

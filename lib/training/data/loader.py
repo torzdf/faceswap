@@ -19,7 +19,7 @@ from .collate import Collate, LandmarkMatcher
 
 if T.TYPE_CHECKING:
     from lib.align.constants import CenteringType
-    from .collate import AugmentOptions, BatchMeta
+    from .collate import BatchMeta
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +40,27 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         The output sizes to the model (list as some models have multi-scale outputs)
     color_order
         The color order of the model
-    config
-        The training augmentation configuration options
+    augment_color
+        ``True`` to perform color augmentation otherwise ``False``
+    flip
+        ``True`` to perform image flipping otherwise ``False``
+    warp
+        ``False`` to disable warping ``True`` to enable warping
+    cache_landmarks
+        ``True`` to cache landmarks from the other side for Warp to landmarks
     sampler
         The sampler to use for the data loaders. Default: ``None`` (RandomSampler)
     """
-    def __init__(self,
+    def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
                  folders: list[str],
                  batch_size: int,
                  input_size: int,
                  output_sizes: tuple[int, ...],
                  color_order: T.Literal["bgr", "rgb"],
-                 config: AugmentOptions,
+                 augment_color: bool,
+                 flip: bool,
+                 warp: bool,
+                 cache_landmarks: bool,
                  sampler: None | type[tch_data.RandomSampler |
                                       tch_data.DistributedSampler] = None) -> None:
         logger.debug(parse_class_init(locals()))
@@ -60,11 +69,14 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         self._folders = folders
         self._batch_size = batch_size
         self._output_sizes = output_sizes
-        self._config = config
+        self._aug_config = {"augment_color": augment_color,
+                            "flip": flip,
+                            "warp": warp,
+                            "cache_landmarks": cache_landmarks}
         self._process_size = max(*self._output_sizes, input_size)
         self._landmarks: None | LandmarkMatcher = None
 
-        if config.warp and config.cache_landmarks:
+        if warp and cache_landmarks:
             self._landmarks = LandmarkMatcher(self._folders,
                                               self._process_size,
                                               T.cast("CenteringType", mod_cfg.centering()),
@@ -88,8 +100,20 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
 
     def __repr__(self) -> str:
         """Pretty print for logging"""
-        params = {f"{k}"[1:]: v for k, v in self.__dict__.items()
-                  if k in ("_input_size", "_output_sizes", "_color_order", "_config", "_sampler")}
+        # pylint:disable=duplicate-code
+        params = {}
+        for k, v in self.__dict__.items():
+            if k == "_config":
+                params |= self._aug_config
+                continue
+            if k not in ("_folders",
+                         "_batch_size",
+                         "_input_size",
+                         "_output_sizes",
+                         "_color_order",
+                         "_sampler"):
+                continue
+            params[f"{k}"[1:]] = v
         s_params = ", ".join(f"{k}={repr(v)}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
 
@@ -116,7 +140,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
                              self._input_size,
                              self._output_sizes,
                              self._color_order,
-                             self._config,
+                             **self._aug_config,
                              landmarks=self._landmarks)
         retval = DataLoader(dataset=train_set,
                             batch_size=self._batch_size,
@@ -209,6 +233,11 @@ class PreviewLoader():
         self._loader = self.get_loader()
         self._iterator = T.cast(T.Iterator[tuple[torch.Tensor, torch.Tensor]],
                                 iter(self._loader))
+
+    @property
+    def input_folders(self) -> list[str]:
+        """ The folders for each side that data is being loaded from """
+        return self._input_folders
 
     def __iter__(self) -> T.Self:
         """This is an iterator"""

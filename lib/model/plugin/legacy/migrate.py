@@ -568,8 +568,7 @@ class KerasToTorch:
         self._keras = KerasModel(keras_file)
         self._torch = torch_model
 
-        self._state_dict: dict[T.Literal["model", "state", "optimizer", "version"],
-                               float | dict[str, T.Any]] = {}
+        self._state_dict: dict[str, T.Any] = {}
         self._pixel_shuffler_convs = _get_pixel_shuffler_convs(self._keras.layers)
         self._dense_reshapes = _get_dense_reshapes(self._keras.layers)
         self._state = self._get_state()
@@ -835,8 +834,7 @@ class KerasToTorch:
         if self._keras._optimizer:  # TODO
             pass
 
-    def state_dict(self) -> dict[T.Literal["model", "state", "optimizer", "version"],
-                                 float | dict[str, T.Any]]:
+    def state_dict(self) -> dict[str, T.Any]:
         """ Get the migrated state_dict from the old keras model """
         if not self._state_dict:
             self._build_state_dict()

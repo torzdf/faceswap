@@ -22,13 +22,13 @@ from lib.utils import FaceswapError, get_module_objects
 if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
     from lib.training.loss import LossCollator, BatchLoss
-    from lib.training.optimizer import Optimizer
+    from lib.training.units import OptimizerUnit
     from plugins.train.model.base import ModelPlugin
 
 logger = logging.getLogger(__name__)
 
 
-class TrainerBase(abc.ABC):
+class TrainerPlugin(abc.ABC):
     """A trainer plugin interface. It must implement the method "train_batch" which takes an input
     of inputs to the model and target images for model output. It returns loss per side
 
@@ -38,16 +38,8 @@ class TrainerBase(abc.ABC):
         The configured Faceswap model plugin to be trained
     batch_size
         The batch size to train the model at
-    mixed_precision
-        ``True`` to enable mixed precision training. ``False`` for float32
-    device_type
-        The torch device type that is training the model
     """
-    def __init__(self,
-                 model: ModelPlugin,
-                 batch_size: int,
-                 mixed_precision: bool,
-                 device_type: str) -> None:
+    def __init__(self, model: ModelPlugin, batch_size: int) -> None:
         logger.debug(parse_class_init(locals()))
         self.model: ModelPlugin = model
         """The model plugin to be trained"""
@@ -55,8 +47,7 @@ class TrainerBase(abc.ABC):
         """The batch size for each iteration to be trained through the model."""
         self.sampler = self.get_sampler()
         """The data sampler that the data loader should use"""
-        self._forward_context = (torch.autocast(device_type=device_type, dtype=torch.float16)
-                                 if mixed_precision else nullcontext())
+        self._forward_context = nullcontext()
         self._name = f"[{self.__class__.__name__}]"
 
     @abc.abstractmethod
@@ -70,7 +61,7 @@ class TrainerBase(abc.ABC):
         """
 
     @abc.abstractmethod
-    def backward(self, loss: torch.Tensor, optimizer: Optimizer) -> None:
+    def backward(self, loss: torch.Tensor, optimizer: OptimizerUnit) -> None:
         """Override to run a single backward pass through the model for a single batch
 
         Parameters
@@ -102,12 +93,28 @@ class TrainerBase(abc.ABC):
             The configured loss functions to use
         """
 
+    def set_training_precision(self, mixed_precision: bool, device_type: str) -> None:
+        """ Set the precision that the model should be trained at
+
+        Parameters
+        ----------
+        mixed_precision
+            ``True`` to used mixed precision training, ``False`` to use full precision
+        device_type
+            The torch device type that is training the model
+        """
+        if mixed_precision:
+            logger.info("%s Enabled Mixed Precision training", self._name)
+            self._forward_context = torch.autocast(device_type=device_type, dtype=torch.float16)
+        else:
+            logger.debug("%s Using Full Precision training", self._name)
+
     def step(self,
              inputs: list[torch.Tensor],
              targets: list[torch.Tensor],
              meta: BatchMeta,
              loss_func: LossCollator,
-             optimizer: Optimizer) -> list[BatchLoss]:
+             optimizer: OptimizerUnit) -> list[BatchLoss]:
         """Runs the plugin's forward and backwards pass through the model for a single batch
 
         Parameters

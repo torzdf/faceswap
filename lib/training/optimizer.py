@@ -14,6 +14,8 @@ from lib.model.autoclip import AutoClipper
 from lib.model import optimizers
 from lib.utils import get_module_objects
 
+from plugins.train import train_config as mod_cfg
+
 from .lr_warmup import WarmupScheduler
 from .lr_finder import LRFScheduler
 
@@ -145,37 +147,39 @@ class Optimizer:
     ----------
     model
         The model that is to be trained
-    config
-        The optimizer user configuration options
-    mixed_precision
-        ``True`` to train using mixed precision. Default: ``False``
     warmup_steps
         The number of steps to warmup the learning rate for. Default: 0
     """
     def __init__(self,
                  model: ModelPlugin,
-                 config: type[OptConfig],
-                 mixed_precision: bool = False,
                  warmup_steps: int = 0) -> None:
         logger.debug(parse_class_init(locals()))
-        self._mixed_precision = mixed_precision
-        self._accumulation_steps = config.gradient_accumulation()
-        self._scaler = None if not mixed_precision else torch.amp.grad_scaler.GradScaler()
-        self._clip = None if config.gradient_clipping() == "none" else GradClip(
-            T.cast(T.Literal["autoclip", "global_norm", "norm", "value"],
-                   config.gradient_clipping()),
-            config.clipping_value(),
-            config.autoclip_history())
+        self._repr_obj = {"model": repr(model), "warmup_steps": repr(warmup_steps)}
 
-        self._optimizer = self._get_optimizer(model, config)
+        self._mixed_precision = mod_cfg.mixed_precision()
+        self._accumulation_steps = mod_cfg.Optimizer.gradient_accumulation()
+        self._scaler = None if not self._mixed_precision else torch.amp.grad_scaler.GradScaler()
+        self._clip = None if mod_cfg.Optimizer.gradient_clipping() == "none" else GradClip(
+            T.cast(T.Literal["autoclip", "global_norm", "norm", "value"],
+                   mod_cfg.Optimizer.gradient_clipping()),
+            mod_cfg.Optimizer.clipping_value(),
+            mod_cfg.Optimizer.autoclip_history())
+
+        self._optimizer = self._get_optimizer(model, mod_cfg.Optimizer)
         self._warmup = None if warmup_steps < 1 else WarmupScheduler(self._optimizer, warmup_steps)
         self._lrf_scheduler: LRFScheduler | None = None
 
-        self.save = T.cast(T.Literal["always", "exit", "never"], config.save_optimizer())
+        self.save = T.cast(T.Literal["always", "exit", "never"],
+                           mod_cfg.Optimizer.save_optimizer())
         """`When the optimizer should be saved"""
 
         self._accumulation_count = 0
         self._session_steps = 0
+
+    def __repr__(self) -> str:
+        """ String representation for debugging and logging """
+        params = ", ".join(f"{k}={v}" for k, v in self._repr_obj.items())
+        return f"{self.__class__.__name__}({params})"
 
     @property
     def lrf_scheduler(self) -> LRFScheduler | None:
@@ -317,9 +321,7 @@ class Optimizer:
 
         return state
 
-    def load_state_dict(self, state_dict: dict[T.Literal["version", "optimizer",
-                                                         "scaler", "lrf_scheduler"],
-                                               float | dict[str, T.Any]]) -> None:
+    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
         """Load the serialized data from a state dict into this object
 
         Parameters

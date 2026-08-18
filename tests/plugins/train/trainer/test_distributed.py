@@ -85,7 +85,7 @@ def _trainer_mocked(mocker: pytest_mock.MockFixture):  # noqa:[F811]
 def test_Trainer(gpu_count, batch_size, _trainer_mocked):
     """ Test that original trainer creates correctly """
     instance, patched_parallel = _trainer_mocked(gpus=gpu_count, batch_size=batch_size)
-    assert isinstance(instance, mod_base.TrainerBase)
+    assert isinstance(instance, mod_base.TrainerPlugin)
     assert isinstance(instance, mod_original.Trainer)
     # Confirms that _validate_batch_size executed correctly
     assert instance.batch_size == max(gpu_count, batch_size)

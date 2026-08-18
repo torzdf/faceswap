@@ -8,18 +8,18 @@ import typing as T
 import torch
 
 from lib.utils import get_module_objects
-from .base import TrainerBase
+from .base import TrainerPlugin
 
 if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
     from lib.training.loss import BatchLoss, LossCollator
-    from lib.training.optimizer import Optimizer
+    from lib.training.units import OptimizerUnit
 
 
 logger = logging.getLogger(__name__)
 
 
-class Trainer(TrainerBase):
+class Trainer(TrainerPlugin):
     """Original trainer"""
 
     def get_sampler(self) -> type[torch.utils.data.RandomSampler]:
@@ -60,7 +60,7 @@ class Trainer(TrainerBase):
                   for i in range(num_sides)]
         return losses
 
-    def backward(self, loss: torch.Tensor, optimizer: Optimizer) -> None:
+    def backward(self, loss: torch.Tensor, optimizer: OptimizerUnit) -> None:
         """Perform the backwards pass on the model
 
         Parameters
