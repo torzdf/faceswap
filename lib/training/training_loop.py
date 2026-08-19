@@ -18,7 +18,7 @@ from plugins.train import train_config as mod_cfg
 from plugins.train.trainer.base import TrainerPlugin
 
 from .data import TrainLoader
-from .units import LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
+from .units import EventUnit, LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
 from .units.optimizer_unit import GradClip, OptimizerUnit
 # from .lr_finder import LearningRateFinder
 from .units import TrainingUnit
@@ -221,8 +221,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         The data loader for feeding training data to the model
     training_events
         The event triggers for communicating with the main thread
-    warmup_steps
-        The number of steps to warmup the learning rate for. Default: 0
     save_interval
         The number of steps between each model save. Default: 250
     snapshot_interval
@@ -235,7 +233,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                  trainer: TrainerPlugin,
                  loader: TrainLoader,
                  training_events: TrainingEvents,
-                 warmup_steps: int = 0,
                  save_interval: int = 250,
                  snapshot_interval: int = 25000,
                  lr_finder: bool = False) -> None:
@@ -249,10 +246,9 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         self._units = Units()
 
         trainer.set_training_precision(mod_cfg.mixed_precision(), str(self._device))
-        optimizer = self._get_optimizer(faceswap_model.plugin, warmup_steps)
+        self._optimizer_unit = self._get_optimizer(faceswap_model.plugin)
         self._create_base_units(loader=loader,
                                 trainer=trainer,
-                                optimizer=optimizer,
                                 events=training_events,
                                 save_interval=save_interval,
                                 snapshot_interval=snapshot_interval)
@@ -302,11 +298,16 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
     def events(self) -> TrainingEvents:
         """ The event signaller for internal and external triggers """
         return self._events
-    
+
     @property
     def model(self) -> FaceswapModel:
         """ The object that manages the FaceswapModel plugin and state """
         return self._model
+
+    @property
+    def optimizer_unit(self) -> OptimizerUnit:
+        """ The Optimizer being used for training """
+        return self._optimizer_unit
 
     @property
     def iteration(self) -> int:
@@ -325,12 +326,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         new step to ensure accurate per-iteration tracking across the training session."""
         return T.cast(PluginUnit, self._units.core["PluginUnit"]).current_loss
 
-    @property
-    def do_save(self) -> bool:
-        """ ``True`` if this is a save iteration, or if a manual save has been requested """
-        return T.cast(SaveUnit, self._units.core["SaveUnit"]).do_save
-
-    def _get_optimizer(self, model: ModelPlugin, warmup_steps: int) -> OptimizerUnit:
+    def _get_optimizer(self, model: ModelPlugin) -> OptimizerUnit:
         clipping = mod_cfg.Optimizer.gradient_clipping()
         assert clipping in ("autoclip", "global_norm", "norm", "value", "none")
         clipper = None if clipping == "none" else GradClip(clipping,
@@ -342,7 +338,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
             learning_rate=mod_cfg.Optimizer.learning_rate(),
             epsilon_exponent=mod_cfg.Optimizer.epsilon_exponent(),
             mixed_precision=mod_cfg.mixed_precision(),
-            warmup_steps=warmup_steps,
             accumulation_steps=mod_cfg.Optimizer.gradient_accumulation(),
             clipper=clipper,
             weight_decay=mod_cfg.Optimizer.weight_decay(),
@@ -398,7 +393,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
     def _create_base_units(self,
                            loader: TrainLoader,
                            trainer: TrainerPlugin,
-                           optimizer: OptimizerUnit,
                            events: TrainingEvents,
                            save_interval: int,
                            snapshot_interval: int) -> None:
@@ -410,8 +404,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
             The data loader for feeding training data to the model
         trainer
             The object responsible for forward and backwards passes through the model
-        optimizer
-            The optimizer to use for training
         save_interval
             The number of iterations between each model save
         snapshot_interval
@@ -439,10 +431,11 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                                 mod_cfg.Optimizer.save_optimizer())
 
         state_unit = StateUnit(self._model.state, trainer.batch_size)
-        plugin_unit = self._get_plugin_unit(loader, trainer, optimizer)
+        plugin_unit = self._get_plugin_unit(loader, trainer, self.optimizer_unit)
         loss_unit = LossUnit(mod_cfg.nan_protection(), plugin_unit.current_loss, self._device)
-        save_unit = SaveUnit(self._model,
-                             optimizer,
+        event_unit = EventUnit(events)
+        save_unit = SaveUnit(self.model,
+                             self.optimizer_unit,
                              events,
                              loss_unit.current_average,
                              save_interval,
@@ -450,11 +443,12 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
         self._units.add_unit(state_unit, is_core=True)
         self._units.add_unit(plugin_unit, is_core=True)
-        self._units.add_unit(optimizer, is_core=True)
+        self._units.add_unit(self.optimizer_unit, is_core=True)
         self._units.add_unit(loss_unit, is_core=True)
+        self._units.add_unit(event_unit, is_core=True)
 
         if snapshot_interval > 0:
-            self._units.add_unit(SnapshotUnit(self._model, optimizer, snapshot_interval),
+            self._units.add_unit(SnapshotUnit(self._model, self.optimizer_unit, snapshot_interval),
                                  is_core=True)
 
         self._units.add_unit(save_unit, is_core=True)  # Make sure it always runs last)
@@ -583,7 +577,6 @@ class TrainingLoop:
                  faceswap_model: FaceswapModel,
                  trainer: TrainerPlugin,
                  loader: TrainLoader,
-                 warmup_steps: int = 0,
                  save_interval: int = 250,
                  snapshot_interval: int = 25000) -> None:
         logger.debug(parse_class_init(locals()))
@@ -593,7 +586,6 @@ class TrainingLoop:
                                   trainer=trainer,
                                   loader=loader,
                                   training_events=self._events,
-                                  warmup_steps=warmup_steps,
                                   save_interval=save_interval,
                                   snapshot_interval=snapshot_interval)
         self._thread = FSThread(self._main_loop, "training_loop")
@@ -611,10 +603,6 @@ class TrainingLoop:
                 logger.debug("[TrainingLoop] Exit requested")
                 break
 
-            if self._events.toggle_mask.is_set() and not self._events.update.is_set():
-                logger.debug("[TrainingLoop] Triggering update for mask toggle")
-                self._events.update.set()
-
             self._stepper.step()
 
         self._stepper.on_end()
@@ -628,7 +616,7 @@ class TrainingLoop:
         except KeyboardInterrupt:
             try:
                 logger.info("[Train] Keyboard Interrupt Caught. Saving Weights and exiting")
-                self._stepper.save(is_exit=True)
+                self._stepper.on_end()
             except KeyboardInterrupt:
                 logger.warning("Saving model weights has been cancelled!")
         except Exception as err:

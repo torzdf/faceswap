@@ -20,7 +20,6 @@ from plugins.train.trainer import trainer_config as trn_cfg
 from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
-    from threading import Event
     import numpy.typing as npt
     from lib.model.plugin.handler import FaceswapModel
     from lib.training.training_loop import TrainingEvents, TrainStep
@@ -79,21 +78,20 @@ class Samples():
                                     "_mask_color"))
         return f"{self._name}({params})"
 
-    def _toggle_mask_display(self, mask_event: Event) -> None:
+    def _toggle_mask_display(self) -> None:
         """ Toggle the mask overlay on or off depending on user input during preview sessions
 
         Notes
         -----
         If has_mask is False (model wasn't trained with masks), this method has no effect.
         """
-        if not self._has_mask or not mask_event.is_set():
+        if not self._has_mask:
             return
 
         display_mask = not self._display_mask
         print("\x1b[2K", end="\r")  # Clear last line
         logger.info("Toggling mask display %s...", "on" if display_mask else "off")
         self._display_mask = display_mask
-        mask_event.clear()
 
     def _get_background(self,
                         targets: npt.NDArray[np.float32],
@@ -321,7 +319,7 @@ class Samples():
     def get_preview(self,
                     predictions: npt.NDArray[np.float32],
                     targets: npt.NDArray[np.float32],
-                    mask_toggle: Event | None,
+                    toggle_mask: bool,
                     ) -> npt.NDArray[np.uint8]:
         """ Compile a complete preview image from predictions and target patches
 
@@ -337,7 +335,7 @@ class Samples():
             Full size BGR face patches at 100% coverage for patching predictions into in
             (A, B, ...) order
         mask_toggle
-            The event that indicates if the current state of the mask should be toggled
+            ``True`` if the mask should be toggled from its current state
 
         Returns
         -------
@@ -352,8 +350,8 @@ class Samples():
         3. Blending masks onto face regions if enabled and visible
         4. Arranging all components into final display layout
         """
-        if mask_toggle is not None:
-            self._toggle_mask_display(mask_toggle)  # TODO move this to preview so that it doesn't impact timelapse
+        if toggle_mask:
+            self._toggle_mask_display()
 
         patch_size = targets.shape[-2]
         pad = (patch_size - predictions.shape[-2]) // 2
@@ -408,7 +406,6 @@ class EvaluateUnit(TrainingUnit):
                                 trn_cfg.Augmentation.mask_color())
         self._loader: PreviewLoader  # set by child
         self._device: torch.Device   # set in on_start
-        self._events: TrainingEvents  # set in on_start
 
     def __repr__(self) -> str:
         """ String representation for debugging and logging """
@@ -427,9 +424,7 @@ class EvaluateUnit(TrainingUnit):
         This method establishes the device reference for inference operations.
         """
         self._device = loop.device
-        self._events = loop.events
-        logger.debug("[%s] Referenced events: %s, Set device to: '%s'",
-                     self.log_name, loop.events, str(self._device))
+        logger.debug("[%s] Set device to: '%s'", self.log_name, str(self._device))
 
     def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
         """ Obtain preview predictions from the model by chunking into batch-sized feeds
@@ -487,29 +482,7 @@ class EvaluateUnit(TrainingUnit):
             retval[:, idx:idx + feed_size] = out_arr
         return retval
 
-    def _get_samples(self) -> npt.NDArray[np.uint8]:
-        """ Generate formatted preview images by processing model predictions and composing
-        display output
-
-        Fetches the next batch from the data loader, runs inference through the model,
-        organizes all swap combinations into a prediction matrix, converts formats if needed,
-        and returns fully composed preview ready for display or saving.
-
-        Returns
-        -------
-        A numpy uint8 array containing the complete preview image with headers
-
-        Notes
-        -----
-        The method handles:
-
-        1. Fetching new batch from data loader
-        2. Running model inference on all source combinations (rolled feed technique)
-        3. Converting BGR→RGB if model uses RGB internally
-        4. Calling Samples.get_preview() for final composition
-
-        This is the main entry point called by PreviewUnit and TimelapseUnit during save events.
-        """
+    def _get_samples(self, toggle_mask: bool = False) -> npt.NDArray[np.uint8]:
         feed, target = next(self._loader)
         num_sides = feed.shape[0]
         ndim = 4 if self._learn_mask else 3
@@ -536,7 +509,7 @@ class EvaluateUnit(TrainingUnit):
         logger.debug("[%s] Got preview images: predictions: %s, targets: %s",
                      self.log_name, format_array(predictions), format_array(targets))
 
-        return self._samples.get_preview(predictions, targets, self._events.toggle_mask)
+        return self._samples.get_preview(predictions, targets, toggle_mask)
 
 
 class PreviewUnit(EvaluateUnit):
@@ -574,6 +547,7 @@ class PreviewUnit(EvaluateUnit):
                                      folders,
                                      self._batch_size,
                                      torch.utils.data.RandomSampler)
+        self._events: TrainingEvents  # set in on_start
 
     def __repr__(self) -> str:
         """ String representation for debugging and logging """
@@ -584,6 +558,8 @@ class PreviewUnit(EvaluateUnit):
     def on_start(self, loop: TrainStep) -> None:
         """ Generate the first preview image on model start """
         super().on_start(loop)
+        self._events = loop.events
+        logger.debug("%s Referenced events: %s", self.log_name, loop.events)
         self.on_update()
 
     def on_update(self) -> None:
@@ -615,7 +591,11 @@ class PreviewUnit(EvaluateUnit):
         3. Set the preview image to the loop.event object
         """
         logger.debug("%s Generating preview", self.log_name)
-        self._events.set_preview(self._get_samples())
+        toggle_mask = self._events.toggle_mask.is_set()
+        if toggle_mask:
+            logger.debug("%s Toggle mask received. Resetting flag", self.log_name)
+            self._events.toggle_mask.clear()
+        self._events.set_preview(self._get_samples(toggle_mask=toggle_mask))
 
 
 class TimelapseUnit(EvaluateUnit):

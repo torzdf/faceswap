@@ -12,7 +12,6 @@ from torch import nn
 from lib.logger import parse_class_init
 from lib.model import optimizers
 from lib.model.autoclip import AutoClipper
-from lib.training.lr_warmup import WarmupScheduler  # TODO
 from lib.training.lr_finder import LRFScheduler  # TODO
 from lib.utils import get_module_objects
 
@@ -21,7 +20,8 @@ from plugins.train import train_config as mod_cfg
 from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
-    from keras import Variable
+    from keras import Variable  # TODO KERAS GOTTA GO
+    from torch.optim import Optimizer
     from lib.training.training_loop import TrainStep
     from plugins.train.model.base import ModelPlugin
 
@@ -215,8 +215,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         Log-space epsilon for Adam family optimizers. Default: -7
     mixed_precision
         ``True`` to use automatic mixed precision training with GradScaler. Default: ``False``
-    warmup_steps
-        Number of steps to linearly warm up learning rate from zero. Default: 0
     accumulation_steps
         Gradient accumulation factor (processes N batches before optimizer step). Default: 1
     clipper
@@ -237,7 +235,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
     This unit handles the complete optimization lifecycle including:
 
     - Gradient accumulation across multiple batches before stepping
-    - Learning rate warmup during initial training phase
     - Automatic mixed precision scaling when enabled
     - Gradient clipping to prevent exploding gradients
     - Learning Rate Finder integration for optimal LR discovery
@@ -256,7 +253,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
             learning_rate: float = 5e-5,
             epsilon_exponent: int = -7,
             mixed_precision: bool = False,
-            warmup_steps: int = 0,
             accumulation_steps: int = 1,
             clipper: GradClip | None = None,
             weight_decay: float = 0.0,
@@ -270,7 +266,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                           "learning_rate": repr(learning_rate),
                           "epsilon_exponent": repr(epsilon_exponent),
                           "mixed_precision": repr(mixed_precision),
-                          "warmup_steps": repr(warmup_steps),
                           "accumulation_steps": repr(accumulation_steps),
                           "clipper": repr(clipper),
                           "weight_decay": repr(weight_decay),
@@ -291,7 +286,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                                               ada_beta_1=ada_beta_1,
                                               ada_beta_2=ada_beta_2,
                                               ada_amsgrad=ada_amsgrad)
-        self._warmup = None if warmup_steps < 1 else WarmupScheduler(self._optimizer, warmup_steps)
         self._lrf_scheduler: LRFScheduler | None = None
 
         self.save = T.cast(T.Literal["always", "exit", "never"],
@@ -299,12 +293,16 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         """ When the optimizer should be saved """
 
         self._accumulation_count = 0
-        self._session_steps = 0
 
     def __repr__(self) -> str:
         """ String representation for debugging and logging """
         params = ", ".join(f"{k}={v}" for k, v in self._repr_obj.items())
         return f"{self.__class__.__name__}({params})"
+
+    @property
+    def optimizer(self) -> Optimizer:
+        """ The current Torch Optimizer instance """
+        return self._optimizer
 
     @property
     def lrf_scheduler(self) -> LRFScheduler | None:
@@ -647,9 +645,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
 
         if self._lrf_scheduler is not None:
             self._lrf_scheduler.step()
-        elif self._warmup is not None and self._session_steps < self._warmup.steps:
-            self._session_steps += 1
-            self._warmup.step()
 
         self._optimizer.zero_grad(set_to_none=True)
         self._accumulation_count = 0

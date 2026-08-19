@@ -119,14 +119,14 @@ class PluginUnit(TrainingUnit):
 
     @property
     def current_loss(self) -> list[BatchLoss]:
-        """ A list of BatchLoss objects containing the detached loss outputs for each identity
+        """ A list of BatchLoss objects containing the loss outputs for each identity
         processed during this iteration. Used by LossUnit for averaging and reporting metrics.
 
         Notes
         -----
-        Values are populated after trainer.step() is called and cleared at the start of each
-        new step to ensure accurate per-iteration tracking across the training session."""
-        return self._current_loss  # TODO check if loss is detached at this point. If not detach in this plugin somewhere
+        Values are populated after trainer.step() and detached at the start of loss_unit.step().
+        """
+        return self._current_loss
 
     def _configure_loss(self,
                         loss_functions: dict[str, float],

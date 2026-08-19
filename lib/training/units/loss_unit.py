@@ -198,20 +198,19 @@ class LossUnit(TrainingUnit):
 
         Notes
         -----
-        Processing steps:  # TODO
+        Processing steps:
 
-        1. If lrf is not enabled, detach all loss values from computation graph
+        1. Detaches loss from the model
         2. Handle NaNs if protection is enabled
-        3. Log to TensorBoard via training loop's current_loss object
-        4. Track running averages since last save
-        5. Print loss to console if learning rate finder is disabled
+4       3. Track running averages since last save
+        4. Print loss to console if learning rate finder is disabled
 
         The iteration count of -1 indicates initialization phase where no processing occurs.
         """
-        if iteration < 0:
+        if iteration < 0:  # TODO LRF check
             return
 
-        loss = [x.detach() for x in self._loss]  # TODO detach order
+        loss = [x.detach() for x in self._loss]
         self._handle_nan(loss)
         self._update_averages(loss)
         self._print_loss(loss, iteration)
