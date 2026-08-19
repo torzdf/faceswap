@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import typing as T
 
 import torch
 from torch.utils import data as tch_data
 from torch.utils.data import DataLoader
+
+from lib.image import validate_faceswap_image
 from lib.logger import parse_class_init
-from lib.utils import get_module_objects
+from lib.utils import get_image_paths, get_module_objects
 from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
 
@@ -22,6 +25,62 @@ if T.TYPE_CHECKING:
     from .collate import BatchMeta
 
 logger = logging.getLogger(__name__)
+
+
+def validate_faceswap_folders(training_folders: list[str]) -> list[str]:
+    """ Validate that all training folder paths are correct and contain valid facewap images
+
+    This function ensures each training directory exists, contains at least 25 extracted face
+    images, and those images pass the Faceswap image validation check. It also logs warnings if
+    directories have fewer than 250 images as results may be poor.
+
+    Parameters
+    ----------
+    training_folders
+        List of folder paths containing extracted faces for each model side (A/B/etc.)
+
+    Returns
+    -------
+    The validated list of training folder paths that passed all checks
+    """
+    def _validate_image_counts(side: str, num_images: int) -> None:
+        """ Warn or error based on image count per side """
+        msg = ("You need to provide a significant number of images to successfully train a Neural "
+               "Network. Aim for between 500 - 5000 images per side.")
+        if num_images < 25:
+            logger.error("Side %s contains fewer than 25 images.", side)
+            logger.error(msg)
+            sys.exit(1)
+        if num_images < 250:
+            logger.warning("Side %s contains fewer than 250 images. "
+                           "Results are likely to be poor.", side)
+            logger.warning(msg)
+
+    def _validate_folder(key: str, folder: str):
+        """ Validate a single training folder for existence and content """
+        if not os.path.isdir(folder):
+            logger.error("Error: '%s' does not exist", folder)
+            sys.exit(1)
+
+        test = get_image_paths(folder, ".png")
+        if not test:
+            logger.error("Error: '%s' contains no images", folder)
+            sys.exit(1)
+
+        if not validate_faceswap_image(next(img for img in test)):
+            logger.error("The input folder '%s' contains images that are not extracted faces.",
+                         folder)
+            logger.error("You can only train a model on faces generated from Faceswap's "
+                         "extract process. Please check your sources and try again.")
+            sys.exit(1)
+
+        _validate_image_counts(key, len(test))
+        logger.info("Model %s Directory: '%s' (%s images)", key, folder, len(test))
+
+    logger.debug("[TrainLoader] Getting image paths")
+    for idx, image_dir in enumerate(training_folders):
+        _validate_folder(get_label(idx, len(training_folders)), image_dir)
+    return training_folders
 
 
 class TrainLoader():  # pylint:disable=too-many-instance-attributes
@@ -66,7 +125,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         logger.debug(parse_class_init(locals()))
         self._learn_mask = mod_cfg.Loss.learn_mask()
 
-        self._folders = folders
+        self._folders = validate_faceswap_folders(folders)
         self._batch_size = batch_size
         self._output_sizes = output_sizes
         self._aug_config = {"augment_color": augment_color,

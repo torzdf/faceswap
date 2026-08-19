@@ -635,6 +635,29 @@ def png_read_meta(image: bytes) -> PNGHeader | dict[str, T.Any]:
     return retval
 
 
+def validate_faceswap_image(image_path: str) -> bool:
+    """ Validate whether an image file contains valid Faceswap metadata
+
+    Reads the image's EXIF header and checks that both 'itxt' and 'alignments' keys are present in
+    the faceswap metadata. Used to verify extracted face files have proper alignment data stored by
+    Faceswap.
+
+    Parameters
+    ----------
+    image_path
+        The full path to the image file to validate (should be a .png or .tif)
+
+    Returns
+    -------
+    ``True`` if both 'itxt' and 'alignments' keys exist in the metadata, ``False`` otherwise
+    """
+    meta = read_image_meta(image_path)
+    retval = "itxt" in meta and "alignments" in meta["itxt"]
+    logger.debug("Test file: (filename: %s, metadata: %s, is_faceswap: %s)",
+                 image_path, meta, retval)
+    return retval
+
+
 def generate_thumbnail(image, size=96, quality=60):
     """ Generate a jpg thumbnail for the given image.
 

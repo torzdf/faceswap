@@ -2,31 +2,25 @@
 """Run the training loop for a training plugin"""
 from __future__ import annotations
 
-import logging
-import os
-import typing as T
 from dataclasses import dataclass, field
+import logging
+from threading import Event, Lock
+import typing as T
 
-import cv2
 import numpy as np
-
 import torch
 
-from lib.logger import format_array, parse_class_init
-
-from lib.torch_utils import get_device
-# from lib.model.plugin import TrainHandler
+from lib.logger import parse_class_init
 from lib.utils import get_module_objects
+from lib.multithreading import FSThread
+from lib.torch_utils import get_device
 from plugins.train import train_config as mod_cfg
-
-from plugins.train.trainer import trainer_config as trn_cfg
 from plugins.train.trainer.base import TrainerPlugin
 
-from .data import PreviewLoader, TrainLoader
+from .data import TrainLoader
 from .units import LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
 from .units.optimizer_unit import GradClip, OptimizerUnit
 # from .lr_finder import LearningRateFinder
-from .preview import Samples
 from .units import TrainingUnit
 
 if T.TYPE_CHECKING:
@@ -52,7 +46,7 @@ class TrainerReturn:
 
 
 UnitGroupT = T.Literal["core", "optional"]
-UnitStageT = T.Literal["start", "step", "save", "end"]
+UnitStageT = T.Literal["start", "step", "save", "update", "end"]
 UnitStageDictT = dict[UnitStageT, list[TrainingUnit]]
 
 
@@ -76,7 +70,7 @@ class Units:
 
     Notes
     -----
-    Units are organized into two categories and four lifecycle stages:
+    Units are organized into two categories and five lifecycle stages:
 
     Categories:
 
@@ -88,7 +82,8 @@ class Units:
     1. **start**: Setup and configuration before first batch
     2. **step**: Per-iteration processing after backpropagation
     3. **save**: Actions taken when save intervals are reached
-    4. **end**: Cleanup operations on training completion
+    4. **update**: Actions taken after a save has completed or on user intervention
+    5. **end**: Cleanup operations on training completion
 
     Examples
     --------
@@ -98,14 +93,14 @@ class Units:
     """
     stages_core: UnitStageDictT = field(
         default_factory=lambda: T.cast(
-            UnitStageDictT, {"start": [], "step": [], "save": [], "end": []}
+            UnitStageDictT, {"start": [], "step": [], "save": [], "update": [], "end": []}
             )
         )
     """ Core units that are essential to the training loop at each lifecycle stage """
 
     stages_optional: UnitStageDictT = field(
         default_factory=lambda: T.cast(
-            UnitStageDictT, {"start": [], "step": [], "save": [], "end": []}
+            UnitStageDictT, {"start": [], "step": [], "save": [], "update": [], "end": []}
             )
         )
     """ Optional units that can be enabled/disabled through configuration """
@@ -160,6 +155,12 @@ class Units:
         return self.stages_optional["save"] + self.stages_core["save"]
 
     @property
+    def on_update(self) -> list[TrainingUnit]:
+        """ Combined list of optional and core update-stage units. Optional units are ordered first
+        in the order they were provided followed by core units """
+        return self.stages_optional["update"] + self.stages_core["update"]
+
+    @property
     def on_end(self) -> list[TrainingUnit]:
         """ Combined list of optional and end-stage core units for cleanup operations. Optional
         units are ordered first in the order they were provided followed by core units"""
@@ -184,6 +185,7 @@ class Units:
         - **start**: Units configured when training begins (typically for setup)
         - **step**: Units executed on each training iteration step
         - **save**: Units that are executed at each save interval
+        - **update**: Units that are executed after a save has completed or on user intervention
         - **end**: Units that perform cleanup operations when training ends
 
         The method checks which stages the unit supports. Units are appended to
@@ -197,7 +199,7 @@ class Units:
         >>> self.units.add_unit(custom_unit, is_core=False)
         """
         stage_group = self.stages_core if is_core else self.stages_optional
-        for key in ("start", "step", "save", "end"):
+        for key in ("start", "step", "save", "update", "end"):
             if not getattr(unit, f"has_{key}"):
                 continue
             logger.debug("[Units] '%s' Adding 'stage_%s'['%s']",
@@ -205,7 +207,7 @@ class Units:
             stage_group[key].append(unit)
 
 
-class TrainingLoop:  # pylint:disable=too-many-instance-attributes
+class TrainStep:  # pylint:disable=too-many-instance-attributes
     """ Handles the feeding of training images to Faceswap models, collating the loss and running
     any training step units
 
@@ -217,6 +219,8 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         The object responsible for forward and backwards passes through the model
     loader
         The data loader for feeding training data to the model
+    training_events
+        The event triggers for communicating with the main thread
     warmup_steps
         The number of steps to warmup the learning rate for. Default: 0
     save_interval
@@ -230,6 +234,7 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
                  faceswap_model: FaceswapModel,
                  trainer: TrainerPlugin,
                  loader: TrainLoader,
+                 training_events: TrainingEvents,
                  warmup_steps: int = 0,
                  save_interval: int = 250,
                  snapshot_interval: int = 25000,
@@ -237,13 +242,20 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         logger.debug(parse_class_init(locals()))
 
         self._model = faceswap_model
+        self._events = training_events
+
         self._started = False
         self._device = get_device()
         self._units = Units()
 
         trainer.set_training_precision(mod_cfg.mixed_precision(), str(self._device))
         optimizer = self._get_optimizer(faceswap_model.plugin, warmup_steps)
-        self._create_base_units(loader, trainer, optimizer, save_interval, snapshot_interval)
+        self._create_base_units(loader=loader,
+                                trainer=trainer,
+                                optimizer=optimizer,
+                                events=training_events,
+                                save_interval=save_interval,
+                                snapshot_interval=snapshot_interval)
 
         # self._model_handler = TrainHandler(faceswap_model=faceswap_model,
         #                                    optimizer=optimizer,
@@ -286,6 +298,11 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         """ The device that the model is training on """
         return self._device
 
+    @property
+    def events(self) -> TrainingEvents:
+        """ The event signaller for internal and external triggers """
+        return self._events
+    
     @property
     def model(self) -> FaceswapModel:
         """ The object that manages the FaceswapModel plugin and state """
@@ -333,7 +350,7 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
             ada_beta_2=mod_cfg.Optimizer.ada_beta_2(),
             ada_amsgrad=mod_cfg.Optimizer.ada_amsgrad()
             )
-        logger.debug("[TrainingLoop] Built optimizer: %s", retval)
+        logger.debug("[TrainStep] Built optimizer: %s", retval)
         return retval
 
     def _get_plugin_unit(self,
@@ -375,13 +392,14 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
                             mouth_multiplier=mod_cfg.Loss.mouth_multiplier(),
                             mask_loss=(None if not mod_cfg.Loss.learn_mask()
                                        else mod_cfg.Loss.mask_loss_function()))
-        logger.debug("[TrainingLoop] Built PluginUnit: %s", retval)
+        logger.debug("[TrainStep] Built PluginUnit: %s", retval)
         return retval
 
     def _create_base_units(self,
                            loader: TrainLoader,
                            trainer: TrainerPlugin,
                            optimizer: OptimizerUnit,
+                           events: TrainingEvents,
                            save_interval: int,
                            snapshot_interval: int) -> None:
         """ Create and register default training units for loss tracking, snapshots, and saves
@@ -425,6 +443,7 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         loss_unit = LossUnit(mod_cfg.nan_protection(), plugin_unit.current_loss, self._device)
         save_unit = SaveUnit(self._model,
                              optimizer,
+                             events,
                              loss_unit.current_average,
                              save_interval,
                              save_optimizer)
@@ -457,6 +476,7 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         - **start**: Units configured when training begins (typically for setup)
         - **step**: Units executed on each training iteration step
         - **save**: Units that are executed at each save interval
+        - **update**: Units that are executed after a save has completed or on user intervention
         - **end**: Units that perform cleanup operations when training ends
 
         The method checks which stages the unit supports. Units are appended to
@@ -466,73 +486,52 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         """
         self._units.add_unit(unit, is_core=False)
 
-    def toggle_mask(self) -> None:  # TODO
-        """Toggle the mask overlay on or off based on user input."""
-        self._tester.toggle_mask()
-
-    def _start_loop(self) -> None:
+    def _on_train_start(self) -> None:
         """ Start the training loop by executing all on_start units """
-        logger.debug("[TrainingLoop] Starting")
+        logger.debug("[TrainStep] Starting")
         for unit in self._units.on_start:
-            logger.debug("[TrainingLoop] Executing on_start: '%s'", unit.__class__.__name__)
+            logger.debug("[TrainStep] Executing on_start: '%s'", unit.__class__.__name__)
             unit.on_start(self)
         self._started = True
 
-    def step(self, gen_preview: bool) -> TrainerReturn:  # TODO arg
-        """Running training on a batch of images for each side.
+    def _step(self) -> None:
+        for unit in self._units.step:
+            logger.trace("[TrainStep] %s step %s",  # type:ignore[attr-defined]
+                         unit.__class__.__name__, self.iteration)
+            unit.step(self.iteration)
 
-        Triggered from the training cycle in :class:`scripts.train.Train`.
+    def _save(self) -> None:
+        for unit in self._units.on_save:
+            logger.debug("[TrainStep] %s Saving step %s", unit.__class__.__name__, self.iteration)
+            unit.on_save(self.iteration)
+        self._events.save.clear()
 
-        * Runs a training batch through the model.
+    def _update(self) -> None:
+        for unit in self._units.on_update:
+            logger.debug("[TrainStep] %s Updating", unit.__class__.__name__)
+            unit.on_update()
+        self._events.update.clear()
 
-        * Outputs the iteration's loss values to the console
-
-        * Logs loss to Tensorboard, if logging is requested.
-
-        * If a preview or time-lapse has been requested, then pushes sample images through the \
-        model to generate the previews
-
-        * Creates a snapshot if the total iterations trained so far meet the requested snapshot \
-        criteria
-
-        Notes
-        -----
-        As every iteration is called explicitly, the Parameters defined should always be ``None``
-        except on save iterations.
-
-        Parameters
-        ----------
-        gen_preview
-            ``True`` to force run inference to generate preview images
-
-        Returns
-        -------
-        The return object with any relevant information to the caller
-        """
+    def step(self) -> None:
         if not self._started:
-            self._start_loop()
-        logger.trace("[TrainingLoop] step %s",  self.iteration)  # type:ignore[attr-defined]
-
+            self._on_train_start()
         # iteration = -1 if self._lr_finder.is_enabled else self._model_handler.total_iterations + 1
-        retval = TrainerReturn()
 
-        for stepper in self._units.step:
-            logger.trace("[TrainingLoop] %s step %s",  # type:ignore[attr-defined]
-                         stepper.__class__.__name__, self.iteration)
-            stepper.step(self.iteration)
+        logger.trace("[TrainStep] step %s",  self.iteration)  # type:ignore[attr-defined]
+        self._step()
 
-        if self.do_save:
-            for saver in self._units.on_save:
-                logger.debug("[TrainingLoop] %s Saving step %s",
-                             saver.__class__.__name__, self.iteration)
-                saver.on_save(self.iteration)
+        if self._events.save.is_set():
+            self._save()
+
+        if self._events.update.is_set():
+            self._update()
 
         # if self._lr_finder.is_enabled:
         #     if self._lr_finder.step(T.cast(torch.Tensor, sum(x.total for x in loss))):
         #         retval.exit = True
         #         return retval
         #     if not self._lr_finder.is_enabled:
-        #         logger.debug("[TrainingLoop] LRF Finished")
+        #         logger.debug("[TrainStep] LRF Finished")
         #         return retval
         # update_preview = self._model_handler.step(self._loss_handler, self._lr_finder.is_enabled)
 
@@ -544,243 +543,129 @@ class TrainingLoop:  # pylint:disable=too-many-instance-attributes
         #     retval.preview_image = out[0]
         #     retval.preview_title = out[1]
 
+        # return retval
+
+    def on_end(self) -> None:
+        for unit in self._units.on_end:
+            logger.trace("[TrainStep] %s ending %s",  # type:ignore[attr-defined]
+                         unit.__class__.__name__)
+            unit.on_end()
+        logger.debug("[TrainStep] Training ended")
+
+
+@dataclass
+class TrainingEvents:
+    save: Event = field(default_factory=Event)
+    exit: Event = field(default_factory=Event)
+    update: Event = field(default_factory=Event)
+    toggle_mask: Event = field(default_factory=Event)
+    _preview: None | npt.NDArray[np.uint8] = None
+    _lock: Lock = field(default_factory=Lock)
+
+    def get_preview(self) -> None | npt.NDArray[np.uint8]:
+        with self._lock:
+            if self._preview is None:
+                return None
+            retval = self._preview
+            self._preview = None
+        logger.debug("[TrainingEvents] Getting preview: %s", retval.shape)
         return retval
 
-    def save(self, is_exit: bool = False) -> None:
-        """Save the model
-
-        Parameters
-        ----------
-        is_exit
-            ``True`` if save has been called on model exit. Default: ``False``
-        """
-        self._model_handler.save(self._loss_handler, is_exit=is_exit)
-        if is_exit:
-            self._loss_handler.close()
+    def set_preview(self, preview: npt.NDArray[np.uint8]) -> None:
+        logger.debug("[TrainingEvents] Setting preview: %s", preview.shape)
+        with self._lock:
+            self._preview = preview
 
 
-class Tester:
-    """Responsible for running tests through the model for previews/timelapses
-
-    Parameters
-    ----------
-    trainer_plugin
-        The faceswap trainer plugin to obtain previews from
-    input_size
-        The input size of the model
-    output_size
-        The output size of the model
-    device
-        The device that the model resides on
-    preview_folders
-        List of folders, for each side, to load training images for preview from. ``None`` if
-        preview disabled
-    timelapse_folders
-        The input folders to create timelapse images from. Default: ``None`` (no timelapse)
-    timelapse_output
-        The folder to output timelapse images. Default: "" (no timelapse)
-    """
+class TrainingLoop:
     def __init__(self,
-                 trainer_plugin: TrainerPlugin,
-                 input_size: int,
-                 output_size: int,
-                 device: torch.Device,
-                 preview_folders: list[str] | None,
-                 timelapse_folders: list[str] | None = None,
-                 timelapse_output: str = "") -> None:
+                 iterations: int,
+                 faceswap_model: FaceswapModel,
+                 trainer: TrainerPlugin,
+                 loader: TrainLoader,
+                 warmup_steps: int = 0,
+                 save_interval: int = 250,
+                 snapshot_interval: int = 25000) -> None:
         logger.debug(parse_class_init(locals()))
-        self._trainer = trainer_plugin
-        self._input_size = input_size
-        self._output_size = output_size
-        self._device = device
-        self._timelapse_folders = [] if timelapse_folders is None else timelapse_folders
-        self._timelapse_output = timelapse_output
-        self._batch_size = trn_cfg.Augmentation.preview_images()
-        self._samples = Samples(mod_cfg.coverage() / 100.,
-                                mod_cfg.Loss.learn_mask() or mod_cfg.Loss.penalized_mask_loss(),
-                                trn_cfg.Augmentation.mask_opacity(),
-                                trn_cfg.Augmentation.mask_color())
+        self._iterations = iterations
+        self._events = TrainingEvents()
+        self._stepper = TrainStep(faceswap_model,
+                                  trainer=trainer,
+                                  loader=loader,
+                                  training_events=self._events,
+                                  warmup_steps=warmup_steps,
+                                  save_interval=save_interval,
+                                  snapshot_interval=snapshot_interval)
+        self._thread = FSThread(self._main_loop, "training_loop")
 
-        self._preview_loader = self._get_preview_loader(preview_folders)
-        self._timelapse_loader = self._get_timelapse_loader()
+    @property
+    def events(self) -> TrainingEvents:
+        return self._events
 
-    def _get_preview_loader(self, preview_folders: list[str] | None) -> PreviewLoader | None:
-        """Get the loader for generating previews whilst training the model
+    def check_and_re_raise_error(self) -> None:
+        self._thread.check_and_raise_error()
 
-        Parameters
-        ----------
-        preview_folders
-            list of folders to read images from for each side being trained
+    def _training_loop(self) -> None:
+        for _ in range(self._iterations):
+            if self._events.exit.is_set():
+                logger.debug("[TrainingLoop] Exit requested")
+                break
 
-        Returns
-        -------
-        The loader for generating preview images during training or ``None`` if previews are
-        disabled
-        """
-        if not preview_folders:
-            return None
-        retval = PreviewLoader(self._input_size,
-                               self._output_size,
-                               "rgb" if self._trainer.model.is_rgb else "bgr",
-                               preview_folders,
-                               self._batch_size,
-                               torch.utils.data.RandomSampler)
-        logger.debug("[Tester] Preview data loader: %s", retval)
-        return retval
+            if self._events.toggle_mask.is_set() and not self._events.update.is_set():
+                logger.debug("[TrainingLoop] Triggering update for mask toggle")
+                self._events.update.set()
 
-    def _get_timelapse_loader(self) -> PreviewLoader | None:
-        """Get the loader for generating timelapse images whilst training the model
+            self._stepper.step()
 
-        Returns
-        -------
-        The loaders for timelapse preview images during training or ``None`` if previews are
-        disabled
-        """
-        if not self._timelapse_folders or not self._timelapse_output:
-            return None
-        num_images = trn_cfg.Augmentation.preview_images()
-        avail_images = min(len([fname for fname in os.listdir(folder)
-                                if os.path.splitext(fname)[-1].lower() == ".png"])
-                           for folder in self._timelapse_folders)
-        num_samples = min(num_images, avail_images)
-        logger.debug("[Train] preview count: %s, available_images: %s, timelapse count: %s",
-                     num_images, avail_images, num_samples)
-        retval = PreviewLoader(self._input_size,
-                               self._output_size,
-                               "rgb" if self._trainer.model.is_rgb else "bgr",
-                               self._timelapse_folders,
-                               self._batch_size,
-                               torch.utils.data.SequentialSampler,
-                               num_samples=num_samples)
-        logger.debug("[Tester] Preview data loader: %s", retval)
-        return retval
+        self._stepper.on_end()
+        logger.debug("[TrainingLoop] Training Complete")
 
-    def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
-        """Obtain preview predictions from the model, chunking feeds into the model's batch size
+    def _main_loop(self) -> None:
+        """Main loop of the training thread"""
+        logger.debug("[TrainingLoop] Commencing Training")
+        try:
+            self._training_loop()
+        except KeyboardInterrupt:
+            try:
+                logger.info("[Train] Keyboard Interrupt Caught. Saving Weights and exiting")
+                self._stepper.save(is_exit=True)
+            except KeyboardInterrupt:
+                logger.warning("Saving model weights has been cancelled!")
+        except Exception as err:
+            raise err
+
+    def add_unit(self, unit: TrainingUnit) -> None:
+        """ Register a training unit to its appropriate lifecycle stage
 
         Parameters
         ----------
-        feed
-            The input tensor to obtain predictions from the model in shape (num_sides, N, height,
-            width, 3)
+        unit
+            The training unit to register. This should be a ``TrainingUnit`` subclass that declares
+            its capabilities via overriding the stage methods ``on_start``, ``step``, ``on_save``,
+            or ``on_end``)
 
-        Returns
-        -------
-        The predictions from the model for the given preview feed
+        Notes
+        -----
+        Training units are organized into four lifecycle stages:
+
+        - **start**: Units configured when training begins (typically for setup)
+        - **step**: Units executed on each training iteration step
+        - **save**: Units that are executed at each save interval
+        - **update**: Units that are executed after a save has completed or on user intervention
+        - **end**: Units that perform cleanup operations when training ends
+
+        The method checks which stages the unit supports. Units are appended to
+        ``self._units[stage]`` lists in order. Outside of LossUnit (which is always executed first)
+        and SaveUnit (which is always executed last), units are executed in the order they are
+        added to the loop
         """
-        ndim = 4 if mod_cfg.Loss.learn_mask() else 3
-        retval = np.empty((feed.shape[0],
-                           feed.shape[1],
-                           self._output_size,
-                           self._output_size, ndim),
-                          dtype=np.float32)
-        for idx in range(0, feed.shape[1], self._batch_size):
-            feed_batch = feed[:, idx:idx + self._batch_size]
-            feed_size = feed_batch.shape[1]
-            is_padded = feed_size < self._batch_size
+        self._stepper.add_unit(unit)
 
-            if is_padded:
-                holder = torch.empty((feed_batch.shape[0],
-                                      self._batch_size,
-                                      *feed_batch.shape[2:]),
-                                     dtype=feed.dtype)
-                logger.debug("[Tester] Padding undersized batch of shape %s to %s",
-                             feed_batch.shape, holder.shape)
-                holder[:, :feed_size] = feed_batch
-                feed_batch = holder
+    def start(self) -> None:
+        self._thread.start()
 
-            with torch.inference_mode():
-                out = [y.cpu().numpy().transpose(0, 2, 3, 1)
-                       for x in self._trainer.model(list(feed_batch.to(self._device)))
-                       for y in x
-                       if y.shape[2] == self._output_size]  # Filter multi-scale output
-            if mod_cfg.Loss.learn_mask():  # Apply mask to alpha channel
-                out = [np.concatenate(out[i:i + 2], axis=-1) for i in range(0, len(out), 2)]
-            out_arr = np.stack(out, axis=0)
-            if is_padded:
-                out_arr = out_arr[:, :feed_size]
-            retval[:, idx:idx + feed_size] = out_arr
-        return retval
-
-    def __call__(self,  # pylint:disable=too-many-locals
-                 do_timelapse: bool,
-                 iteration: int = 0) -> tuple[npt.NDArray[np.uint8], str] | None:
-        """Update the preview viewer and timelapse output
-
-        Parameters
-        ----------
-        do_timelapse
-            ``True`` to generate a timelapse preview image, ``False`` to return a preview image
-        iteration
-            The current training iteration. Used for timelapse image naming. Default: 0
-
-        Returns
-        -------
-        image
-            The composed preview image
-        name
-            The name (header) of the image
-
-        or ``None`` if a preview has not been generated
-        """
-        if self._preview_loader is None and not do_timelapse:
-            return None
-
-        if self._timelapse_loader is None and do_timelapse:
-            return None
-
-        if do_timelapse:
-            logger.debug("[Tester] Generating timelapse")
-            loader = T.cast(PreviewLoader, self._timelapse_loader)
-        else:
-            logger.debug("[Tester] Generating preview")
-            assert self._preview_loader is not None
-            loader = self._preview_loader
-        feed, target = next(loader)
-
-        num_sides = feed.shape[0]
-        ndim = 4 if mod_cfg.Loss.learn_mask() else 3
-        predictions: npt.NDArray[np.float32] = np.empty((num_sides,
-                                                         num_sides,
-                                                         target.shape[1],
-                                                         self._output_size,
-                                                         self._output_size,
-                                                         ndim),
-                                                        dtype=np.float32)
-        logger.debug("[Tester] feed: %s, target: %s, predictions_holder: %s",
-                     feed.shape, target.shape, predictions.shape)
-        for side_idx in range(num_sides):
-            rolled_feed = torch.roll(feed, shifts=side_idx, dims=0)
-            pred = self._get_predictions(rolled_feed)
-            for input_idx in range(num_sides):
-                original_idx = (input_idx - side_idx) % num_sides
-                predictions[original_idx, side_idx] = pred[input_idx]
-
-        targets = target.cpu().numpy()
-        if self._trainer.model.is_rgb:
-            predictions[..., :3] = predictions[..., 2::-1]
-            targets[..., :3] = targets[..., 2::-1]
-        logger.debug("[Tester] Got preview images: predictions: %s, targets: %s",
-                     format_array(predictions), format_array(targets))
-
-        samples = self._samples.get_preview(predictions, targets)
-
-        if do_timelapse:
-            if not os.path.exists(self._timelapse_output):
-                logger.debug("[Tester] Creating time-lapse folder: '%s'", self._timelapse_output)
-                os.makedirs(self._timelapse_output)
-            filename = os.path.join(self._timelapse_output, f"{iteration:08d}.jpg")
-            cv2.imwrite(filename, samples)
-            logger.debug("[Tester] Created time-lapse: '%s'", filename)
-            return None
-
-        return (samples,
-                "Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
-                "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
-
-    def toggle_mask(self) -> None:
-        """Toggle the preview mask display on or off"""
-        self._samples.toggle_mask_display()
+    def join(self) -> None:
+        self._thread.join()
 
 
 __all__ = get_module_objects(__name__)

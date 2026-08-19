@@ -20,9 +20,10 @@ from plugins.train.trainer import trainer_config as trn_cfg
 from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
+    from threading import Event
     import numpy.typing as npt
     from lib.model.plugin.handler import FaceswapModel
-    from lib.training.training_loop import TrainingLoop
+    from lib.training.training_loop import TrainingEvents, TrainStep
 
 
 logger = logging.getLogger(__name__)
@@ -78,20 +79,21 @@ class Samples():
                                     "_mask_color"))
         return f"{self._name}({params})"
 
-    def toggle_mask_display(self) -> None:
+    def _toggle_mask_display(self, mask_event: Event) -> None:
         """ Toggle the mask overlay on or off depending on user input during preview sessions
 
         Notes
         -----
         If has_mask is False (model wasn't trained with masks), this method has no effect.
-        Useful for debugging loss function components by visualizing learned mask boundaries.
         """
-        if not self._has_mask:
+        if not self._has_mask or not mask_event.is_set():
             return
+
         display_mask = not self._display_mask
         print("\x1b[2K", end="\r")  # Clear last line
         logger.info("Toggling mask display %s...", "on" if display_mask else "off")
         self._display_mask = display_mask
+        mask_event.clear()
 
     def _get_background(self,
                         targets: npt.NDArray[np.float32],
@@ -316,7 +318,10 @@ class Samples():
         logger.debug("[%s] Created preview: %s", self._name, format_array(retval))
         return retval
 
-    def get_preview(self, predictions: npt.NDArray[np.float32], targets: npt.NDArray[np.float32]
+    def get_preview(self,
+                    predictions: npt.NDArray[np.float32],
+                    targets: npt.NDArray[np.float32],
+                    mask_toggle: Event | None,
                     ) -> npt.NDArray[np.uint8]:
         """ Compile a complete preview image from predictions and target patches
 
@@ -331,6 +336,8 @@ class Samples():
         targets
             Full size BGR face patches at 100% coverage for patching predictions into in
             (A, B, ...) order
+        mask_toggle
+            The event that indicates if the current state of the mask should be toggled
 
         Returns
         -------
@@ -345,6 +352,9 @@ class Samples():
         3. Blending masks onto face regions if enabled and visible
         4. Arranging all components into final display layout
         """
+        if mask_toggle is not None:
+            self._toggle_mask_display(mask_toggle)  # TODO move this to preview so that it doesn't impact timelapse
+
         patch_size = targets.shape[-2]
         pad = (patch_size - predictions.shape[-2]) // 2
 
@@ -396,15 +406,15 @@ class EvaluateUnit(TrainingUnit):
                                 mod_cfg.Loss.learn_mask() or mod_cfg.Loss.penalized_mask_loss(),
                                 trn_cfg.Augmentation.mask_opacity(),
                                 trn_cfg.Augmentation.mask_color())
-
-        self._loader: PreviewLoader  # Allocated by child
-        self._device: torch.Device   # Allocated on_start
+        self._loader: PreviewLoader  # set by child
+        self._device: torch.Device   # set in on_start
+        self._events: TrainingEvents  # set in on_start
 
     def __repr__(self) -> str:
         """ String representation for debugging and logging """
         return f"{self.__class__.__name__}(model={self._model!r})"
 
-    def on_start(self, loop: TrainingLoop) -> None:
+    def on_start(self, loop: TrainStep) -> None:
         """ Initialize device context when training commences
 
         Parameters
@@ -417,7 +427,9 @@ class EvaluateUnit(TrainingUnit):
         This method establishes the device reference for inference operations.
         """
         self._device = loop.device
-        logger.debug("[%s] Set device to: '%s'", self.log_name, str(self._device))
+        self._events = loop.events
+        logger.debug("[%s] Referenced events: %s, Set device to: '%s'",
+                     self.log_name, loop.events, str(self._device))
 
     def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
         """ Obtain preview predictions from the model by chunking into batch-sized feeds
@@ -524,7 +536,7 @@ class EvaluateUnit(TrainingUnit):
         logger.debug("[%s] Got preview images: predictions: %s, targets: %s",
                      self.log_name, format_array(predictions), format_array(targets))
 
-        return self._samples.get_preview(predictions, targets)
+        return self._samples.get_preview(predictions, targets, self._events.toggle_mask)
 
 
 class PreviewUnit(EvaluateUnit):
@@ -566,10 +578,16 @@ class PreviewUnit(EvaluateUnit):
     def __repr__(self) -> str:
         """ String representation for debugging and logging """
         retval = super().__repr__()[:-1]
-        return f"{retval}, folders={self._loader.input_folders!r})"
+        return (f"{retval}, "
+                f"folders={self._loader.input_folders!r})")
 
-    def on_save(self, iteration: int) -> None:
-        """ Generate anda preview image at the current training iteration
+    def on_start(self, loop: TrainStep) -> None:
+        """ Generate the first preview image on model start """
+        super().on_start(loop)
+        self.on_update()
+
+    def on_update(self) -> None:
+        """ Generate a preview image at the current training iteration
 
         Fetches the next batch from the data loader, runs inference through the model,
         composes a preview with headers and optional masks, then returns both the image
@@ -592,25 +610,12 @@ class PreviewUnit(EvaluateUnit):
         -----
         Actions performed in order:
 
-        1. Log debug message with current iteration count
+        1. Log debug message
         2. Generate preview via _get_samples() method
-        3. Return both image and GUI status message for display
-
-        The status message includes interactive keyboard shortcuts for:
-
-        - 'S': Save now (save preview to disk)
-        - 'R': Refresh preview (regenerate with new batch)
-        - 'M': Toggle mask overlay on/off
-        - 'F': Toggle screen fit vs actual size display
-        - 'ENTER': Save image and close preview window
-
-        Note: The return value should typically only be displayed in the GUI, not used elsewhere.
+        3. Set the preview image to the loop.event object
         """
-        logger.debug("%s Generating preview [%s]", self.log_name, iteration)
-        samples = self._get_samples()
-        return (samples,  # TODO this should not + docstring
-                "Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
-                "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
+        logger.debug("%s Generating preview", self.log_name)
+        self._events.set_preview(self._get_samples())
 
 
 class TimelapseUnit(EvaluateUnit):

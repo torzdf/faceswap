@@ -22,7 +22,7 @@ from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
     from keras import Variable
-    from lib.training.training_loop import TrainingLoop
+    from lib.training.training_loop import TrainStep
     from plugins.train.model.base import ModelPlugin
 
 
@@ -562,13 +562,13 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
             logger.debug("%s Resuming LRF from scheduler: %s",
                          self.log_name, self._lrf_scheduler.state_dict())
 
-    def on_start(self, loop: TrainingLoop) -> None:
+    def on_start(self, loop: TrainStep) -> None:
         """ Move the optimizer to the training device
 
         Parameters
         ----------
         loop
-            The active TrainingLoop instance. Used to access the shared device context.
+            The active TrainStep instance. Used to access the shared device context.
 
         Notes
         -----

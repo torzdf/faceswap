@@ -149,7 +149,7 @@ class TrainConfigure:
         self._apply_initializers(self._model.plugin)
         self._apply_reflect_padding(self._model.plugin)
         # TODO MSG
-        logger.debug("[TrainingLoop] Configured model")
+        logger.debug("[TrainConfigure] Configured model")
 
 
 class FaceswapModel:

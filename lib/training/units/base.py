@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from lib.utils import get_module_objects
 
 if TYPE_CHECKING:
-    from lib.training.training_loop import TrainingLoop
+    from lib.training.training_loop import TrainStep
 
 
 class TrainingUnit(abc.ABC):
@@ -26,7 +26,7 @@ class TrainingUnit(abc.ABC):
     -----
     This class implements a strategy pattern where each derived unit handles its own specific
     responsibility (e.g., loss tracking, model saving, plugin forward/backward passes). The
-    TrainingLoop orchestrates the sequence by calling these lifecycle methods at appropriate times.
+    TrainStep orchestrates the sequence by calling these lifecycle methods at appropriate times.
 
     Examples
     --------
@@ -38,12 +38,12 @@ class TrainingUnit(abc.ABC):
         self.log_name = f"[{self.__class__.__name__}]"
         """ Standardized prefix for debug logging """
 
-    def on_start(self, loop: TrainingLoop) -> None:  # pylint:disable=unused-argument
+    def on_start(self, loop: TrainStep) -> None:  # pylint:disable=unused-argument
         """ Override to run the unit's initialization when training commences
 
         This method is called immediately before the model processes its first real batch.
         Use it to establish connections to other units (model, optimizer, loss), initialize
-        state variables, or perform setup that depends on the TrainingLoop context.
+        state variables, or perform setup that depends on the TrainStep context.
 
         Parameters
         ----------
@@ -100,6 +100,19 @@ class TrainingUnit(abc.ABC):
         """
         return
 
+    def on_update(self) -> None:
+        """ Override to run the unit's actions when training state is updated
+
+        This method is called by either a save iteration or manual intervention. It allows units
+        to doesn't run every iteration and unlike on_save(), it's not tied to weight saving.
+
+        Notes
+        -----
+        Currently only save iterations and manual keypresses trigger the update flag, so this is
+        used for updating previews.
+        """
+        return
+
     def on_end(self) -> None:
         """ Override to run the unit's cleanup actions when training completes
 
@@ -110,7 +123,7 @@ class TrainingUnit(abc.ABC):
         Notes
         -----
         This is the last opportunity to log information or perform cleanup before the
-        TrainingLoop exits. Consider logging final metrics here for reporting purposes.
+        TrainStep exits. Consider logging final metrics here for reporting purposes.
         """
         return
 
@@ -128,7 +141,7 @@ class TrainingUnit(abc.ABC):
 
         Notes
         -----
-        This is used internally by the TrainingLoop to determine which units need lifecycle
+        This is used internally by the TrainStep to determine which units need lifecycle
         hooks. It checks if getattr(type(self), method_name) differs from the base class's
         implementation using function identity comparison.
         """
@@ -150,6 +163,11 @@ class TrainingUnit(abc.ABC):
     def has_save(self) -> bool:
         """ ``True`` if this unit implements an `on_save` method """
         return self._is_overriden("on_save")
+
+    @property
+    def has_update(self) -> bool:
+        """ ``True`` if this unit implements an `on_update` method """
+        return self._is_overriden("on_update")
 
     @property
     def has_end(self) -> bool:

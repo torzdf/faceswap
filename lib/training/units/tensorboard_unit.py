@@ -19,7 +19,7 @@ from .base import TrainingUnit
 if T.TYPE_CHECKING:
     from lib.training.loss import BatchLoss
     from plugins.train.model.base import ModelPlugin
-    from lib.training.training_loop import TrainingLoop
+    from lib.training.training_loop import TrainStep
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ class TensorBoardUnit(TrainingUnit):
         if is_training:
             model.train()
 
-    def on_start(self, loop: TrainingLoop) -> None:
+    def on_start(self, loop: TrainStep) -> None:
         """ Create a new log file on session start. Write the graph if this is a new model
 
         Parameters

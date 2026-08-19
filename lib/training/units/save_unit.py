@@ -14,6 +14,7 @@ if T.TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     from lib.model.plugin.handler import FaceswapModel
+    from lib.training.training_loop import TrainingEvents
     from .optimizer_unit import OptimizerUnit
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class SaveUnit(TrainingUnit):
     def __init__(self,
                  model: FaceswapModel,
                  optimizer: OptimizerUnit,
+                 events: TrainingEvents,
                  average_loss: npt.NDArray[np.float32],
                  save_interval: int,
                  save_optimizer: T.Literal["always", "never", "exit"]) -> None:
@@ -53,22 +55,17 @@ class SaveUnit(TrainingUnit):
         super().__init__()
         self._model = model
         self._optimizer = optimizer
+        self._events = events
         self._average_loss = average_loss
         self._save_interval = save_interval
         self._save_optimizer = save_optimizer
-
-        self._do_save: bool = False
-
-    @property
-    def do_save(self) -> bool:
-        """ ``True`` if this is a save iteration, otherwise ``False`` """
-        return self._do_save
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
         params = ", ".join(f"{k[1:]}={v!r}" for k, v in self.__dict__.items()
                            if k in ("_model",
                                     "_optimizer",
+                                    "_events",
                                     "_average_loss",
                                     "_save_interval",
                                     "_save_optimizer"))
@@ -88,9 +85,9 @@ class SaveUnit(TrainingUnit):
             the configured ``save_interval``.
         """
         if iteration % self._save_interval == 0:
-            logger.debug("%s Save iteration %s. Setting do_save=True",
+            logger.debug("%s Save iteration %s. Calling events.save.set()",
                          self.log_name, iteration)
-            self._do_save = True
+            self._events.save.set()
 
     def _get_average_loss(self) -> float:
         """ Obtain the average loss for the current save iteration
@@ -183,9 +180,11 @@ class SaveUnit(TrainingUnit):
         Called during normal training flow when saving intervals are reached. Triggers
         loss checking, potential backup, and model save with appropriate logging output.
         """
+        if self._events.exit.is_set():
+            return  # Handle in clean up
         logger.debug("%s Saving [%s]", self.log_name, iteration)
         self._save(False)
-        self._do_save = False
+        self._events.update.set()  # Trigger preview updates on a save
 
     def on_end(self) -> None:
         """ Save the model when training session ends
@@ -198,7 +197,6 @@ class SaveUnit(TrainingUnit):
         """
         logger.debug("%s Saving on exit", self.log_name)
         self._save(True)
-        self._do_save = False
 
 
 class SnapshotUnit(TrainingUnit):

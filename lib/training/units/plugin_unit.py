@@ -16,7 +16,7 @@ from .base import TrainingUnit
 if T.TYPE_CHECKING:
     from lib.training.data import TrainLoader
     from lib.training.loss import BatchLoss
-    from lib.training.training_loop import TrainingLoop
+    from lib.training.training_loop import TrainStep
     from lib.model.plugin.handler import FaceswapModel
     from plugins.train.trainer.base import TrainerPlugin
     from .optimizer_unit import OptimizerUnit
@@ -61,7 +61,7 @@ class PluginUnit(TrainingUnit):
     Notes
     -----
     This unit is called once per training iteration. It does not handle saving or other lifecycle
-    events - those are managed by separate units in the TrainingLoop.
+    events - those are managed by separate units in the TrainStep.
 
     The current_loss property provides access to loss values computed during this step,
     which are used by LossUnit for tracking averages and reporting metrics.
@@ -177,13 +177,13 @@ class PluginUnit(TrainingUnit):
         logger.debug("%s Configured loss: %s", self.log_name, loss)
         return loss
 
-    def on_start(self, loop: TrainingLoop) -> None:
+    def on_start(self, loop: TrainStep) -> None:
         """ Initialize device reference and move model and loss functions to training device
 
         Parameters
         ----------
         loop
-            The active TrainingLoop instance. Used to access the shared device context.
+            The active TrainStep instance. Used to access the shared device context.
 
         Notes
         -----
@@ -210,7 +210,7 @@ class PluginUnit(TrainingUnit):
 
         Notes
         -----
-        This is called once per training iteration by the TrainingLoop. Loss values computed during
+        This is called once per training iteration by the TrainStep. Loss values computed during
         this step are stored in the ``current_loss`` property for use by LossUnit and other
         dependent units.
         """
