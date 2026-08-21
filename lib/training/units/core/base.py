@@ -6,7 +6,7 @@ This file contains the base TrainerUnit that all units must inherit from
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from lib.utils import get_module_objects
 
@@ -127,6 +127,79 @@ class TrainingUnit(abc.ABC):
         """
         return
 
+    def load_state_dict(self,
+                        state_dict: dict[str, Any]) -> None:  # pylint:disable=unused-argument
+        """ Restore unit's internal state from a serialized dictionary representation.
+
+        Override to restore saved model checkpoints or unit-specific state (e.g., iteration
+        counters, buffers, cached values) after loading. By default, this method performs no
+        operation but can be implemented in derived units that require state persistence across
+        training sessions.
+
+        Parameters
+        ----------
+        state_dict
+            A dictionary containing serialized unit state data with keys matching the attributes
+            restored by this class's ``state_dict`` method. Keys should correspond to instance
+            variables or nested sub-state objects (e.g., model weights, optimizer state).
+
+        Notes
+        -----
+        This method is only active if both this and ``state_dict`` are overridden in a derived unit
+        class.
+
+        Examples
+        --------
+        >>> # Derived unit with state persistence:
+        >>> class CustomUnit(TrainingUnit):
+        ...     def __init__(self, counter: int = 0):
+        ...         self.counter = counter
+        ...
+        ...     def state_dict(self) -> dict[str, Any]:
+        ...         return {"counter": self.counter}
+        ...
+        ...     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        ...         self.counter = state_dict["counter"]
+        """
+        return
+
+    def state_dict(self) -> dict[str, Any] | None:
+        """ Serialize unit's internal state to a dictionary representation for checkpointing.
+
+        Override to persist training progress by capturing model weights, optimizer states, or
+        unit-specific variables into a serializable format. The default implementation returns
+        ``None`` but derived units should implement custom serialization logic for stateful
+        components (e.g., cached buffers, counters, intermediate computations).
+
+        Returns
+        -------
+        A dictionary containing serialized state data with keys matching what will be loaded
+        by this class's ``load_state_dict`` method. Returns ``None`` if the unit doesn't
+        implement custom state serialization in a derived class. Default: ``None``
+
+        Notes
+        -----
+        This method is only meaningful when overridden in a derived unit class. Check the
+        ``has_state_dict`` property before attempting to save state to ensure the derived
+        unit implements custom state serialization logic. The returned dictionary should be
+        compatible with PyTorch's checkpoint format for model/optimizer weights, plus any
+        additional keys needed for unit-specific state restoration.
+
+        Examples
+        --------
+        >>> # Derived unit with state persistence:
+        >>> class CustomUnit(TrainingUnit):
+        ...     def __init__(self, counter: int = 0):
+        ...         self.counter = counter
+        ...
+        ...     def state_dict(self) -> dict[str, Any]:
+        ...         return {"counter": self.counter}
+        ...
+        ...     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        ...         self.counter = state_dict["counter"]
+        """
+        return None
+
     def _is_overriden(self, method_name: str) -> bool:
         """ Check whether a child class has overridden a specific lifecycle method
 
@@ -173,6 +246,11 @@ class TrainingUnit(abc.ABC):
     def has_end(self) -> bool:
         """ ``True`` if this unit implements an `on_end` method """
         return self._is_overriden("on_end")
+
+    @property
+    def has_state_dict(self) -> bool:
+        """ ``True`` if this unit implements a state_dict """
+        return self._is_overriden("load_state_dict") and self._is_overriden("state_dict")
 
 
 __all__ = get_module_objects(__name__)

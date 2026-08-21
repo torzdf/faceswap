@@ -22,7 +22,8 @@ from lib.utils import PROJECT_ROOT
 
 from lib.training import Preview, PreviewBuffer, TriggerType
 from lib.training.data import TrainLoader
-from lib.training.units import PreviewUnit, TensorBoardUnit, TimelapseUnit, WarmupUnit
+from lib.training.units import (LRFinderUnit, PreviewUnit, TensorBoardUnit, TimelapseUnit,
+                                WarmupUnit)
 from lib.model.plugin.handler import FaceswapModel
 from lib.training.training_loop import TrainingLoop
 from lib.utils import (FaceswapError, get_module_objects, handle_deprecated_cli_opts)
@@ -70,6 +71,7 @@ class PreviewInterface():
         return retval
 
     def _launch_thread(self) -> FSThread | None:
+        """ Launch Preview window inside thread """
         thread = FSThread(target=Preview,
                           name="preview",
                           args=(self._display_buffer, ),
@@ -78,6 +80,7 @@ class PreviewInterface():
         return thread
 
     def shutdown(self) -> None:
+        """ Shutdown the Preview interface """
         if self._display_thread is None:
             return
         logger.debug("[PreviewInterface] Sending shutdown to preview viewer")
@@ -262,13 +265,16 @@ class Train():
                         model: FaceswapModel,
                         images: list[str],
                         args: argparse.Namespace) -> None:
-        if args.warmup_steps > 0:
-            loop.add_unit(WarmupUnit(args.warmup_steps))
+        if args.use_lr_finder:
+            loop.add_unit(LRFinderUnit(start_lr=1e-9, end_lr=1e-2))
+
+        if args.warmup > 0:
+            loop.add_unit(WarmupUnit(args.warmup))
 
         if not args.no_logs:
             loop.add_unit(TensorBoardUnit(args.model_dir,
                                           model.name,
-                                          model.state.session_id + 1))
+                                          model.state.session_id))
 
         if args.preview or args.write_image or args.redirect_gui:
             loop.add_unit(PreviewUnit(model, images))
@@ -306,7 +312,6 @@ class Train():
                             loader=loader,
                             save_interval=args.save_interval,
                             snapshot_interval=args.snapshot_interval)
-#                            lr_finder=self._args.use_lr_finder)
         self._configure_loop(loop, model, images, args)
         logger.debug("[Train] Loaded TrainingLoop %s", loop)
         return loop

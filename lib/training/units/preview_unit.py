@@ -17,7 +17,7 @@ from lib.training.data import get_label, PreviewLoader
 from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
 
-from .base import TrainingUnit
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt

@@ -12,7 +12,6 @@ from torch import nn
 from lib.logger import parse_class_init
 from lib.model import optimizers
 from lib.model.autoclip import AutoClipper
-from lib.training.lr_finder import LRFScheduler  # TODO
 from lib.utils import get_module_objects
 
 from plugins.train import train_config as mod_cfg
@@ -286,8 +285,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                                               ada_beta_1=ada_beta_1,
                                               ada_beta_2=ada_beta_2,
                                               ada_amsgrad=ada_amsgrad)
-        self._lrf_scheduler: LRFScheduler | None = None
-
         self.save = T.cast(T.Literal["always", "exit", "never"],
                            mod_cfg.Optimizer.save_optimizer())
         """ When the optimizer should be saved """
@@ -303,11 +300,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
     def optimizer(self) -> Optimizer:
         """ The current Torch Optimizer instance """
         return self._optimizer
-
-    @property
-    def lrf_scheduler(self) -> LRFScheduler | None:
-        """ The learning rate scheduler, if learning rate finder is running, otherwise ``None`` """
-        return self._lrf_scheduler
 
     # TODO keep this for weight porting
     def _get_optimizer_kwargs(self,
@@ -547,19 +539,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
             logger.debug("%s Loading scaler state_dict: %s", self.log_name, state_dict["scaler"])
             self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
 
-        # Learning Rate Finder resume
-        assert self._lrf_scheduler is None, ("LRF_Scheduler should not pre-exist when loading"
-                                             "state_dict")
-        lrf_dict = T.cast(dict[str, T.Any], state_dict.get("lrf_scheduler"))
-        if lrf_dict:
-            self._lrf_scheduler = LRFScheduler(self._optimizer,
-                                               gamma=1.0,
-                                               beta=1.0,
-                                               total_steps=1000)
-            self._lrf_scheduler.load_state_dict(lrf_dict)
-            logger.debug("%s Resuming LRF from scheduler: %s",
-                         self.log_name, self._lrf_scheduler.state_dict())
-
     def on_start(self, loop: TrainStep) -> None:
         """ Move the optimizer to the training device
 
@@ -620,13 +599,7 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         2. Unscales gradients when using AMP for accurate updates
         3. Applies gradient clipping if configured (prevents exploding gradients)
         4. Performs optimizer step with optional scaler update
-        5. Advances LR finder scheduler or warmup phase as appropriate
-        6. Zeros gradients in preparation for next iteration
-
-        Notes
-        -----
-        Learning rate finder runs (iteration < 0) skip accumulation and step logic, focusing only
-        on collecting loss values across different learning rates.
+        5. Zeros gradients in preparation for next iteration
         """
         self._accumulation_count += 1
         if self._accumulation_count != self._accumulation_steps:
@@ -643,9 +616,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
             self._scaler.step(self._optimizer)
             self._scaler.update()
 
-        if self._lrf_scheduler is not None:
-            self._lrf_scheduler.step()
-
         self._optimizer.zero_grad(set_to_none=True)
         self._accumulation_count = 0
 
@@ -659,22 +629,15 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         - version: The serialization format version (1.0)
         - optimizer: Complete optimizer state including momentum buffers
         - scaler: AMP GradScaler state when mixed precision is enabled
-        - lrf_scheduler: Learning Rate Finder scheduler if active
 
         Notes
         -----
         This method captures all trainable state needed to resume training from a checkpoint,
         including gradient accumulators and learning rate schedules.
-
-        Examples
-        --------
-        >>> checkpoint = optimizer.state_dict()  # Save optimizer state with model weights
         """
         return {"version": 1.0,
                 "optimizer": self._optimizer.state_dict(),
-                "scaler": None if self._scaler is None else self._scaler.state_dict(),
-                "lrf_scheduler": (None if self._lrf_scheduler is None
-                                  else self._lrf_scheduler.state_dict())}
+                "scaler": None if self._scaler is None else self._scaler.state_dict()}
 
     def set_lr(self, lr: float) -> None:
         """ Manually assign the optimizer's learning rate with the given value
@@ -697,67 +660,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
             p["lr"] = lr
             if "initial_lr" in p:
                 p["initial_lr"] = lr
-
-    def enable_learning_rate_finder(self, steps: int, beta: float, start_lr: float, end_lr: float
-                                    ) -> LRFScheduler:
-        """ Enable the Learning Rate Finder on this optimizer to discover optimal learning rate
-
-        Parameters
-        ----------
-        steps
-            The number of iterations to run the learning rate finder for
-        beta
-            The amount to smooth accumulated loss by (exponential moving average)
-        start_lr
-            The learning rate to start scanning from
-        end_lr
-            The final learning rate to scan until
-
-        Returns
-        -------
-        The LearningRate scheduler used for discovering the optimal learning rate
-
-        Notes
-        -----
-        If a scheduler already exists (from loading state_dict during resume), returns existing
-        instance instead of creating new one. Otherwise initializes fresh scheduler with
-        exponential decay from start_lr to end_lr over specified steps.
-
-        Examples
-        --------
-        >>> lr_scheduler = self.enable_learning_rate_finder(100, 0.9, 1e-6, 1e-2)
-
-        Notes
-        -----
-        After enabling LRF, use on_save() at each iteration to record loss values for finding
-        optimal learning rate.  # TODO is this nonsense?
-        """
-        if self._lrf_scheduler is not None:
-            logger.debug("%s Resuming saved learning rate scheduler: %s",
-                         self.log_name, self._lrf_scheduler)
-            return self._lrf_scheduler
-
-        self.set_lr(start_lr)
-        gamma: float = (end_lr / start_lr) ** (1.0 / steps)
-        self._lrf_scheduler = LRFScheduler(self._optimizer,
-                                           gamma=gamma,
-                                           beta=beta,
-                                           total_steps=steps)
-        logger.debug("%s Enabled learning rate scheduler: %s", self.log_name, self._lrf_scheduler)
-        return self._lrf_scheduler
-
-    def disable_learning_rate_finder(self) -> None:
-        """ Disable the Learning Rate Finder for this optimizer
-
-        Notes
-        -----
-        Removes the LR finder scheduler and prepares optimizer for normal training. Call
-        after completing LRF scan to resume regular gradient descent with discovered optimal
-        learning rate set via state_dict or handle_lr_finder_completion().
-        """
-        del self._lrf_scheduler
-        self._lrf_scheduler = None
-        logger.debug("%s Disabled learning rate scheduler", self.log_name)
 
 
 __all__ = get_module_objects(__name__)

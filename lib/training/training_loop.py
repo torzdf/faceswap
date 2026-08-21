@@ -19,7 +19,7 @@ from plugins.train.trainer.base import TrainerPlugin
 
 from .data import TrainLoader
 from .units import EventUnit, LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
-from .units.optimizer_unit import GradClip, OptimizerUnit
+from .units.core.optimizer_unit import GradClip, OptimizerUnit
 # from .lr_finder import LearningRateFinder
 from .units import TrainingUnit
 
@@ -225,8 +225,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         The number of steps between each model save. Default: 250
     snapshot_interval
         The number of steps between full model checkpoint snapshots. Default: 25000
-    lr_finder
-        ``True`` to use the learning rate finder. Default: ``False``
     """
     def __init__(self,
                  faceswap_model: FaceswapModel,
@@ -234,8 +232,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                  loader: TrainLoader,
                  training_events: TrainingEvents,
                  save_interval: int = 250,
-                 snapshot_interval: int = 25000,
-                 lr_finder: bool = False) -> None:
+                 snapshot_interval: int = 25000) -> None:
         logger.debug(parse_class_init(locals()))
 
         self._model = faceswap_model
@@ -253,42 +250,6 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                                 save_interval=save_interval,
                                 snapshot_interval=snapshot_interval)
 
-        # self._model_handler = TrainHandler(faceswap_model=faceswap_model,
-        #                                    optimizer=optimizer,
-        #                                    icnr_init=mod_cfg.icnr_init(),
-        #                                    conv_aware_init=mod_cfg.conv_aware_init(),
-        #                                    reflect_padding=mod_cfg.reflect_padding(),
-        #                                    save_interval=save_interval,
-        #                                    snapshot_interval=snapshot_interval)
-
-        # tl_output = "" if not timelapse_folders else os.path.join(
-        #     self._model_handler.model_folder, f"{self._model_handler.model.name}_timelapse")
-        # self._tester = Tester(trainer_plugin=self._trainer,
-        #                       input_size=model_info.input_size,
-        #                       output_size=model_info.output_size,
-        #                       device=self._device,
-        #                       preview_folders=data_folders if preview else None,
-        #                       timelapse_folders=timelapse_folders,
-        #                       timelapse_output=tl_output)
-
-        # self._lr_finder = LearningRateFinder(
-        #     enabled=lr_finder,
-        #     model_handler=self._model_handler,
-        #     selected_lr=mod_cfg.Optimizer.learning_rate(),
-        #     steps=mod_cfg.lr_finder_iterations(),
-        #     strength=T.cast(T.Literal["default", "aggressive", "extreme"],
-        #                     mod_cfg.lr_finder_strength()),
-        #     mode=T.cast(T.Literal["set", "graph_and_set", "graph_and_exit"],
-        #                 mod_cfg.lr_finder_mode())
-        # )
-        # self._loss_handler = LossHandler(self._device,
-        #                                  mod_cfg.nan_protection(),
-        #                                  model_info.input_shapes,
-        #                                  None if no_logs else self._model_handler.model,
-        #                                  None if no_logs else self._model_handler.model_folder,
-        #                                  None if no_logs else self._model_handler.name,
-        #                                  None if no_logs else self._model_handler.session_id + 1)
-
     @property
     def device(self) -> torch.Device:
         """ The device that the model is training on """
@@ -303,6 +264,11 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
     def model(self) -> FaceswapModel:
         """ The object that manages the FaceswapModel plugin and state """
         return self._model
+
+    @property
+    def units(self) -> Units:
+        """ The life-cycle units that are being executed """
+        return self._units
 
     @property
     def optimizer_unit(self) -> OptimizerUnit:
@@ -433,7 +399,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         state_unit = StateUnit(self._model.state, trainer.batch_size)
         plugin_unit = self._get_plugin_unit(loader, trainer, self.optimizer_unit)
         loss_unit = LossUnit(mod_cfg.nan_protection(), plugin_unit.current_loss, self._device)
-        event_unit = EventUnit(events)
+        event_unit = EventUnit(events, save_interval)
         save_unit = SaveUnit(self.model,
                              self.optimizer_unit,
                              events,
@@ -508,8 +474,9 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
     def step(self) -> None:
         if not self._started:
+            # TODO We currently have a problem here if both lrf + warmup selected. Warmup sets the
+            # initial LR to 0.0 even if step() not called
             self._on_train_start()
-        # iteration = -1 if self._lr_finder.is_enabled else self._model_handler.total_iterations + 1
 
         logger.trace("[TrainStep] step %s",  self.iteration)  # type:ignore[attr-defined]
         self._step()
@@ -520,28 +487,9 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         if self._events.update.is_set():
             self._update()
 
-        # if self._lr_finder.is_enabled:
-        #     if self._lr_finder.step(T.cast(torch.Tensor, sum(x.total for x in loss))):
-        #         retval.exit = True
-        #         return retval
-        #     if not self._lr_finder.is_enabled:
-        #         logger.debug("[TrainStep] LRF Finished")
-        #         return retval
-        # update_preview = self._model_handler.step(self._loss_handler, self._lr_finder.is_enabled)
-
-        # if (update_preview and iteration > 0) or iteration == 1:
-        #     self._tester(True, iteration=iteration)  # Time-lapse
-        # if update_preview or gen_preview:
-        #     out = self._tester(False)
-        #     assert out is not None and len(out) == 2
-        #     retval.preview_image = out[0]
-        #     retval.preview_title = out[1]
-
-        # return retval
-
     def on_end(self) -> None:
         for unit in self._units.on_end:
-            logger.trace("[TrainStep] %s ending %s",  # type:ignore[attr-defined]
+            logger.trace("[TrainStep] ending %s",  # type:ignore[attr-defined]
                          unit.__class__.__name__)
             unit.on_end()
         logger.debug("[TrainStep] Training ended")
@@ -598,7 +546,7 @@ class TrainingLoop:
         self._thread.check_and_raise_error()
 
     def _training_loop(self) -> None:
-        for _ in range(self._iterations):
+        for _ in range(self._iterations):  # TODO need to track iters because of LRF
             if self._events.exit.is_set():
                 logger.debug("[TrainingLoop] Exit requested")
                 break

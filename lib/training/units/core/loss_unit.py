@@ -103,7 +103,7 @@ class LossUnit(TrainingUnit):
                               for k in names}
                           for w in ("unweighted", "weighted")}
         self._loss_count = 0
-        logger.debug("[%s Reset loss averages: %s", self.log_name, self._averages)
+        logger.debug("%s Reset loss averages: %s", self.log_name, self._averages)
 
     def _handle_nan(self, loss: list[BatchLoss]) -> None:
         """ Handle NaN values detected in loss outputs and terminate training if protection is
@@ -200,20 +200,20 @@ class LossUnit(TrainingUnit):
         -----
         Processing steps:
 
-        1. Detaches loss from the model
-        2. Handle NaNs if protection is enabled
-4       3. Track running averages since last save
-        4. Print loss to console if learning rate finder is disabled
+        1. Handle NaNs if protection is enabled
+        2. Track running averages since last save
+        3. Print loss to console if learning rate finder is disabled
 
         The iteration count of -1 indicates initialization phase where no processing occurs.
         """
-        if iteration < 0:  # TODO LRF check
+        if iteration < 0:  # Loss does not get updated during pre-train
+            logger.trace("%s Pre-training. Not handling loss",  # type:ignore[attr-defined]
+                         self.log_name)
             return
 
-        loss = [x.detach() for x in self._loss]
-        self._handle_nan(loss)
-        self._update_averages(loss)
-        self._print_loss(loss, iteration)
+        self._handle_nan(self._loss)
+        self._update_averages(self._loss)
+        self._print_loss(self._loss, iteration)
 
     def _output_contributions(self) -> None:
         """ Output the loss function contributions since the last save

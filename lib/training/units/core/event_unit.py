@@ -33,6 +33,8 @@ class EventUnit(TrainingUnit):
         The TrainingEvents instance containing thread-safe event flags for communication
         between the training loop and external triggers (GUI, callbacks). Must be a valid
         TrainingEvents object with all required Event fields initialized.
+    save_interval
+        Used for when in pre-train mode to trigger the preview update every save interval
 
     Notes
     -----
@@ -45,14 +47,25 @@ class EventUnit(TrainingUnit):
     >>> event_unit = EventUnit(events=training_events)
     >>> units.add_unit(event_unit, is_core=True)
     """
-    def __init__(self, events: TrainingEvents) -> None:
+    def __init__(self, events: TrainingEvents, save_interval: int) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self._events = events
+        self._save_interval = save_interval
+        self._pre_train_steps = 0
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
-        return (f"{self.__class__.__name__}(events={self._events!r})")
+        return (f"{self.__class__.__name__}("
+                f"events={self._events!r}, "
+                f"save_interval={self._save_interval!r})")
+
+    def _handle_pretrain(self) -> None:
+        self._pre_train_steps += 1
+        if self._pre_train_steps % self._save_interval == 0:
+            logger.debug("%s Pre-train save iteration %s. Calling events.update.set()",
+                         self.log_name, self._pre_train_steps)
+        self._events.update.set()
 
     def step(self, iteration: int) -> None:
         """ Execute per-iteration event processing.
@@ -75,6 +88,9 @@ class EventUnit(TrainingUnit):
         - This prevents multiple updates from being triggered in rapid succession
         - Toggle events typically originate from GUI, Preview or Cli keypress interactions
         """
+        if iteration < 0:
+            self._handle_pretrain()
+
         if self._events.toggle_mask.is_set() and not self._events.update.is_set():
             logger.debug("[EventsUnit] Triggering update for mask toggle [%s]", iteration)
             self._events.update.set()

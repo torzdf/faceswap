@@ -14,7 +14,7 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 from lib.training.data import get_label
-from .base import TrainingUnit
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from lib.training.loss import BatchLoss
@@ -234,6 +234,10 @@ class TensorBoardUnit(TrainingUnit):
         iteration
             The current iteration count
         """
+        if iteration < 0:
+            logger.trace("%s Pre-training. Not handling Tensorboard",  # type:ignore[attr-defined]
+                         self.log_name)
+            return
         logs = self._get_logs(self._current_loss)
         logger.trace("%s Extracted logs [%s]: %s",  # type:ignore[attr-defined]
                      self.log_name, iteration, logs)

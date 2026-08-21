@@ -11,7 +11,7 @@ from lib.logger import parse_class_init
 from lib.training.loss import LossCollator
 from lib.utils import get_module_objects
 
-from .base import TrainingUnit
+from . import TrainingUnit
 
 if T.TYPE_CHECKING:
     from lib.training.data import TrainLoader
@@ -200,8 +200,9 @@ class PluginUnit(TrainingUnit):
 
         Fetches the next batch from the data loader, moves all tensors to the appropriate device
         (GPU/CPU), and invokes the trainer's step method which handles the complete forward-
-        backward optimization cycle. The resulting loss values are cleared from any previous state
-        and then populated with the new loss metrics for use by other units.
+        backward optimization cycle. The resulting loss values are detached from the gpu, cleared
+        from any previous state and then populated with the new loss metrics for use by other
+        units.
 
         Parameters
         ----------
@@ -216,11 +217,12 @@ class PluginUnit(TrainingUnit):
         """
         inputs, targets, meta = next(self._loader)
         self._current_loss.clear()
-        self._current_loss.extend(self._trainer.step([i.to(self._device) for i in inputs],
-                                                     [t.to(self._device) for t in targets],
-                                                     meta.to(self._device),
-                                                     self._loss_fn,
-                                                     self._optimizer))
+        loss = self._trainer.step([i.to(self._device) for i in inputs],
+                                  [t.to(self._device) for t in targets],
+                                  meta.to(self._device),
+                                  self._loss_fn,
+                                  self._optimizer)
+        self._current_loss.extend([x.detach() for x in loss])
 
 
 __all__ = get_module_objects(__name__)

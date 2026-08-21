@@ -181,9 +181,6 @@ class State:  # pylint:disable=too-many-instance-attributes
         self._sessions: dict[int, Session] = {}
         self.lowest_avg_loss: float = 0.0
         """ float: The lowest average loss seen between save intervals. """
-        self.learning_rate_from_finder: bool = False
-        """ bool. Set to ``True`` if learning rate is being read from the finder rather than user
-        config """
         self._plugin_version = 0.0
         self._config = _Config(plugin_path)
         self._total_steps = 0
@@ -203,6 +200,11 @@ class State:  # pylint:disable=too-many-instance-attributes
         """ The version of the plugin that this state file corresponds to in use """
         assert self._plugin_version, "Plugin version has not been set"
         return self._plugin_version
+
+    @property
+    def session_config(self) -> dict[str, T.Any]:
+        """ The current session config as it will get serialized to disk """
+        return self._sessions[self.session_id].config
 
     @property
     def session_id(self) -> int:
@@ -247,7 +249,7 @@ class State:  # pylint:disable=too-many-instance-attributes
         self._plugin_version = state_dict.get("plugin_version", 0.0)
         self._total_steps = state_dict.get("iterations", 0)
         self.lowest_avg_loss = state_dict.get("lowest_avg_loss", 0.0)
-        self.lr_finder = state_dict.get("lr_finder", -1.0)
+        self.lr_finder: float = state_dict.get("lr_finder", -1.0)
         self._sessions = {k: Session(**v) for k, v in state_dict.get("sessions", {}).items()}
         self._config.load_state_dict(state_dict.get("config", {}))
         logger.debug("[State] Loaded state_dict: %s", state_dict)
@@ -280,28 +282,25 @@ class State:  # pylint:disable=too-many-instance-attributes
 
     def increment_iterations(self) -> None:
         """ Increment the session and total iterations by 1 """
+        if self._total_steps < 0:
+            logger.trace(  # type:ignore[attr-defined]
+                "[State] In pre-train mode. Not incrementing"
+                )
+            return
         self._total_steps += 1
         self._sessions[self.session_id].iterations += 1
 
-    def step(self) -> None:  # TODO remove once we've done LRF
-        """ Increment the session and total steps
+    def set_pre_training(self) -> None:
+        """ Set the state object to pre-train mode """
+        logger.debug("[State] Entering pre-train mode")
+        assert self._total_steps == 0, "Pre-train mode can only be called on new models."
+        self._total_steps = -1
 
-        Parameters
-        ----------
-        lr_from_finder
-            ``True`` if the learning rate
-        """
-        if not self._step_called:
-            assert self._batch_size is not None, "batch_size must be provided when training"
-            config = self._config.session_config
-            if self.learning_rate_from_finder:
-                logger.debug("[State] Storing learning rate from finder: %s", self.lr_finder)
-                config["learning_rate"] = self.lr_finder
-            self._sessions[self.session_id + 1] = Session(self._batch_size, config)
-            self._step_called = True
-
-        self._total_steps += 1
-        self._sessions[self.session_id].iterations += 1
+    def set_training(self) -> None:
+        """ Set the state object to train mode """
+        logger.debug("[State] Entering train mode")
+        assert self._total_steps == -1, "Train mode can only be called when in pre-train mode."
+        self._total_steps = 0
 
 
 __all__ = get_module_objects(__name__)

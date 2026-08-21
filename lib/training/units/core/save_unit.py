@@ -8,7 +8,7 @@ import typing as T
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from .base import TrainingUnit
+from . import TrainingUnit
 
 if T.TYPE_CHECKING:
     import numpy as np
@@ -84,7 +84,7 @@ class SaveUnit(TrainingUnit):
             The current total iteration count. Saves occur when this is a multiple of
             the configured ``save_interval``.
         """
-        if iteration % self._save_interval == 0:
+        if iteration > 0 and iteration % self._save_interval == 0:
             logger.debug("%s Save iteration %s. Calling events.save.set()",
                          self.log_name, iteration)
             self._events.save.set()
@@ -249,11 +249,12 @@ class SnapshotUnit(TrainingUnit):
         This method is called during each training step. It checks if the iteration
         to save has been reached and, if so, saves a full checkpoint including optimizer state.
         """
-        if self._interval == 0 or iteration % self._interval != 0:
+        if iteration < 0 or iteration % self._interval != 0:
             return
         logger.debug("%s Snapshotting model [%s]", self.log_name, iteration)
         state_dict = self._model.state_dict() | {"optimizer": self._optimizer.state_dict()}
-        # TODO TB logs will need flushing and state file will be wrong for lowest avg loss + iter count
+        # TODO TB logs will need flushing and state file will be wrong for lowest avg loss +
+        # iter count
         self._model.io.snapshot(iteration, state_dict)
 
 

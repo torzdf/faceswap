@@ -17,7 +17,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from .base import TrainingUnit
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from torch.optim import Optimizer
@@ -146,6 +146,7 @@ class WarmupUnit(TrainingUnit):
         self._reporting_points = [int(warmup_steps * i / 10) for i in range(11)]
 
         self._scheduler: WarmupScheduler  # set in on_start
+        self._optimizer: Optimizer  # set in on_start
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -193,7 +194,7 @@ class WarmupUnit(TrainingUnit):
         >>> # Called at training start:
         >>> unit.on_start(training_loop)  # Creates WarmupScheduler
         """
-        self._scheduler = WarmupScheduler(loop.optimizer_unit.optimizer, self._warmup_steps)
+        self._optimizer = loop.optimizer_unit.optimizer
 
     def _report_progress(self, iteration: int) -> None:
         """ Log learning rate warmup progress at predefined reporting points.
@@ -250,6 +251,10 @@ class WarmupUnit(TrainingUnit):
         The warmup phase ends when iteration exceeds self._warmup_steps, after which this
         method becomes a no-op (early returns).
         """
+        if iteration < 0:  # TODO need to make sure this doesn't still kick in
+            logger.trace("%s Pre-training. Not handling warmup",  # type:ignore[attr-defined]
+                         self.log_name)
+            return
         if iteration > self._warmup_steps:
             return
         self._scheduler.step()
