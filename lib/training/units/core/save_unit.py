@@ -14,10 +14,30 @@ if T.TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     from lib.model.plugin.handler import FaceswapModel
-    from lib.training.training_loop import TrainingEvents
+    from lib.training.training_loop import TrainingEvents, TrainStep
     from .optimizer_unit import OptimizerUnit
 
 logger = logging.getLogger(__name__)
+
+
+class LoadUnit(TrainingUnit):
+    def __init__(self, model: FaceswapModel) -> None:
+        logger.debug(parse_class_init(locals()))
+        super().__init__()
+        self._model = model
+
+    def on_start(self, loop: TrainStep) -> None:
+        loadable = loop.units.have_state_dict
+        logger.debug("%s got loadables: %s", self.log_name, loadable)
+        for name, unit in loadable.items():
+            state_dict = self._model.pop_extra_state(name)
+            if not state_dict:  # TODO handle
+                logger.debug("%s Skipping missing state_dict: '%s'", self.log_name, name)
+                continue
+            logger.debug("%s Loading state_dict: '%s'", self.log_name, name)
+            unit.load_state_dict(state_dict)
+
+        self._model.clear_extra_state()
 
 
 class SaveUnit(TrainingUnit):
@@ -60,6 +80,8 @@ class SaveUnit(TrainingUnit):
         self._save_interval = save_interval
         self._save_optimizer = save_optimizer
 
+        self._saveable: dict[str, TrainingUnit]  # set in on_start
+
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
         params = ", ".join(f"{k[1:]}={v!r}" for k, v in self.__dict__.items()
@@ -70,6 +92,10 @@ class SaveUnit(TrainingUnit):
                                     "_save_interval",
                                     "_save_optimizer"))
         return f"{self.__class__.__name__}({params})"
+
+    def on_start(self, loop: TrainStep) -> None:
+        self._saveable = loop.units.have_state_dict
+        logger.debug("%s Stored saveables: %s", self.log_name, self._saveable)
 
     def step(self, iteration: int) -> None:  # pylint:disable=unused-argument
         """ Checks if the current iteration matches the configured save interval and triggers
@@ -142,9 +168,10 @@ class SaveUnit(TrainingUnit):
         """
         is_checkpoint = self._save_optimizer == "always" or (is_exit and
                                                              self._save_optimizer == "exit")
-        state_dict = self._model.state_dict()
-        if is_checkpoint:
-            state_dict["optimizer"] = self._optimizer.state_dict()
+        saveable = {k: v.state_dict() for k, v in self._saveable.items() if v.state_dict()}
+        state_dict = self._model.state_dict() | saveable
+        if not is_checkpoint:
+            del state_dict["OptimizerUnit"]  # TODO change so optimizer only provides when required
         self._model.io.save(state_dict)
         return is_checkpoint
 

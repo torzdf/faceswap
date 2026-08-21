@@ -21,13 +21,11 @@ from .saving import ModelIO
 from .train_state import State
 
 if T.TYPE_CHECKING:
-    from lib.training.units import OptimizerUnit
     from plugins.train.model.base import ModelPlugin
     from .model_info import Layer
 
 
 logger = logging.getLogger(__name__)
-
 
 
 class TrainConfigure:
@@ -190,13 +188,13 @@ class FaceswapModel:
                  name: str,
                  model_dir: str,
                  num_identities: int,
-                 load_optimizer: bool = False,
+                 load_extra_state: bool = False,
                  config_file: str | None = None) -> None:
         logger.debug(parse_class_init(locals()))
 
         mod_cfg.load_config(config_file=config_file)  # Set global config
 
-        self._load_optimizer = load_optimizer
+        self._load_extra_state = load_extra_state
         self._conf_file = config_file
         self._log_name = f"[{self.__class__.__name__}.{name}]"
         self._info: Info | None = None
@@ -207,22 +205,17 @@ class FaceswapModel:
         """ The training and configuration state of the model """
         self.io = ModelIO(name, model_dir)
         """ Handles loading and saving operations for the model and associated files """
-        self.plugin, opt_state = self._load_plugin(num_identities)
+        self.plugin, self._extra_state = self._load_plugin(num_identities)
         """ The loaded Faceswap plugin """
 
         self._configure()
-
-        # Temporary cache of the optimizer state_dict for holding between loading model weights
-        # and loading optimizer weights to prevent needing to load from disk twice """
-        self._opt_state: dict[str, T.Any] | None = opt_state if load_optimizer else None
-
 
     def __repr__(self) -> str:
         """ String representation of the FaceswapModel for debugging and logging """
         params = {"name": repr(self.name.replace("-", "_")),
                   "model_dir": repr(os.path.dirname(self.io.checkpoint_path)),
                   "num_identities": repr(self.plugin.num_identities),
-                  "load_optimizer": repr(self._load_optimizer),
+                  "load_extra_state": repr(self._load_extra_state),
                   "config_file": repr(self._conf_file)}
         s_params = ", ".join(f"{k}={v}" for k, v in params.items())
         return f"{self.__class__.__name__}({s_params})"
@@ -255,7 +248,7 @@ class FaceswapModel:
         self.state.set_plugin_version(plugin.version)
         return plugin
 
-    def _load_existing(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any] | None]:
+    def _load_existing(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any]]:
         """ Load a saved Faceswap model from disk
 
         Loads both the model weights and state dictionary. If no state is found in
@@ -274,13 +267,13 @@ class FaceswapModel:
         Notes
         -----
         Only loads state_dict entries for "model", "state", and "version" from disk.
-        Optimizer weights are returned separately to allow selective loading.
+        Extra states (eg optimizer weights) are returned separately to allow selective loading.
         """
         state_dict = self.io.load()
         if "state" not in state_dict:
             logger.warning("%s No state found in saved config. Loading from model defaults.",
                            self._log_name)
-            return self._create_new(num_identities), None
+            return self._create_new(num_identities), {}
 
         logger.info("%s Loading plugin from saved config", self._log_name)
         self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
@@ -288,9 +281,13 @@ class FaceswapModel:
                                                    version=self.state.plugin_version)
         plugin.load_state_dict(state_dict["model"])
         self.state.load_state_dict(state_dict["state"])
-        return plugin, state_dict.get("optimizer")
 
-    def _load_plugin(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any] | None]:
+        extra_state = {k: v for k, v in state_dict.items()
+                       if k not in ("state", "model", "version")} if self._load_extra_state else {}
+
+        return plugin, extra_state
+
+    def _load_plugin(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any]]:
         """ Determine whether to create new model or load existing one
 
         Checks if a checkpoint file exists at the model path. Creates fresh instance
@@ -312,7 +309,7 @@ class FaceswapModel:
         from disk twice.
         """
         if not self.io.file_exists:
-            return self._create_new(num_identities), None
+            return self._create_new(num_identities), {}
         return self._load_existing(num_identities)
 
     def _configure(self) -> None:
@@ -335,8 +332,7 @@ class FaceswapModel:
         """ Get the model's complete state dictionary
 
         Returns a dictionary containing the plugin weights, training state, and version.
-        Does NOT include optimizer state by default - use get_state_dict() with
-        with_optimizer=True for that.
+        Does NOT include extra_state. Use pop_extra_state() for that.
 
         Returns
         -------
@@ -347,21 +343,17 @@ class FaceswapModel:
                 "model": self.plugin.state_dict(),
                 "state": self.state.state_dict()}
 
-    def pop_optimizer_state(self) -> dict[str, T.Any] | None:
-        """ Retrieve and clear cached optimizer state dictionary
+    def pop_extra_state(self, key: str) -> dict[str, T.Any] | None:
+        logger.debug("%s Popping extra_state: '%s'", self._log_name, key)
+        return self._extra_state.pop(key, None)
 
-        Returns the temporary optimizer state that was captured during model loading.
-        After calling this method, subsequent access will raise AttributeError since
-        _opt_state is explicitly deleted to prevent accidental reuse.
-
-        Returns
-        -------
-        The optimizer state dictionary if available (from load_optimizer=True), or None
-        if no optimizer state exists
-        """
-        retval = self._opt_state
-        del self._opt_state  # De-reference so we get an attribute error if accessed again
-        return retval
+    def clear_extra_state(self) -> None:
+        if not self._extra_state:
+            logger.debug("%s extra_state is already empty.", self._log_name)
+            return
+        logger.debug("%s Clearing from extra_state: %s",
+                     self._log_name, list(self._extra_state))
+        self._extra_state.clear()
 
     def to(self, device: torch.Device) -> None:
         """ Move the model plugin to a different computational device
@@ -377,278 +369,6 @@ class FaceswapModel:
         """
         logger.debug("%s Model to: %s", self._log_name, device)
         self.plugin.to(device)
-
-
-class TrainHandler:
-    """Handles the management of a Faceswap model plugin when training the model
-
-    Parameters
-    ----------
-    faceswap_model
-        The object that holds the Faceswap Torch nn.module, its state and its io operations
-    optimizer
-        The optimizer to use for training
-    icnr_init
-        ``True`` to initialize convolutions prior to up-scales with ICNR
-    conv_aware_init
-        ``True`` to apply conv_aware_init to all convolutions
-    reflect_padding
-        ``True`` to apply reflect padding to convolutions
-    save_interval
-        The number of steps between each model save. Default: 250
-    snapshot_interval
-        The number of steps between full model checkpoint snapshots. Default: 25000
-    """
-    def __init__(self,
-                 faceswap_model: FaceswapModel,
-                 optimizer: OptimizerUnit,
-                 icnr_init: bool,
-                 conv_aware_init: bool,
-                 reflect_padding: bool,
-                 save_interval: int = 250,
-                 snapshot_interval: int = 25000) -> None:
-        logger.debug(parse_class_init(locals()))
-        self._save_interval = save_interval
-        self._snapshot_interval = snapshot_interval
-        self._model = faceswap_model
-        self._lrf_steps = 0
-
-        self._configure_model(icnr_init, conv_aware_init, reflect_padding)
-        self._optimizer = self._load_optimizer(faceswap_model, optimizer)
-
-        self._model.plugin.train()
-
-    @property
-    def model(self) -> ModelPlugin:
-        """ The currently loaded Faceswap Model """
-        return self._model.plugin
-
-    @property
-    def info (self) -> Info:
-        """ Holds information about currently loaded Faceswap Model"""
-        return self._model.info
-
-    @property
-    def total_iterations(self) -> int:
-        """ The total number of iterations that the model has trained """
-        return self._model.state.iterations
-
-    @property
-    def session_id(self) -> int:
-        """ The current session ID. If training has not yet commenced, this will be the last session
-        ID trained. If the first training step has been reached, this will be the currently
-        training session ID """
-        return self._model.state.session_id
-
-    @property
-    def model_folder(self) -> str:
-        """ The folder that is being used to save the Faceswap model's weights """
-        return os.path.dirname(self._model.io.checkpoint_path)
-
-    @property
-    def checkpoint_file(self) -> str:
-        """ The full path to where full checkpoints are saved """
-        return self._model.io.checkpoint_path
-
-    @property
-    def model_exists(self) -> bool:
-        """ ``True`` if a model weights file/checkpoint exists within the save folder """
-        return self._model.io.file_exists
-
-    @property
-    def optimizer(self) -> OptimizerUnit:
-        """ The configured optimizer in use """
-        return self._optimizer
-
-    @classmethod
-    def _load_optimizer(cls, model: FaceswapModel, optimizer: OptimizerUnit
-                        ) -> OptimizerUnit:
-        """ Load the optimizer weights if they exist
-
-        Parameters
-        ----------
-        model
-            The faceswap model that is to be trained
-        optimizer
-            The optimizer to be used for training
-
-        Returns
-        -------
-        The loaded optimizer
-        """
-        opt_state = model.pop_optimizer_state()
-        if opt_state is None:
-            logger.debug("[TrainHandler] No optimizer state_dict to load:")
-        else:
-            logger.debug("[TrainHandler] Loading optimizer state_dict: %s", list(opt_state))
-            optimizer.load_state_dict(opt_state)
-        logger.debug("[TrainHandler] Loaded optimizer: %s", optimizer)
-        return optimizer
-
-    def _configure_model(self, icnr_init: bool, conv_aware_init: bool, reflect_padding: bool
-                         ) -> None:
-        """Configure the model for training, applying any initialization and other post-build
-        routines.
-
-        Parameters
-        ----------
-        icnr_init
-            ``True`` to initialize convolutions prior to up-scales with ICNR
-        conv_aware_init
-            ``True`` to apply conv_aware_init to all convolutions
-        reflect_padding
-            ``True`` to apply reflect padding to convolutions
-        """
-        is_new = not self._model.io.file_exists
-        configurator = TrainConfigure(self._model,
-                                      icnr_init and is_new,
-                                      conv_aware_init and is_new,
-                                      reflect_padding)
-        configurator.configure()
-
-    def get_state_dict(self, with_optimizer: bool
-                       ) -> dict[T.Literal["model", "state", "version", "optimizer"],
-                                 float | dict[str, T.Any]]:
-        """Obtain the latest model state dict
-
-        Parameters
-        ----------
-        with_optimizer
-            ``True`` to include the optimizer's state dict
-
-        Returns
-        -------
-        The current faceswap model's state dict
-        """
-        retval = T.cast(dict[T.Literal["model", "state", "version", "optimizer"],
-                             float | dict[str, T.Any]],
-                        self._model.state_dict())
-        if with_optimizer:
-            retval |= {"optimizer": self._optimizer.state_dict()}
-        return retval
-
-    def set_lr_from_finder(self) -> bool:
-        """Set the learning rate from a previous learning rate finder run
-
-        Returns
-        -------
-        ``True`` if a previous LR finder rate was found and has been set. ``False`` if the LR
-        finder has not been run for this model
-        """
-        lrf_rate = self._model.state.lr_finder
-        if lrf_rate < 0:
-            logger.debug("[TrainHandler] Learning rate finder has not been run. Not setting LR")
-            return False
-        logger.info("Setting learning rate from Learning Rate Finder: %s", f"{lrf_rate:.1e}")
-        self.optimizer.set_lr(lrf_rate)
-        self._model.state.learning_rate_from_finder = True
-        return True
-
-    def handle_lr_finder_completion(self, learning_rate: float, backing_file: str) -> None:
-        """Handle actions on the completion of a learning rate finder run.
-
-        Loads the original weights and sets the discovered learning rate to the state file.
-
-        Parameters
-        ----------
-        learning_rate
-            The optimal learning rate discovered from the learning rate finder
-        backing_file
-            The file that stores the initial weights prior to the learning rate finder being run
-        """
-        self.optimizer.disable_learning_rate_finder()
-        self._model.state.lr_finder = learning_rate
-        logger.debug("[TrainHandler] Restoring model weights from: '%s'", backing_file)
-        original_weights = torch.load(backing_file)
-        self._model.load_state_dict({"model": original_weights["model"]})
-        logger.debug("[TrainHandler] Restoring optimizer weights")
-        opt_state = {k: v for k, v in original_weights["optimizer"].items()
-                     if k != "lrf_scheduler"}  # Strip the LRF scheduler
-        self._optimizer.load_state_dict(opt_state)
-        self.set_lr_from_finder()
-
-    def step(self, loss_handler: LossHandler, lrf_enabled: bool) -> bool:
-        """Update the iteration count in the state file
-
-        Parameters
-        ----------
-        loss_handler
-            Holds the information about loss for the current save iteration. Reset on save
-            iteration
-        lrf_enabled
-            ``True`` if the learning rate finder is enabled and running
-
-        Returns
-        -------
-        ``True`` if the model was saved
-        """
-        if lrf_enabled:  # Just signal if preview would have been updated on a save interval
-            self._lrf_steps += 1
-            return self._lrf_steps % self._save_interval == 0
-
-        self._model.state.step()
-
-        retval = self._model.state.session_iterations % self._save_interval == 0
-        if retval:
-            self.save(loss_handler=loss_handler, is_exit=False)
-
-        step = self._model.state.iterations
-        if self._snapshot_interval != 0 and step % self._snapshot_interval == 0:
-            state_dict = T.cast(
-                dict[T.Literal["model", "state", "version", "optimizer"],
-                     float | dict[str, T.Any]],
-                self._model.state_dict() | {"optimizer": self._optimizer.state_dict()}
-                )
-            self._io.snapshot(step, state_dict)
-
-        return retval
-
-    def save(self, loss_handler: LossHandler | None, is_exit: bool = False) -> None:
-        """Save the model, state and optionally the optimizer. Backup the last save if total
-        average loss has dropped
-
-        Parameters
-        ----------
-        loss_handler
-            If this is part of the main training loop then this should be the loss handler, which
-            is used to calculate if a backup should be made and resets the object for the next
-            save iteration.
-            If ``None`` then a full model checkpoint is made with no other action.
-        is_exit
-            ``True`` if save is being called on program exit
-        """
-        logger.debug("[TrainHandler] Saving. loss_handler: %s, is_exit: %s", loss_handler, is_exit)
-        average_loss = None
-        do_backup = False
-
-        average_loss = 0.0
-        if loss_handler is not None:
-            average_loss = loss_handler.on_save()
-
-        if self._model.state.lowest_avg_loss <= 0.0 < average_loss:
-            logger.debug("[Optimizer] Setting initial lowest average loss: %s", average_loss)
-            self._model.state.lowest_avg_loss = average_loss
-
-        do_backup = 0.0 < average_loss < self._model.state.lowest_avg_loss
-        if do_backup:
-            self._io.backup()
-            logger.debug("[Optimizer] Updating lowest average loss from: %s, to: %s",
-                         self._model.state.lowest_avg_loss, average_loss)
-            self._model.state.lowest_avg_loss = average_loss
-
-        incl_optimizer = (loss_handler is None or
-                          average_loss == 0.0 or
-                          self.optimizer.save == "always" or
-                          (is_exit and self.optimizer.save == "exit"))
-        state_dict = self.get_state_dict(incl_optimizer)
-        is_checkpoint = self._io.save(state_dict)
-
-        msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"
-        if average_loss != 0.0:
-            msg += f" - Average loss since save: {average_loss:.5f}"
-        if do_backup:
-            msg += " [Model backed up]"
-        logger.info(msg)
 
 
 __all__ = get_module_objects(__name__)

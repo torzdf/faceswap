@@ -524,8 +524,6 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         --------
         >>> opt_unit.load_state_dict(torch.load("checkpoint.pth"))  # Resumes from saved state
         """
-        if not state_dict:
-            return
         logger.debug("%s Loading state_dict: %s", self.log_name, list(state_dict))
 
         if state_dict["version"] == 0.5:  # Migrating from keras optimizer

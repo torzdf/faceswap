@@ -293,7 +293,7 @@ class State:  # pylint:disable=too-many-instance-attributes
     def set_pre_training(self) -> None:
         """ Set the state object to pre-train mode """
         logger.debug("[State] Entering pre-train mode")
-        assert self._total_steps == 0, "Pre-train mode can only be called on new models."
+        assert self._total_steps <= 0, "Pre-train mode can only be called on new models."
         self._total_steps = -1
 
     def set_training(self) -> None:

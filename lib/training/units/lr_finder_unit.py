@@ -8,9 +8,6 @@ point for standard training sessions. The finder integrates with PyTorch's sched
 providing smoothed exponential moving average loss tracking for stable analysis.
 """
 
-# TODO saving + resuming state
-# TODO Continuing train after initial LRF test
-# TODO legacy LRF state_dict in Optimizer
 
 from __future__ import annotations
 
@@ -158,6 +155,8 @@ class LRFScheduler(ExponentialLR):
         retval["total_steps"] = self.total_steps
         retval["smooth_losses"] = self.smooth_losses  # TODO name change for state_dict
         retval["learning_rates"] = self.learning_rates
+        retval["average_loss"] = self._average_loss
+        retval["best_loss"] = self.best_loss
         return retval
 
     def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
@@ -173,6 +172,8 @@ class LRFScheduler(ExponentialLR):
         self.total_steps = state_dict.pop("total_steps")
         self.smooth_losses = state_dict.pop("smooth_losses")  # TODO name change for state_dict
         self.learning_rates = state_dict.pop("learning_rates")
+        self._average_loss = state_dict.pop("average_loss")
+        self.best_loss = state_dict.pop("best_loss")
         super().load_state_dict(state_dict)
 
     def step(self, epoch: int | None = None, loss: torch.Tensor | None = None) -> None:
@@ -267,7 +268,7 @@ class LearningRateFinder:
         best_idx = self._scheduler.smooth_losses.index(self._scheduler.best_loss)
         return self._scheduler.learning_rates[best_idx] / self._strength
 
-    def _update_progress_bar(self, amount: int | None = None) -> None:
+    def update_progress_bar(self, amount: int | None = None) -> None:
         """ Update the progress bar with current metrics and status.
 
         Parameters
@@ -347,7 +348,7 @@ class LearningRateFinder:
             logger.debug("[LearningRateFinder] Reached final step. Exiting")
             return self._finalize()
 
-        self._update_progress_bar()
+        self.update_progress_bar()
         return False
 
 
@@ -527,10 +528,16 @@ class LRFState:
         self._model.state.set_training()
         self._save_original_model()
 
-    def step(self):
+    def step(self) -> bool:
         loss = T.cast("torch.Tensor", sum(x.total for x in self._current_loss))
         if self._lrf.step(loss):
             self._finalize()
+            return True
+        return False
+
+    def resume(self) -> None:
+        assert self._scheduler is not None
+        self._lrf.update_progress_bar(len(self._scheduler.smooth_losses))
 
 
 class LRFinderUnit(TrainingUnit):
@@ -550,7 +557,9 @@ class LRFinderUnit(TrainingUnit):
                                   "total_steps": steps}
         self._lrf_state_kwargs = {"mode": mode, "start_lr": start_lr}
         self._lrf_kwargs = {"strength": strength, "stop_factor": stop_factor}
+
         self._lrf_state: LRFState | None = None  # set in on_start if required
+        self._scheduler: LRFScheduler | None = None  # set in on_start if required
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -594,7 +603,7 @@ class LRFinderUnit(TrainingUnit):
         logger.debug("%s removing self from steppers", self.log_name)
         units.stages_optional["step"].remove(self)
 
-    def _setup_lr_finder(self, loop: TrainStep) -> LRFState:
+    def _setup_lr_finder(self, loop: TrainStep) -> tuple[LRFScheduler, LRFState]:
         self._kwargs_from_config(loop.model.state.config)
         scheduler = LRFScheduler(loop.optimizer_unit.optimizer, **self._scheduler_kwargs)
         lrf = LearningRateFinder(scheduler=scheduler, **self._lrf_kwargs)
@@ -604,36 +613,43 @@ class LRFinderUnit(TrainingUnit):
                     self._scheduler_kwargs["end_lr"],
                     self._scheduler_kwargs["total_steps"])
         lrf_state.on_start()
-        return lrf_state
+        return scheduler, lrf_state
 
     def on_start(self, loop: TrainStep) -> None:
-        if loop.model.state.session_id != 1 or loop.model.io.file_exists:
+        is_resume = (loop.model.state.session_id == 1 and
+                     loop.model.io.file_exists and
+                     loop.model.state.iterations < 0)
+        if is_resume:
+            logger.debug("%s Resuming LRF", self.log_name)
+
+        if not is_resume and (loop.model.state.session_id != 1 or loop.model.io.file_exists):
             self._set_learning_rate_from_lrf(loop.model.state, loop.optimizer_unit, loop.units)
             return
 
-        self._lrf_state = self._setup_lr_finder(loop)
+        self._scheduler, self._lrf_state = self._setup_lr_finder(loop)
 
     def step(self, iteration: int) -> None:
         if iteration > 0:
             return  # LRF finder has run and we are now training
         assert self._lrf_state is not None
-        self._lrf_state.step()
+        if self._lrf_state.step():
+            del self._scheduler
+            self._scheduler = None
 
+    def state_dict(self) -> dict[str, T.Any]:
+        if self._scheduler is None:
+            return {}
+        return self._scheduler.state_dict()
 
-# TODO Below code is state_dict related from legacy optimizer
-"""
+    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
         # Learning Rate Finder resume
-        assert self._lrf_scheduler is None, ("LRF_Scheduler should not pre-exist when loading"
-                                             "state_dict")
-        lrf_dict = T.cast(dict[str, T.Any], state_dict.get("lrf_scheduler"))
-        if lrf_dict:
-            self._lrf_scheduler = LRFScheduler(self._optimizer,
-                                               gamma=1.0,
-                                               beta=1.0,
-                                               total_steps=1000)
-            self._lrf_scheduler.load_state_dict(lrf_dict)
-            logger.debug("%s Resuming LRF from scheduler: %s",
-                         self.log_name, self._lrf_scheduler.state_dict())
-"""
+        if self._scheduler is None:  # TODO we need to catch this if we are resuming LRF
+            logger.debug("%s No LRF scheduler. Not loading state_dict", self.log_name)
+            return
+        assert self._lrf_state is not None
+        logger.info("[LearningRateFinder] Resuming")
+        self._scheduler.load_state_dict(state_dict)
+        self._lrf_state.resume()
+
 
 __all__ = get_module_objects(__name__)

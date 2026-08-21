@@ -18,7 +18,7 @@ from plugins.train import train_config as mod_cfg
 from plugins.train.trainer.base import TrainerPlugin
 
 from .data import TrainLoader
-from .units import EventUnit, LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
+from .units import EventUnit, LoadUnit, LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
 from .units.core.optimizer_unit import GradClip, OptimizerUnit
 # from .lr_finder import LearningRateFinder
 from .units import TrainingUnit
@@ -139,7 +139,9 @@ class Units:
     def on_start(self) -> list[TrainingUnit]:
         """ Combined list of core and optional units configured to execute before the first batch.
         Core units are ordered first, then optional units in the order they were provided """
-        return self.stages_core["start"] + self.stages_optional["start"]
+        load_unit = next(x for x in self.stages_core["start"] if isinstance(x, LoadUnit))
+        core = [x for x in self.stages_core["start"] if x != load_unit]
+        return core + self.stages_optional["start"] + [load_unit]
 
     @property
     def step(self) -> list[TrainingUnit]:
@@ -165,6 +167,11 @@ class Units:
         """ Combined list of optional and end-stage core units for cleanup operations. Optional
         units are ordered first in the order they were provided followed by core units"""
         return self.stages_optional["end"] + self.stages_core["end"]
+
+    @property
+    def have_state_dict(self) -> dict[str, TrainingUnit]:
+        return {k: v for k, v in self.core.items() | self.optional.items()
+                if v.has_state_dict}
 
     def add_unit(self, unit: TrainingUnit, is_core: bool) -> None:
         """Register a training unit to its appropriate lifecycle stages
@@ -396,10 +403,8 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         save_optimizer = T.cast(T.Literal["always", "never", "exit"],
                                 mod_cfg.Optimizer.save_optimizer())
 
-        state_unit = StateUnit(self._model.state, trainer.batch_size)
         plugin_unit = self._get_plugin_unit(loader, trainer, self.optimizer_unit)
         loss_unit = LossUnit(mod_cfg.nan_protection(), plugin_unit.current_loss, self._device)
-        event_unit = EventUnit(events, save_interval)
         save_unit = SaveUnit(self.model,
                              self.optimizer_unit,
                              events,
@@ -407,17 +412,18 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                              save_interval,
                              save_optimizer)
 
-        self._units.add_unit(state_unit, is_core=True)
+        self._units.add_unit(StateUnit(self._model.state, trainer.batch_size), is_core=True)
         self._units.add_unit(plugin_unit, is_core=True)
         self._units.add_unit(self.optimizer_unit, is_core=True)
         self._units.add_unit(loss_unit, is_core=True)
-        self._units.add_unit(event_unit, is_core=True)
+        self._units.add_unit(EventUnit(events, save_interval), is_core=True)
 
         if snapshot_interval > 0:
             self._units.add_unit(SnapshotUnit(self._model, self.optimizer_unit, snapshot_interval),
                                  is_core=True)
 
-        self._units.add_unit(save_unit, is_core=True)  # Make sure it always runs last)
+        self._units.add_unit(LoadUnit(self.model), is_core=True)
+        self._units.add_unit(save_unit, is_core=True)
 
     def add_unit(self, unit: TrainingUnit) -> None:
         """ Register a training unit to its appropriate lifecycle stage
@@ -452,6 +458,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         for unit in self._units.on_start:
             logger.debug("[TrainStep] Executing on_start: '%s'", unit.__class__.__name__)
             unit.on_start(self)
+
         self._started = True
 
     def _step(self) -> None:

@@ -160,7 +160,7 @@ class Train():
         model = FaceswapModel(name=args.trainer,
                               model_dir=args.model_dir,
                               num_identities=len([args.input_a, args.input_b]),
-                              load_optimizer=not args.summary,
+                              load_extra_state=not args.summary,
                               config_file=args.config_file)
         model.info.summary(None if args.summary else logger.verbose)  # type:ignore[attr-defined]
         if args.summary:
