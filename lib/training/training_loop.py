@@ -1,5 +1,12 @@
 #! /usr/env/bin/python3
-"""Run the training loop for a training plugin"""
+"""TrainingLoop - Core training loop orchestrator that executes model training
+
+This module contains the main training infrastructure including TrainingLoop which runs
+training in a separate thread, TrainStep which manages individual iterations and unit lifecycle,
+and Units which organize all training units by their activation stage. The system uses an event-
+driven design where TrainingEvents enables communication between the training thread (background)
+and main thread (foreground)
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -20,7 +27,6 @@ from plugins.train.trainer.base import TrainerPlugin
 from .data import TrainLoader
 from .units import EventUnit, LoadUnit, LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
 from .units.core.optimizer_unit import GradClip, OptimizerUnit
-# from .lr_finder import LearningRateFinder
 from .units import TrainingUnit
 
 if T.TYPE_CHECKING:
@@ -34,16 +40,6 @@ logger = logging.getLogger(__name__)
 
 # TODO ping-pong
 
-@dataclass
-class TrainerReturn:
-    """Return object from training loop to calling script"""
-    exit: bool = False
-    """``True`` to exist training"""
-    preview_image: npt.NDArray[np.uint8] | None = None
-    """Generated preview image if one should be shown"""
-    preview_title: str = ""
-    """Title for the generated preview image if one should be shown"""
-
 
 UnitGroupT = T.Literal["core", "optional"]
 UnitStageT = T.Literal["start", "step", "save", "update", "end"]
@@ -52,71 +48,58 @@ UnitStageDictT = dict[UnitStageT, list[TrainingUnit]]
 
 @dataclass
 class Units:
-    """Container for organizing training units across lifecycle stages
+    """ Organizes all training units by lifecycle stage and category.
 
-    This class provides a structured way to group and manage all training loop units by their
-    stage of execution (start, step, save, end) and category (core, optional). It automatically
-    aggregates all units into an accessible dictionary structure for easy iteration.
+    This dataclass acts as the central registry for all TrainingUnit instances participating in
+    the training loop. It separates units into core (mandatory) and optional categories, then
+    further groups them by their activation stage within the training lifecycle.
 
-    Attributes
+    Core units always participate: LoadUnit, SaveUnit, PluginUnit, LossUnit, OptimizerUnit,
+    EventUnit, StateUnit, and optionally SnapshotUnit. Optional units are loaded conditionally
+    based on configuration flags (e.g., TensorBoardUnit for logging, PreviewUnit for GUI previews).
+
+    Units are organized into five lifecycle stages:
+        - start      : Initialization phase after loading state from checkpoint
+        - step       : Called once per training iteration after backward pass
+        - save       : Triggers when checkpoints should be written to disk
+        - update     : Signals GUI refresh or preview generation
+        - end        : Final cleanup operations at training completion
+
+    The Units object automatically tracks which units support each lifecycle stage via has_*
+    properties and maintains a consolidated view of all active units in the .all property.
+
+    Parameters
     ----------
-    stages_core
-        Core units that are essential to the training loop at each lifecycle stage. These run
-        regardless of user configuration changes
-
-    stages_optional
-        Optional units that can be enabled/disabled through configuration (e.g., preview,
-        timelapse, external callbacks)
+    This object is not expected to be instantiated directly. Instead, it is created and managed
+    internally by the TrainingLoop class based on the configuration provided during initialization.
 
     Notes
-    -----
-    Units are organized into two categories and five lifecycle stages:
-
-    Categories:
-
-    - **core**: Essential training components that always execute (loss tracking, saves, optimizer)
-    - **optional**: Optional features like GUI preview or timelapse generation
-
-    Lifecycle Stages (executed in order):
-
-    1. **start**: Setup and configuration before first batch
-    2. **step**: Per-iteration processing after backpropagation
-    3. **save**: Actions taken when save intervals are reached
-    4. **update**: Actions taken after a save has completed or on user intervention
-    5. **end**: Cleanup operations on training completion
-
-    Examples
-    --------
-    >>> units = Units()
-    >>> for unit in units.on_start:  # Iterate start-stage units
-    ...     unit.on_start(training_loop)
+    ----
+    The order of units within each stage matters. Core units always execute before optional units,
+    except LoadUnit which intentionally runs last during the start phase to ensure all state loads
+    first
     """
     stages_core: UnitStageDictT = field(
         default_factory=lambda: T.cast(
             UnitStageDictT, {"start": [], "step": [], "save": [], "update": [], "end": []}
             )
         )
-    """ Core units that are essential to the training loop at each lifecycle stage """
+    """ Dictionary mapping lifecycle stages to lists of core training units. Core units always
+    participate regardless of configuration flags """
 
     stages_optional: UnitStageDictT = field(
         default_factory=lambda: T.cast(
             UnitStageDictT, {"start": [], "step": [], "save": [], "update": [], "end": []}
             )
         )
-    """ Optional units that can be enabled/disabled through configuration """
+    """ Dictionary mapping lifecycle stages to lists of optional training units. These are loaded
+    only if their corresponding configuration dictates that they are """
 
     _all: dict[UnitGroupT, dict[str, TrainingUnit]] | None = field(init=False, default=None)
 
     @property
     def all(self) -> dict[UnitGroupT, dict[str, TrainingUnit]]:
-        """ All units organized by category (core/optional) as nested dictionaries:
-
-        {
-            "core": {"PluginUnit": <unit>, "LossUnit": <unit>, ...},
-            "optional": {"PreviewUnit": <unit> if enabled, ...}
-        }
-        Units are arbitrarily ordered within each category
-        """
+        """ Consolidated view of all units by group ("core" or "optional") and class name """
         if self._all is None:
             self._all = {}
             for key in T.cast(list[UnitGroupT], ["core", "optional"]):
@@ -127,83 +110,67 @@ class Units:
 
     @property
     def core(self) -> dict[str, TrainingUnit]:
-        """ Dictionary mapping unit class names to their instances """
+        """ Core training units grouped in a dictionary keyed by unit class names """
         return self.all["core"]
 
     @property
     def optional(self) -> dict[str, TrainingUnit]:
-        """ Dictionary mapping unit class names to their instances """
+        """ Optional training units grouped in a dictionary keyed by unit class names """
         return self.all["optional"]
 
     @property
     def on_start(self) -> list[TrainingUnit]:
-        """ Combined list of core and optional units configured to execute before the first batch.
-        Core units are ordered first, then optional units in the order they were provided """
+        """ Units registered for the start phase. Core units first, then optional. The LoadUnit is
+        always last to ensure all units are configured before attempting to load state """
         load_unit = next(x for x in self.stages_core["start"] if isinstance(x, LoadUnit))
         core = [x for x in self.stages_core["start"] if x != load_unit]
         return core + self.stages_optional["start"] + [load_unit]
 
     @property
     def step(self) -> list[TrainingUnit]:
-        """ Combined list of core and optional units configured to execute after every
-        backpropagation. Core units are ordered first, then optional units in the order they were
-        provided """
+        """ All units registered for per-iteration callbacks """
         return self.stages_core["step"] + self.stages_optional["step"]
 
     @property
     def on_save(self) -> list[TrainingUnit]:
-        """ Combined list of optional and core save-stage units. Optional units are ordered first
-        in the order they were provided followed by core units """
+        """ All units registered for checkpoint saving operations (optional before core) """
         return self.stages_optional["save"] + self.stages_core["save"]
 
     @property
     def on_update(self) -> list[TrainingUnit]:
-        """ Combined list of optional and core update-stage units. Optional units are ordered first
-        in the order they were provided followed by core units """
+        """ All units registered for update/refresh events (optional before core) """
         return self.stages_optional["update"] + self.stages_core["update"]
 
     @property
     def on_end(self) -> list[TrainingUnit]:
-        """ Combined list of optional and end-stage core units for cleanup operations. Optional
-        units are ordered first in the order they were provided followed by core units"""
+        """ Units registered for final cleanup (optional before core) """
         return self.stages_optional["end"] + self.stages_core["end"]
 
     @property
     def have_state_dict(self) -> dict[str, TrainingUnit]:
+        """ Subset of all units that implement a state_dict and can participate in checkpoint
+        loading and saving """
         return {k: v for k, v in self.core.items() | self.optional.items()
                 if v.has_state_dict}
 
     def add_unit(self, unit: TrainingUnit, is_core: bool) -> None:
-        """Register a training unit to its appropriate lifecycle stages
+        """ Register a training unit for appropriate lifecycle stages.
+
+        Automatically determines which lifecycle hooks the unit should participate in based on
+        its has_* properties (has_start, has_step, has_save, etc.). Only registers units that
+        declare support for each stage.
 
         Parameters
         ----------
         unit
-            The training unit to register. This should be a ``TrainingUnit`` subclass that declares
-            its capabilities via overriding the stage methods (on_start, step, on_save, or on_end)
-
+            The TrainingUnit instance to register.
         is_core
-            ``True`` if the unit belongs to core functionality or ``False`` for optional
+            Whether this is a mandatory core unit or an optional enhancement unit.
 
         Notes
         -----
-        Training units are organized into four lifecycle stages:
-
-        - **start**: Units configured when training begins (typically for setup)
-        - **step**: Units executed on each training iteration step
-        - **save**: Units that are executed at each save interval
-        - **update**: Units that are executed after a save has completed or on user intervention
-        - **end**: Units that perform cleanup operations when training ends
-
-        The method checks which stages the unit supports. Units are appended to
-        ``self._units[stage]`` lists in order. For `on_start` and `step` core units are executed
-        first. For `on_save` and `on_end` core units are executed last. Optional units are executed
-        in the order they are added to the loop.
-
-        Examples
-        --------
-        >>> custom_unit = CustomLossUnit()
-        >>> self.units.add_unit(custom_unit, is_core=False)
+        Units without any lifecycle stage capability (all has_* properties False) are silently
+        ignored during registration.
         """
         stage_group = self.stages_core if is_core else self.stages_optional
         for key in ("start", "step", "save", "update", "end"):
@@ -215,23 +182,39 @@ class Units:
 
 
 class TrainStep:  # pylint:disable=too-many-instance-attributes
-    """ Handles the feeding of training images to Faceswap models, collating the loss and running
-    any training step units
+    """ Executes individual training iterations and manages the complete training lifecycle
+
+    TrainStep orchestrates each iteration of the training process, coordinating all registered
+    TrainingUnit instances through their respective lifecycle hooks. It handles:
+        - Initialization phase (on_start) with model loading and state restoration
+        - Per-iteration work (step) including forward/backward passes via PluginUnit
+        - Checkpoint management (save/update events from TrainingEvents)
+        - Final cleanup (on_end) when training concludes
+
+    The class manages the complete training workflow through a TrainStep object, which is itself
+    wrapped in an FSThread within TrainingLoop to run asynchronously. All state including the
+    model, optimizer, loader, and loss functions are contained within this instance
 
     Parameters
     ----------
     faceswap_model
-        The object that holds the Faceswap Torch nn.module, its state and its io operations
+        The FaceswapModel instance containing the neural network architecture and weights
     trainer
-        The object responsible for forward and backwards passes through the model
+        TrainerPlugin instance executing forward/backward/optimization cycle
     loader
-        The data loader for feeding training data to the model
+        TrainLoader providing input batches (images, targets, metadata)
     training_events
-        The event triggers for communicating with the main thread
+        TrainingEvents object enabling cross-thread communication with main process
     save_interval
-        The number of steps between each model save. Default: 250
+        Number of iterations between automatic checkpoint saves. Default: 250
     snapshot_interval
-        The number of steps between full model checkpoint snapshots. Default: 25000
+        Number of iterations between snapshot creation for recovery points. Default: 25000
+
+    Notes
+    -----
+    The iteration count is managed by StateUnit and automatically increments with each step().
+    Current loss values are populated by PluginUnit.step() and detached to avoid computation graph
+    issues
     """
     def __init__(self,
                  faceswap_model: FaceswapModel,
@@ -259,47 +242,51 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
     @property
     def device(self) -> torch.Device:
-        """ The device that the model is training on """
+        """ The computational device (CPU or GPU) assigned for training operations """
         return self._device
 
     @property
     def events(self) -> TrainingEvents:
-        """ The event signaller for internal and external triggers """
+        """ Event system enabling signals to save/update requests and receive previews """
         return self._events
 
     @property
     def model(self) -> FaceswapModel:
-        """ The object that manages the FaceswapModel plugin and state """
+        """ Reference to the loaded neural network with current weights and state """
         return self._model
 
     @property
     def units(self) -> Units:
-        """ The life-cycle units that are being executed """
+        """ Registry of all registered training units organized by lifecycle stage """
         return self._units
 
     @property
     def optimizer_unit(self) -> OptimizerUnit:
-        """ The Optimizer being used for training """
+        """ Optimizer managing learning rate, weight decay, gradient clipping, etc """
         return self._optimizer_unit
 
     @property
     def iteration(self) -> int:
-        """ The current total training step """
+        """ Current training iteration number (exposed via StateUnit). Read-only """
         return T.cast(StateUnit, self._units.core["StateUnit"]).iteration
 
     @property
     def current_loss(self) -> list[BatchLoss]:
-        """ A list of BatchLoss objects containing the detached loss outputs for each identity
-        processed during this iteration. The list persists, so a reference to this object can be
-        safely taken and it will always contain the loss for the current step.
-
-        Notes
-        -----
-        Values are populated after trainer.step() is called and cleared at the start of each
-        new step to ensure accurate per-iteration tracking across the training session."""
+        """ List of computed loss values for the most recent batch. Read-only """
         return T.cast(PluginUnit, self._units.core["PluginUnit"]).current_loss
 
     def _get_optimizer(self, model: ModelPlugin) -> OptimizerUnit:
+        """ Initialize and configure the optimizer unit
+
+        Parameters
+        ----------
+        model
+            The ModelPlugin instance containing trainable parameters
+
+        Returns
+        -------
+        Configured optimizer unit ready for training iterations
+        """
         clipping = mod_cfg.Optimizer.gradient_clipping()
         assert clipping in ("autoclip", "global_norm", "norm", "value", "none")
         clipper = None if clipping == "none" else GradClip(clipping,
@@ -325,21 +312,20 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                          loader: TrainLoader,
                          trainer: TrainerPlugin,
                          optimizer: OptimizerUnit) -> PluginUnit:
-        """ Configure and create the PluginUnit that runs the forwards and backwards pass through
-        the model
+        """ Initialize and configure the plugin unit for training operations
 
         Parameters
         ----------
         loader
-            The data loader for feeding training data to the model
+            TrainLoader providing input batches (images, masks, targets, metadata)
         trainer
-            The object responsible for forward and backwards passes through the model
+            TrainerPlugin executing forward/backward/optimization cycle
         optimizer
-            The optimizer to use for training
+            OptimizerUnit managing parameter updates during training
 
         Returns
         -------
-        The configured PluginUnit for the training loop
+        Configured plugin unit ready for iteration execution
         """
         loss_funcs = [mod_cfg.Loss.loss_function(),
                       mod_cfg.Loss.loss_function_2(),
@@ -369,36 +355,20 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                            events: TrainingEvents,
                            save_interval: int,
                            snapshot_interval: int) -> None:
-        """ Create and register default training units for loss tracking, snapshots, and saves
+        """ Initialize core training units required for any training session
 
         Parameters
         ----------
         loader
-            The data loader for feeding training data to the model
+            TrainLoader for input data batches
         trainer
-            The object responsible for forward and backwards passes through the model
+            TrainerPlugin executing training operations
+        events
+            TrainingEvents for cross-thread communication
         save_interval
-            The number of iterations between each model save
+            Number of iterations between automatic checkpoint saves
         snapshot_interval
-            The number of steps between full model checkpoint snapshots. Only creates a
-            ``SnapshotUnit`` if this interval is positive.
-
-        Notes
-        -----
-        This method instantiates the three core saving units:
-
-        1. **LossUnit** - Always created to track loss values and detect convergence
-        2. **SnapshotUnit** - Created only when ``snapshot_interval > 0`` for periodic
-           checkpointing (e.g., every 25,000 iterations)
-        3. **SaveUnit** - Always added last as the final save operation that handles both
-           loss-based backups and exit checkpoints
-
-        All units are registered with their respective lifecycle stages ("start", "step",
-        "save", or "end") through the ``add_unit`` method based on their capabilities.
-
-        The order of unit registration ensures proper coordination during training:
-        LossUnit runs at each step, SnapshotUnit at intervals, and SaveUnit always runs
-        last to finalize any pending saves.
+            Number of iterations between snapshot creation (0 = disabled)
         """
         save_optimizer = T.cast(T.Literal["always", "never", "exit"],
                                 mod_cfg.Optimizer.save_optimizer())
@@ -416,7 +386,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         self._units.add_unit(plugin_unit, is_core=True)
         self._units.add_unit(self.optimizer_unit, is_core=True)
         self._units.add_unit(loss_unit, is_core=True)
-        self._units.add_unit(EventUnit(events, save_interval), is_core=True)
+        self._units.add_unit(EventUnit(events), is_core=True)
 
         if snapshot_interval > 0:
             self._units.add_unit(SnapshotUnit(self._model, self.optimizer_unit, snapshot_interval),
@@ -426,34 +396,23 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         self._units.add_unit(save_unit, is_core=True)
 
     def add_unit(self, unit: TrainingUnit) -> None:
-        """ Register a training unit to its appropriate lifecycle stage
+        """ Register an optional training unit.
+
+        Adds a non-core unit to the units registry for the appropriate lifecycle stages.
 
         Parameters
         ----------
         unit
-            The training unit to register. This should be a ``TrainingUnit`` subclass that declares
-            its capabilities via overriding the stage methods ``on_start``, ``step``, ``on_save``,
-            or ``on_end``)
+            The TrainingUnit instance to register as optional.
 
         Notes
         -----
-        Training units are organized into four lifecycle stages:
-
-        - **start**: Units configured when training begins (typically for setup)
-        - **step**: Units executed on each training iteration step
-        - **save**: Units that are executed at each save interval
-        - **update**: Units that are executed after a save has completed or on user intervention
-        - **end**: Units that perform cleanup operations when training ends
-
-        The method checks which stages the unit supports. Units are appended to
-        ``self._units[stage]`` lists in order. Outside of LossUnit (which is always executed first)
-        and SaveUnit (which is always executed last), units are executed in the order they are
-        added to the loop
+        This method is typically called from TrainingLoop.add_unit() rather than directly.
         """
         self._units.add_unit(unit, is_core=False)
 
     def _on_train_start(self) -> None:
-        """ Start the training loop by executing all on_start units """
+        """ Execute initialization phase for all registered units """
         logger.debug("[TrainStep] Starting")
         for unit in self._units.on_start:
             logger.debug("[TrainStep] Executing on_start: '%s'", unit.__class__.__name__)
@@ -462,24 +421,40 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         self._started = True
 
     def _step(self) -> None:
+        """ Execute one training iteration step for all units """
         for unit in self._units.step:
             logger.trace("[TrainStep] %s step %s",  # type:ignore[attr-defined]
                          unit.__class__.__name__, self.iteration)
             unit.step(self.iteration)
 
     def _save(self) -> None:
+        """ Execute save operations for all registered units """
         for unit in self._units.on_save:
             logger.debug("[TrainStep] %s Saving step %s", unit.__class__.__name__, self.iteration)
             unit.on_save(self.iteration)
         self._events.save.clear()
 
     def _update(self) -> None:
+        """ Execute update operations for all registered units """
         for unit in self._units.on_update:
             logger.debug("[TrainStep] %s Updating", unit.__class__.__name__)
             unit.on_update()
         self._events.update.clear()
 
     def step(self) -> None:
+        """ Execute one complete training iteration
+
+        Orchestrates the full training loop for a single batch:
+            1. If not started, triggers initialization phase (on_start hooks)
+            2. Executes per-iteration work (step hooks via core and optional TrainingUnit)
+            3. Checks for save request event and saves if needed
+            4. Checks for update request event and updates preview if needed
+
+        Notes
+        -----
+        The first call to step() automatically initializes the training loop. Subsequent calls
+        assume proper initialization has occurred
+        """
         if not self._started:
             # TODO We currently have a problem here if both lrf + warmup selected. Warmup sets the
             # initial LR to 0.0 even if step() not called
@@ -495,6 +470,12 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
             self._update()
 
     def on_end(self) -> None:
+        """ Execute final cleanup operations when training concludes
+
+        Calls on_end() hook for each unit in the end lifecycle group. This ensures all units
+        perform necessary cleanup like releasing GPU memory, closing file handles, or finalizing
+        logging before training terminates
+        """
         for unit in self._units.on_end:
             logger.trace("[TrainStep] ending %s",  # type:ignore[attr-defined]
                          unit.__class__.__name__)
@@ -504,14 +485,47 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
 @dataclass
 class TrainingEvents:
+    """ Event system enabling communication between training thread and main process.
+
+    This dataclass provides a synchronized event mechanism for coordinating operations across
+    threads. The training loop runs in a background FSThread, while the monitor runs on the main
+    thread. Events allow the monitor to request checkpoints (save), preview updates (update),
+    mask toggles, or exit training without blocking the training loop.
+
+    Thread Safety:
+    -----------
+    All event operations are protected by a threading.Lock preventing race conditions when
+    accessing preview (shared between threads). The lock ensures atomic reads/writes of the
+    preview data which can be large numpy arrays.
+
+    Preview Support:
+    ------------
+    The training preview is held internally in this object. `get_preview()` retrieves and clears
+    this atomically, while `set_preview()` stores previews for the next iteration to retrieve from
+    the main loop
+    """
     save: Event = field(default_factory=Event)
+    """ Event object signaling checkpoint saving request from the main thread """
     exit: Event = field(default_factory=Event)
+    """ Event object requesting immediate training termination (after save) """
     update: Event = field(default_factory=Event)
+    """ Event object requesting preview refresh or status update """
     toggle_mask: Event = field(default_factory=Event)
+    """ Event object for mask inversion operations during training visualization """
     _preview: None | npt.NDArray[np.uint8] = None
     _lock: Lock = field(default_factory=Lock)
 
     def get_preview(self) -> None | npt.NDArray[np.uint8]:
+        """ Retrieve and clear the latest preview image generated during training
+
+        Atomically reads and clears the preview buffer to prevent multiple calls from blocking each
+        other. Subsequent calls will return None until set_preview() is called with a new preview
+        in the training thread
+
+        Returns
+        -------
+        The latest preview image (BGR, uint8, (H, W, C)) or ``None`` if no preview available
+        """
         with self._lock:
             if self._preview is None:
                 return None
@@ -521,12 +535,79 @@ class TrainingEvents:
         return retval
 
     def set_preview(self, preview: npt.NDArray[np.uint8]) -> None:
+        """ Store a preview image for retrieval by next `get_preview()` call
+
+        Called by the training thread to render a preview image for display by the main thread
+
+        Parameters
+        ----------
+        preview
+            The latest preview image (BGR, uint8, (H, W, C))
+        """
         logger.debug("[TrainingEvents] Setting preview: %s", preview.shape)
         with self._lock:
             self._preview = preview
 
 
 class TrainingLoop:
+    """ Main training loop orchestrator that runs model training in a background thread
+
+    TrainingLoop is the primary interface for initiating and controlling training sessions.
+    It wraps TrainStep functionality within an FSThread, allowing the training process to run
+    asynchronously without blocking the main GUI thread. The loop continues until either:
+        - All configured iterations complete
+        - Exit event is set via the main thread (KeyboardInterrupt or button click)
+
+    Threading Architecture:
+    -------------------
+    TrainingLoop creates an FSThread wrapping the main training loop. This separation allows:
+        - The main thread to call loop.start() and continue responding to user input
+        - KeyboardInterrupt from GUI to be caught and handled gracefully
+        - Preview updates via set_preview/get_preview to work across threads safely
+
+    Unit Registration:
+    --------------
+    Units can be added in two ways:
+        - During TrainStep initialization: Core units (always loaded) are registered automatically
+          based on configuration flags (save_interval, snapshot_interval)
+        - Via `TrainingLoop.add_unit()`: Optional units loaded from config fileif their
+        corresponding flags are enabled (e.g., TensorBoardUnit if tb_logging=True)
+
+    Lifecycle Flow:
+    ------------
+    1. start() : Begins FSThread execution of _main_loop()
+    2. Loop runs iterations calling stepper.step() each time:
+       a. Initialize via on_start hooks (LoadUnit loads checkpoint state first)
+       b. Execute iteration via step hooks (PluginUnit.forward/backward/optimizer)
+       c. Save checkpoints if requested or at intervals
+       d. Update GUI if preview available or update requested
+    3. on_end() : Called when iterations complete or exit requested, runs cleanup hooks
+
+    Parameters
+    ----------
+    iterations
+        Total number of training iterations to perform before stopping automatically.
+        Loop terminates early if exit event is set via main thread interrupt
+    faceswap_model
+        FaceswapModel instance containing neural network architecture and weights
+    trainer
+        TrainerPlugin executing forward/backward/optimization cycle per iteration
+    loader
+        TrainLoader providing input batches (images, masks, targets, metadata)
+    save_interval
+        Number of iterations between automatic checkpoint saves. Default: 250
+    snapshot_interval
+        Number of iterations between snapshot creation for recovery points. Default: 25000
+
+    Notes
+    ----
+    The TrainingLoop creates all core units during __init__ via TrainStep, but optional units
+    are registered separately. This allows dynamic unit loading based on runtime configuration
+
+    Keyboard interrupts caught in _main_loop() trigger graceful shutdown by calling
+    stepper.on_end() which performs final saves and cleanup operations before terminating the
+    thread.
+    """
     def __init__(self,
                  iterations: int,
                  faceswap_model: FaceswapModel,
@@ -547,12 +628,20 @@ class TrainingLoop:
 
     @property
     def events(self) -> TrainingEvents:
+        """ Event system enabling GUI to request saves, previews, mask toggles, or exit """
         return self._events
 
     def check_and_re_raise_error(self) -> None:
+        """ Check and propagate any errors that occurred during background training execution.
+
+        Called periodically from the main thread to check if the training thread encountered an
+        exception. If an error was raised in the training thread, this re-raises it so the main
+        thread can display appropriate error messages and halt operations
+        """
         self._thread.check_and_raise_error()
 
     def _training_loop(self) -> None:
+        """ Execute the core training iteration loop """
         for _ in range(self._iterations):  # TODO need to track iters because of LRF
             if self._events.exit.is_set():
                 logger.debug("[TrainingLoop] Exit requested")
@@ -564,7 +653,7 @@ class TrainingLoop:
         logger.debug("[TrainingLoop] Training Complete")
 
     def _main_loop(self) -> None:
-        """Main loop of the training thread"""
+        """ Wrap the training loop to handle KeyboardInterrupt and start the loop """
         logger.debug("[TrainingLoop] Commencing Training")
         try:
             self._training_loop()
@@ -578,36 +667,24 @@ class TrainingLoop:
             raise err
 
     def add_unit(self, unit: TrainingUnit) -> None:
-        """ Register a training unit to its appropriate lifecycle stage
+        """ Register an optional training unit for the session.
+
+        Adds a non-core unit to be executed during training iterations. Units can be added
+        dynamically based on runtime configuration or user requests from main thread
 
         Parameters
         ----------
         unit
-            The training unit to register. This should be a ``TrainingUnit`` subclass that declares
-            its capabilities via overriding the stage methods ``on_start``, ``step``, ``on_save``,
-            or ``on_end``)
-
-        Notes
-        -----
-        Training units are organized into four lifecycle stages:
-
-        - **start**: Units configured when training begins (typically for setup)
-        - **step**: Units executed on each training iteration step
-        - **save**: Units that are executed at each save interval
-        - **update**: Units that are executed after a save has completed or on user intervention
-        - **end**: Units that perform cleanup operations when training ends
-
-        The method checks which stages the unit supports. Units are appended to
-        ``self._units[stage]`` lists in order. Outside of LossUnit (which is always executed first)
-        and SaveUnit (which is always executed last), units are executed in the order they are
-        added to the loop
+            The TrainingUnit instance to register as an optional unit
         """
         self._stepper.add_unit(unit)
 
     def start(self) -> None:
+        """ Begin training by starting the background thread """
         self._thread.start()
 
     def join(self) -> None:
+        """ Wait for training to complete by joining the background thread """
         self._thread.join()
 
 
