@@ -1,5 +1,17 @@
 #! /usr/env/bin/python3
-""" Handles the creation of preview images for saving, GUI and display """
+""" Generates real-time training previews and timelapse recordings during model training
+
+This optional module provides preview functionality that generates visual samples of predicted
+faces during training sessions, allowing users to monitor convergence in real-time. It supports two
+primary use cases: live preview generation during active training (PreviewUnit) and periodic
+timelapse recording at save intervals for later analysis (TimelapseUnit). The core Samples class
+handles all image composition logic including background patches, foreground predictions, mask
+overlays, and header labels for swap/identity identification
+
+The module integrates with the Faceswap training loop system and supports optional mask visualization
+with configurable opacity and color. It can handle both RGB and alpha-channel inputs depending on
+whether learn_mask is enabled in the configuration
+"""
 from __future__ import annotations
 
 import logging
@@ -17,7 +29,7 @@ from lib.training.data import get_label, PreviewLoader
 from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
 
-from .core import TrainingUnit
+from lib.training.units.core import TrainingUnit
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt
@@ -29,30 +41,22 @@ logger = logging.getLogger(__name__)
 
 
 class Samples():
-    """ Compile samples for display for preview and time-lapse
+    """ Container class for managing preview sample composition and display
 
-    This class generates composite image previews by combining source patches, model predictions,
-    and optional mask overlays into a single display-ready image. It supports configurable coverage
-    ratios (full face vs cropped), mask toggling for debugging, and proper header labeling
+    This class handles all aspects of constructing the visual preview images used during training.
+    It manages background patches, foreground predictions, mask overlays with configurable opacity
+    and color, and generates header labels showing swap/identity relationships.
 
     Parameters
     ----------
     coverage_ratio
-        Ratio of face area to crop from the training image. Set to 1.0 for full face patches,
-        or a smaller value (e.g., 0.8) to zoom in more
+        Coverage ratio of the visual patch that the model is being trained at
     has_mask
-        ``True`` if the model was trained with mask learning enabled. Controls where mask
-        overlays are generated from
+        Whether the model is being trained with a mask (either through loss or as a side task)
     mask_opacity
-        The opacity percentage (0-100) for the mask overlay when displayed. Used to visualize
-        learned face boundaries without obscuring underlying content
+        Opacity percentage for the mask color overlay (0-100)
     mask_color
-        A hex RGB string specifying the color used for mask overlays
-
-    Notes
-    -----
-    The Samples object is stateful and maintains display settings like mask visibility. Use
-    toggle_mask_display() to show/hide masks interactively during GUI preview sessions.
+        Hex string representing the color used for mask overlays (e.g., "red", "#FF0000").
     """
     def __init__(self,
                  coverage_ratio: float,
@@ -72,19 +76,14 @@ class Samples():
         self._display_mask = has_mask
 
     def __repr__(self) -> str:
-        """ Pretty print for logging """
+        """ Return a string representation for logging purposes """
         params = ", ".join(f"{k[1:]}={v!r}" for k, v in self.__dict__.items()
                            if k in ("_coverage_ratio", "_has_mask", "_mask_opacity",
                                     "_mask_color"))
         return f"{self._name}({params})"
 
     def _toggle_mask_display(self) -> None:
-        """ Toggle the mask overlay on or off depending on user input during preview sessions
-
-        Notes
-        -----
-        If has_mask is False (model wasn't trained with masks), this method has no effect.
-        """
+        """ Toggle visibility of the mask overlay and INFO log the action """
         if not self._has_mask:
             return
 
@@ -97,29 +96,25 @@ class Samples():
                         targets: npt.NDArray[np.float32],
                         patch_size: int,
                         padding: int) -> npt.NDArray[np.float32]:
-        """ Generate the background image patches for preview composition
-
-        Creates base patches filled with source (ground truth) images. For coverage ratios
-        less than 100%, creates a mask-colored box around where predictions will be placed,
-        allowing visualization of context during training.
+        """ Create background patches by repeating target images with swap box corners overlay
 
         Parameters
         ----------
         targets
-            The (BGR) target patches stacked as (src_side, batch_size, height, width, channels)
+            Target images with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
         patch_size
-            The size of each final face patch in pixels
+            The size of individual patches in pixels (side length for square patches)
         padding
-            The padding around the prediction area to show context
+            Half-width of the central region where swap box corner overlay is applied
 
         Returns
         -------
-        The background image patches shaped (src_side, num_src + 1, batch_size, height, width, 3)
+        Background patches with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
 
-        Notes
-        -----
-        For full coverage (ratio = 1.0), only source images are displayed. For partial coverage,
-        the mask-colored box helps identify where face predictions will be placed during training.
+        Raises
+        ------
+        AssertionError
+            If coverage_ratio equals 1.0 since background is only needed when blending exists
         """
         num_swaps = targets.shape[0]
         assert self._coverage_ratio != 1.0, "Background only required for coverage != 1.0"
@@ -140,26 +135,22 @@ class Samples():
                         targets: npt.NDArray[np.float32],
                         patch_size: int,
                         padding: int) -> npt.NDArray[np.float32]:
-        """ Generate the foreground patches containing model predictions for overlay
-
-        Extracts prediction areas from source images (for context) and places full-size
-        face predictions in their designated positions. For full coverage models, only the
-        target background is shown without cropping.
+        """ Construct foreground patches from predictions or cropped targets
 
         Parameters
         ----------
         predictions
-            The (BGR) predictions shaped (src_side, dst_side, batch_size, height, width, channels)
+            Predicted face images with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
         targets
-            The (BGR) target patches shaped (src_side, batch_size, height, width, channels)
+            Target images matching the prediction batch dimensions for reference cropping
         patch_size
-            The size of each final face patch in pixels
+            The size of individual patches in pixels (side length for square patches)
         padding
-            The padding around the prediction area to show context
+            Half-width defining the central region extraction boundaries
 
         Returns
         -------
-        The foreground image patches shaped (src_side, num_src + 1, batch_size, height, width, 3)
+        Foreground patches with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
         """
         num_swaps = predictions.shape[0]
         retval = np.empty((num_swaps, num_swaps + 1, *predictions.shape[2:5], 3),
@@ -186,30 +177,26 @@ class Samples():
                      targets: npt.NDArray[np.float32],
                      patch_size: int,
                      padding: int) -> npt.NDArray[np.float32]:
-        """ Apply learned masks to preview patches if mask display is enabled
-
-        Handles two cases: when the model learns a separate alpha channel (for masking),
-        and when using pre-trained binary masks from targets. Masks are blended with opacity
-        settings for visual clarity.
+        """ Apply mask overlays to patches when display is enabled
 
         Parameters
         ----------
-        image
-            The image patches shaped (src_side, num_src + 1, batch_size, height, width, 3) to have
-            masks applied
+        patches
+            Background/foreground composite patches to apply masks to (H, W x N, C) in float32
         predictions
-            The (BGR) predictions shaped (src_side, dst_side, batch_size, height, width, channels)
+            Prediction images used for mask alpha extraction when learn_mask is enabled
         targets
-            The (BGR) targets shaped (src_side, batch_size, height, width, channels)
+            Target images providing original alpha values for mask computation
         patch_size
-            The size of each final face patch in pixels
+            The size of individual patches in pixels (side length for square patches)
         padding
-            The padding around the prediction area to show context
+            Half-width defining the central region boundaries for mask application
 
         Returns
         -------
-        The masked image patches ready for display
+        Masked patches with blend applied, maintaining shape (H, W x N, C) in float32 dtype
         """
+
         if not self._display_mask:
             return patches
 
@@ -235,21 +222,18 @@ class Samples():
 
     def _get_headers(self, num_swaps: int, patch_width: int  # pylint:disable=too-many-locals
                      ) -> npt.NDArray[np.uint8]:
-        """ Generate header row with identity labels for preview image columns
-
-        Creates readable text headers showing which source (A) maps to which target (B),
-        using the model's side labels and proper formatting for multi-swap scenarios.
+        """ Generate header labels showing swap-to-identity relationships for each preview patch
 
         Parameters
         ----------
         num_swaps
-            The number of swap instances within the model (e.g., 2 for A→B, B→C training)
+            Number of swap positions in the preview grid
         patch_width
-            The width in pixels of each preview column header
+            Width of individual patches in pixels, used for font size calculation and layout
 
         Returns
         -------
-        The column headings array shaped (height, columns * patch_width, 3) as uint8
+        Header labels as a single-row image with shape (height, total_width, 3) in uint8 dtype
         """
         labels = [
             get_label(i, num_swaps) + (f" > {get_label(i + j, num_swaps, next_identity=True)}"
@@ -284,24 +268,17 @@ class Samples():
         return retval
 
     def _create_image(self, patches: npt.NDArray[np.float32]) -> npt.NDArray[np.uint8]:
-        """ Compose the final preview image with headers and layout
-
-        Arranges all patches into a single display-ready image by transposing dimensions,
-        stacking source images side-by-side, and adding header row for column labels.
+        """ Compose headers and patches into the final preview image
 
         Parameters
         ----------
         patches
-            The final image patches shaped (src_side, num_src + 1, batch_size, height, width, 3)
+            Background/foreground composite patches with shape (src_side, img_count, identities,
+            rows, cols, channels) in float32 dtype that will be transposed and reshaped for display
 
         Returns
         -------
-        The final preview image as uint8 array ready for display or saving
-
-        Notes
-        -----
-        Images are arranged horizontally if they're wider than tall. Headers appear above
-        the source columns to identify which transformations each column represents.
+        Final preview image as a single 2D array with shape (height, width, 3) in uint8 dtype
         """
         headers = self._get_headers(patches.shape[0], patches.shape[-2])
         src_side, img_count, identities, rows, cols, channels = patches.shape
@@ -321,34 +298,27 @@ class Samples():
                     targets: npt.NDArray[np.float32],
                     toggle_mask: bool,
                     ) -> npt.NDArray[np.uint8]:
-        """ Compile a complete preview image from predictions and target patches
+        """ Generate a complete preview image from predictions and target images
 
-        This is the main entry point for generating display-ready previews. Combines background,
-        foreground (predictions), optional masks, and headers into a single image suitable
-        for GUI display, saving to disk, or timelapse sequences.
+        Orchestrates all steps to produce the final preview: creates foreground patches from
+        predictions (or cropped targets), optionally adds background when blending is needed,
+        applies mask overlays if configured and visible, generates headers with identity labels,
+        and composes everything into a single display image.
 
         Parameters
         ----------
         predictions
-            The (BGR) predictions shaped (src_side, dst_side, batch_size, height, width, channels)
+            Predicted face images with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
         targets
-            Full size BGR face patches at 100% coverage for patching predictions into in
-            (A, B, ...) order
-        mask_toggle
-            ``True`` if the mask should be toggled from its current state
+            Target images matching prediction dimensions for background and cropping reference
+        toggle_mask
+            Whether to toggle mask display visibility.
 
         Returns
         -------
-        A compiled preview image as uint8 array ready for display or saving
-
-        Notes
-        -----
-        The method handles:
-
-        1. Converting predictions to foreground patches with proper cropping
-        2. Creating background patches when using partial coverage ratios
-        3. Blending masks onto face regions if enabled and visible
-        4. Arranging all components into final display layout
+        Final preview image as a 2D array with shape (height, width, 3) in uint8 dtype, ready for
+        display or saving to disk. Contains headers on top followed by grid of prediction images
+        below.
         """
         if toggle_mask:
             self._toggle_mask_display()
@@ -374,21 +344,22 @@ class Samples():
 
 
 class EvaluateUnit(TrainingUnit):
-    """ Base unit for generating preview images during training and timelapse
+    """ Evaluation unit for generating preview images during training
 
-    This class provides common functionality for creating preview outputs. It generates
-    face prediction visualizations by feeding batches through the model, processing results
-    with configured masks/coverage settings, and returning display-ready images.
+    This unit evaluates the trained model on live batches to generate visual previews of
+    face swapping results in real-time. It manages the model inference pipeline with batched
+    processing, handles both RGB and alpha-channel inputs depending on learn_mask configuration,
+    and prepares data through a PreviewLoader that feeds images from configured folders
+
+    The unit supports optional mask visualization (learn_mask/mask loss) for monitoring convergence
+    of mask prediction alongside face predictions, as well as being able to focus on the swap area.
+    It processes input batches in chunks defined by the augmentation batch size setting to handle
+    large datasets efficiently without loading everything into memory at once
 
     Parameters
     ----------
     model
-        The FaceswapModel object containing the trained neural network, device info, and
-        configuration for preview generation (batch size, mask learning state, RGB mode)
-
-    Notes
-    -----
-    Derived classes PreviewUnit and TimelapseUnit
+        The training faceswap model plugin instance used for generating predictions during evaluation
     """
     def __init__(self, model: FaceswapModel) -> None:
         logger.debug(parse_class_init(locals()))
@@ -408,45 +379,36 @@ class EvaluateUnit(TrainingUnit):
         self._device: torch.Device   # set in on_start
 
     def __repr__(self) -> str:
-        """ String representation for debugging and logging """
+        """ Return a string representation for logging purposes """
         return f"{self.__class__.__name__}(model={self._model!r})"
 
     def on_start(self, loop: TrainStep) -> None:
-        """ Initialize device context when training commences
+        """ Initialize the evaluation unit and set inference device
+
+        Retrieves the torch.device from the training loop for running model inference. This ensures
+        GPU/CPU resources can be properly allocated during ``step``
 
         Parameters
         ----------
         loop
-            The configured training loop object about to process its first batch
-
-        Notes
-        -----
-        This method establishes the device reference for inference operations.
+            The training step object managing this unit's lifecycle
         """
         self._device = loop.device
         logger.debug("[%s] Set device to: '%s'", self.log_name, str(self._device))
 
     def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
-        """ Obtain preview predictions from the model by chunking into batch-sized feeds
-
-        This method processes input batches through the model in inference mode, handling
-        variable-length inputs by padding to batch size. Multi-scale outputs are filtered
-        to keep only those matching the configured output resolution.
+        # TODO shape docstrings may be incorrect
+        """ Generate prediction arrays for a batch of input images
 
         Parameters
         ----------
         feed
-            The input tensor to obtain predictions from with shape (num_sides, N, height, width)
+            Input batch of image tensors with shape (num_sides, num_sides, H_in, W_in, C)
 
         Returns
         -------
-        The processed predictions as a numpy array of float32 values shaped:
-        (num_sides, num_sides, output_size, output_size, ndim) where ndim is 4 if masks are used
-
-        Notes
-        -----
-        Works in inference_mode for speed. Masks are concatenated to alpha channel when learn_mask
-        is enabled.
+        Predictions array with shape (num_sides, num_sides, H_out, W_out, channels) where
+        channels is 3 for RGB or 4 if learn_mask includes alpha channel. float32 range [0, 1]
         """
         ndim = 4 if mod_cfg.Loss.learn_mask() else 3
         retval = np.empty((feed.shape[0],
@@ -483,6 +445,17 @@ class EvaluateUnit(TrainingUnit):
         return retval
 
     def _get_samples(self, toggle_mask: bool = False) -> npt.NDArray[np.uint8]:
+        """ Generate preview images for all side combinations in current batch
+
+        Parameters
+        ----------
+        toggle_mask
+            Whether to toggle mask display visibility. Default: ``False``
+
+        Returns
+        -------
+        Final preview image as a 2D array with shape (height, width, 3) in uint8 dtype
+        """
         feed, target = next(self._loader)
         num_sides = feed.shape[0]
         ndim = 4 if self._learn_mask else 3
@@ -513,30 +486,25 @@ class EvaluateUnit(TrainingUnit):
 
 
 class PreviewUnit(EvaluateUnit):
-    """ Handles creation of preview images during training sessions
+    """ Live preview unit for real-time training monitoring
 
-    This unit generates real-time previews for the GUI by feeding batches through the model
-    and composing display-ready images with proper headers, masks, and layout. It's called
-    at save intervals or through manual trigger to update the live preview viewer.
+    This unit generates and displays live previews during active training sessions by periodically
+    evaluating the model on batches from configured input folders. It integrates with the
+    TrainingEvents system to handle mask toggling requests and displays generated previews through
+    cache files that can be viewed in the GUI or logged for analysis
+
+    The PreviewUnit wraps an EvaluateUnit and adds a PreviewLoader specifically configured with
+    RandomSampler for shuffling batches during live preview generation. It automatically triggers
+    preview generation on start (via on_update call) and responds to toggle_mask events by
+    refreshing previews and clearing the event flag so subsequent requests are processed
 
     Parameters
     ----------
     model
-        The FaceswapModel object containing the trained neural network used for generating
-        previews during training
+        The training faceswap model plugin instance used for generating live previews during
+        training
     folders
-        List of folder paths containing input images/videos for each side of the model
-
-    Notes
-    -----
-    This unit creates interactive previews that display:
-
-    1. Current model predictions overlaid on target patches
-    2. Identity headers showing source→target relationships (e.g., "A > B")
-    3. Optional mask overlays if the model was trained using a mask
-
-    The preview is updated every save interval and displayed in the GUI for monitoring
-    training progress and visual quality assessment during sessions.
+        List of folder paths containing input images to use as sources for preview generation
     """
     def __init__(self, model: FaceswapModel, folders: list[str]) -> None:
         logger.debug(parse_class_init(locals()))
@@ -550,45 +518,35 @@ class PreviewUnit(EvaluateUnit):
         self._events: TrainingEvents  # set in on_start
 
     def __repr__(self) -> str:
-        """ String representation for debugging and logging """
+        """ Return a string representation for logging purposes """
         retval = super().__repr__()[:-1]
         return (f"{retval}, "
                 f"folders={self._loader.input_folders!r})")
 
     def on_start(self, loop: TrainStep) -> None:
-        """ Generate the first preview image on model start """
+        """ Initialize the preview unit and trigger first preview generation
+
+        Calls parent's on_start to set up device, then retrieves TrainingEvents reference from the
+        training loop. Immediately generates the first preview upon initialization by calling
+        on_update(), which will be handled by the main thread
+
+        Parameters
+        ----------
+        loop
+            The training step object managing this unit's lifecycle
+        """
         super().on_start(loop)
         self._events = loop.events
         logger.debug("%s Referenced events: %s", self.log_name, loop.events)
         self.on_update()
 
     def on_update(self) -> None:
-        """ Generate a preview image at the current training iteration
+        """ Generate a new preview when triggered by training event
 
-        Fetches the next batch from the data loader, runs inference through the model,
-        composes a preview with headers and optional masks, then returns both the image
-        and status message for GUI display. This is called during save intervals and by manual
-        trigger to update the live preview viewer.
-
-        Parameters
-        ----------
-        iteration
-            The current training iteration number used for logging purposes
-
-        Returns
-        -------
-        samples
-            The composed preview image as uint8 array ready for display
-        status_message
-            Instructions displayed in the GUI header
-
-        Notes
-        -----
-        Actions performed in order:
-
-        1. Log debug message
-        2. Generate preview via _get_samples() method
-        3. Set the preview image to the loop.event object
+        Checks the toggle_mask event flag to determine if mask visibility should change. If
+        toggled, clears the flag after processing to ensure single response per request. Then
+        generates previews from current batch data and sends them through events.set_preview() for
+        handling in the main thread
         """
         logger.debug("%s Generating preview", self.log_name)
         toggle_mask = self._events.toggle_mask.is_set()
@@ -599,35 +557,28 @@ class PreviewUnit(EvaluateUnit):
 
 
 class TimelapseUnit(EvaluateUnit):
-    """ Handles creation of timelapse images for tracking training progress over time
+    """ Timelapse recording unit for training progress documentation
 
-    This unit generates periodic snapshots of the model's visual improvements by processing
-    batches through the model and saving complete preview images to a dedicated output folder.
-    Useful for creating animation sequences showing how face swapping quality evolves during
-    training.
+    This unit generates preview images at save intervals and records them as an image sequence to
+    document model convergence over time. Unlike PreviewUnit which runs continuously during
+    training, TimelapseUnit only produces output when on_save() is called (typically every N
+    iterations or when user saves). Each saved timelapse image contains previews from the current
+    batch and is written as a JPEG file with an 8-digit iteration number for easy chronological
+    ordering.
+
+    The unit uses SequentialSampler instead of RandomSampler to ensure consistent, reproducible
+    batches at each save point. It creates the output folder automatically if it doesn't exist and
+    logs confirmation when timelapse files are successfully written
 
     Parameters
     ----------
     model
-        The FaceswapModel object containing the trained neural network used for generating
-        timelapse snapshots
+        The training faceswap model plugin instance used for generating timelapse previews during
+        training
     input_folders
-        List of folder paths containing input images/videos for each side of the model. Used to
-        sample initial frames from these sources when creating preview batches
-
+        List of folder paths containing input images to use as sources for preview generation
     output_folder
-        Directory path where generated timelapse images will be saved with sequential numbering
-
-    Notes
-    -----
-    This unit creates time-lapse sequences that:
-
-    1. Sample initial frames from input folders at save intervals
-    2. Process through the model to generate face-swapped previews
-    3. Save as sequential JPG files (00000000.jpg, 00000001.jpg, etc.)
-
-    The output folder is created automatically if it doesn't exist. Images are saved in
-    chronological order allowing easy playback to visualize model improvement over training epochs.
+        Path to the output folder where timelapse JPEG files will be saved with iteration numbers
     """
     def __init__(self, model: FaceswapModel, input_folders: list[str], output_folder: str) -> None:
         logger.debug(parse_class_init(locals()))
@@ -636,33 +587,24 @@ class TimelapseUnit(EvaluateUnit):
         self._loader = self._get_loader(model.info.input_size, input_folders)
 
     def __repr__(self) -> str:
-        """ String representation for debugging and logging """
+        """ Return a string representation for logging purposes """
         retval = super().__repr__()[:-1]
         return (f"{retval}, input_folders={self._loader.input_folders!r}, "
                 f"output_folder={self._output_folder!r})")
 
     def _get_loader(self, input_size: int, input_folders: list[str]) -> PreviewLoader:
-        """ Create and configure the data loader for timelapse image generation
-
-        This method sets up a sequential sampler to ensure consistent sampling from each input
-        folder, preventing random sampling that could produce inconsistent timelapse sequences.
+        """ Create a SequentialSampler loader for timelapse with available image count
 
         Parameters
         ----------
         input_size
-            The resolution size of input images (height and width in pixels)
+            The original input image resolution used to configure the PreviewLoader's expected size
         input_folders
-            List of folder paths containing source images/videos for each model side
+            List of folder paths containing source images for preview generation
 
         Returns
         -------
-        A configured PreviewLoader instance ready for sampling timelapse batches
-
-        Notes
-        -----
-        Uses SequentialSampler instead of RandomSampler to ensure consistent image ordering across
-        different training sessions. The number of samples is limited by the smaller batch size or
-        available images in the input folders, whichever is fewer.
+        Configured loader instance with SequentialSampler and calculated num_samples parameter
         """
         avail_images = min(len([fname for fname in os.listdir(folder)
                                 if os.path.splitext(fname)[-1].lower() == ".png"])
@@ -681,36 +623,16 @@ class TimelapseUnit(EvaluateUnit):
         return retval
 
     def on_save(self, iteration: int) -> None:
-        """ Generate and save a timelapse preview image at the current training iteration
+        """ Generate timelapse preview and save as JPEG file
 
-        Processes batches through the model to create visual snapshots of face-swapping quality.
-        Images are saved sequentially in the output folder with zero-padded filenames for easy
-        chronological playback. The output folder is created automatically if needed.
+        Creates a preview image from the current batch (using SequentialSampler for consistent
+        sampling), ensures output folder exists by creating it if needed, then saves the preview
+        as a JPEG with an 8-digit zero-padded iteration number
 
         Parameters
         ----------
         iteration
-            The current training iteration number. Used as the filename prefix for the generated
-            timelapse image
-
-        Notes
-        -----
-        Actions performed in order:
-
-        1. Log debug message with current iteration count
-        2. Generate preview via _get_samples() method (runs model inference)
-        3. Create output folder if it doesn't exist
-        4. Save image as JPG with zero-padded filename (08-digit format)
-        5. Log confirmation of saved timelapse file
-
-        The iteration number ensures each save gets a unique filename, preventing overwrites
-        and creating a complete chronological record of training progress.
-
-        Notes
-        -----
-        Unlike PreviewUnit which displays images in GUI, this unit saves to disk for later
-        analysis. The SequentialSampler ensures consistent sampling from input folders across
-        different runs.
+            Current training iteration number, used both in logger message and filename
         """
         logger.debug("%s Generating timelapse [%s]", self.log_name, iteration)
         samples = self._get_samples()

@@ -1,5 +1,11 @@
 #! /usr/env/bin/python3
-""" Handles the processing of the forward and backwards passes through the Faceswap plugin """
+""" Training unit for managing model plugin operations during training
+
+This module contains the core PluginUnit class which is responsible for handling the core model
+training operations including data loading, trainer execution, loss calculation, and optimization
+steps. It serves as the primary interface  between the training loop and the actual model
+processing components
+"""
 from __future__ import annotations
 
 import logging
@@ -11,7 +17,7 @@ from lib.logger import parse_class_init
 from lib.training.loss import LossCollator
 from lib.utils import get_module_objects
 
-from . import TrainingUnit
+from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
     from lib.training.data import TrainLoader
@@ -26,12 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 class PluginUnit(TrainingUnit):
-    """ Handles processing of forward and backward passes through a Faceswap plugin
+    """ Manages the core model training operations through a Faceswap Plugin
 
-    This unit orchestrates each training iteration by fetching batches from the loader, moving
-    tensors to the appropriate device, and calling the trainer's step method which handles the full
-    forward/backward/optimization cycle. Loss values are tracked via a property that exposes the
-    current batch loss for use by other units like LossUnit.
+    This unit handles the execution of the trainer plugin each training iteration by fetching
+    batches from the loader, moving tensors to the appropriate device, and calling the trainer's
+    step method which handles the full forward/backward/optimization cycle. Loss values are tracked
+    via a property that exposes the current batch loss for use by other units like LossUnit.
 
     Parameters
     ----------
@@ -41,30 +47,21 @@ class PluginUnit(TrainingUnit):
         The TrainerPlugin that executes the training step (forward pass, loss calculation,
         backward pass, and optimizer update)
     optimizer
-        The Optimizer used to update model weights after each backward pass
+        The optimizer unit managing parameter updates
     model
-        The FaceswapModel object containing the neural network and info for the model (RGB mode,
-        output shapes)
+        The FaceswapModel object containing the neural network, state and info for the model
     device
-        The torch device that the model will be trained on
+        The device (CPU/GPU) to run training on
     loss_functions
-        Dictionary mapping loss names to their weights (e.g., {"L1": 1.0, "MSE": 0.5})
+        Mapping of loss function names to their respective weights
     penalize_mask_loss
-        Whether to apply mask penalty during loss computation
+        Whether to apply mask-based penalties during loss calculation
     eye_multiplier
-        Multiplier for eye region loss component
+        Multiplier for eye-related losses
     mouth_multiplier
-        Multiplier for mouth region loss component
+        Multiplier for mouth-related losses
     mask_loss
-        Type of mask loss function to use (e.g., "L1", "MSE") or None if disabled
-
-    Notes
-    -----
-    This unit is called once per training iteration. It does not handle saving or other lifecycle
-    events - those are managed by separate units in the TrainStep.
-
-    The current_loss property provides access to loss values computed during this step,
-    which are used by LossUnit for tracking averages and reporting metrics.
+        The type of mask loss function to use, if applicable
     """
     def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
                  loader: TrainLoader,
@@ -102,7 +99,7 @@ class PluginUnit(TrainingUnit):
         self._current_loss: list[BatchLoss] = []
 
     def __repr__(self) -> str:
-        """ String representation for debugging and logging """
+        """ Return a string representation for logging purposes """
         params = {k: self._extra_repr[k] if k in self._extra_repr else repr(self.__dict__[f"_{k}"])
                   for k in ("loader",
                             "trainer",
@@ -119,13 +116,7 @@ class PluginUnit(TrainingUnit):
 
     @property
     def current_loss(self) -> list[BatchLoss]:
-        """ A list of BatchLoss objects containing the loss outputs for each identity
-        processed during this iteration. Used by LossUnit for averaging and reporting metrics.
-
-        Notes
-        -----
-        Values are populated after trainer.step() and detached at the start of loss_unit.step().
-        """
+        """ The detached loss values from the most recently processed training batch """
         return self._current_loss
 
     def _configure_loss(self,
@@ -136,34 +127,28 @@ class PluginUnit(TrainingUnit):
                         mask_loss: str | None,
                         output_shapes: list[list[tuple[int, int, int]]],
                         is_rgb: bool) -> LossCollator:
-        """Configure and initialize the composite loss function for training
+        """ Configure and initialize the composite loss function for training
 
         Parameters
         ----------
         loss_functions
-            Dictionary mapping loss names to their weights (e.g., {"L1": 1.0, "MSE": 0.5})
+            Mapping of loss function names to their respective weights
         penalize_mask_loss
-            Whether to apply mask penalty during loss computation
+            Whether to apply mask-based penalties during loss calculation
         eye_multiplier
-            Multiplier for eye region loss component
+            Multiplier for eye-related losses
         mouth_multiplier
-            Multiplier for mouth region loss component
+            Multiplier for mouth-related losses
         mask_loss
-            Type of mask loss function to use (e.g., "L1", "MSE") or None if disabled
+            The type of mask loss function to use, if applicable
         output_shapes
-            List of output shapes from the model's decoder layers
+            The shapes of model outputs for configuration purposes
         is_rgb
-            Whether the model uses RGB color format
+            Whether the color channel order is RGB (True) or BGR (False)
 
         Returns
         -------
-        The collated loss functions ready for computing gradients during each training step
-
-        Notes
-        -----
-        This method creates a LossCollator that combines multiple loss components into a single
-        trainable objective. Each component can have its own weight, allowing fine-grained control
-        over which aspects of the face swap quality are prioritized during training.
+        Configured loss collator instance
         """
         loss = LossCollator(
             functions=list(loss_functions),
@@ -178,42 +163,35 @@ class PluginUnit(TrainingUnit):
         return loss
 
     def on_start(self, loop: TrainStep) -> None:
-        """ Initialize device reference and move model and loss functions to training device
+        """ Initialize the model and loss function on the specified device
+
+        Moves the trainer model and loss functions to the configured training device
 
         Parameters
         ----------
         loop
-            The active TrainStep instance. Used to access the shared device context.
-
-        Notes
-        -----
-        This method is called before training begins to establish references to the training
-        loop's device and maintain proper lifecycle tracking within the unit system. It also moves
-        the loss function to the appropriate device.
+            The training step object that manages this unit's lifecycle
         """
         logger.debug("%s Model and loss to : %s", self.log_name, self._device)
         self._trainer.model.to(self._device)
         self._loss_fn.to(self._device)
 
     def step(self, iteration: int) -> None:
-        """ Execute a single training iteration through the plugin
+        """ Execute one training step on a batch of data
 
-        Fetches the next batch from the data loader, moves all tensors to the appropriate device
-        (GPU/CPU), and invokes the trainer's step method which handles the complete forward-
-        backward optimization cycle. The resulting loss values are detached from the gpu, cleared
-        from any previous state and then populated with the new loss metrics for use by other
-        units.
+        This method:
+            - Processes the next batch from the loader
+            - Moves all tensors to the appropriate device (GPU/CPU)
+            - Runs the forward pass through the trainer
+            - Calculates loss using configured functions
+            - detaches the loss tensors from the computation graph
+            - Performs backwards pass to update the optimizer
+            - Stores the loss for the current iteration in the `current_loss` parameter
 
         Parameters
         ----------
         iteration
-            The current total iteration count for logging purposes
-
-        Notes
-        -----
-        This is called once per training iteration by the TrainStep. Loss values computed during
-        this step are stored in the ``current_loss`` property for use by LossUnit and other
-        dependent units.
+            The current iteration number in the training process
         """
         inputs, targets, meta = next(self._loader)
         self._current_loss.clear()

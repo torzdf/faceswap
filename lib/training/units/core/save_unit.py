@@ -1,5 +1,10 @@
-#!/usr/bin/env python3
-""" Handles saving of model weights and checkpoints. """
+#! /usr/bin/env python3
+""" Training units for managing model saving and loading operations during training
+
+This module contains the core training units responsible for handling model checkpointing, state
+persistence, and recovery operations. It includes units for loading saved states, saving
+checkpoints at regular intervals, and creating  snapshots of model progress
+"""
 from __future__ import annotations
 
 import logging
@@ -8,7 +13,7 @@ import typing as T
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from . import TrainingUnit
+from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
     import numpy as np
@@ -21,12 +26,37 @@ logger = logging.getLogger(__name__)
 
 
 class LoadUnit(TrainingUnit):
+    """ Loads previously saved model states and configurations
+
+    This unit is responsible for restoring model state from saved checkpoint files, including
+    loading weights, optimizer states, and any additional training metadata that was previously
+    stored
+
+    Parameters
+    ----------
+    model
+        The faceswap model that contains the loaded the state_dict information
+    """
     def __init__(self, model: FaceswapModel) -> None:
         logger.debug(parse_class_init(locals()))
         super().__init__()
         self._model = model
 
+    def __repr__(self) -> str:
+        """ Return a string representation for logging purposes """
+        return f"{self.__class__.__name__}(model={self._model!r})"
+
     def on_start(self, loop: TrainStep) -> None:
+        """ Load saved states from checkpoint files
+
+        Restores optimizer and other training unit information from previously saved checkpoint
+        files that were stored in the model's extra state collection
+
+        Parameters
+        ----------
+        loop
+            The training step object managing this unit's lifecycle
+        """
         loadable = loop.units.have_state_dict
         logger.debug("%s got loadables: %s", self.log_name, loadable)
         for name, unit in loadable.items():
@@ -41,28 +71,27 @@ class LoadUnit(TrainingUnit):
 
 
 class SaveUnit(TrainingUnit):
-    """ Handles saving of model weights and checkpoints
+    """ Saves model checkpoints and final models during training
 
-    As well as saving the model, this unit tracks the average loss from each save iteration and
-    backs up the model when a new lowest average loss is recorded during training.
-
-    This must be placed last in the ``on_save`` units.
+    This unit manages the saving of trained models at specified intervals, including creating
+    regular checkpoints, backup copies when loss improves, and saving via user input
 
     Parameters
     ----------
     model
         The FaceswapModel object containing the neural network, state and info for the model
     optimizer
-        The Optimizer being used to train the model
+        The optimizer unit containing optimizer state information
+    events
+        The event system for coordinating training operations
     average_loss
         The array that will hold the total average loss for the current save iteration. The object
         is a 0-dimensional numpy array that gets updated each save iteration so a reference can be
         held
     save_interval
-        The number of iterations between each model save
+        Number of iterations between regular saves
     save_optimizer
-        When to include optimizer state in saved checkpoints. Options are:
-        ``"always"``, ``"never"``, or ``"exit"`` (only on training end)
+        When to save optimizer state ("always", "never", or "exit")
     """
     def __init__(self,
                  model: FaceswapModel,
@@ -94,21 +123,29 @@ class SaveUnit(TrainingUnit):
         return f"{self.__class__.__name__}({params})"
 
     def on_start(self, loop: TrainStep) -> None:
-        self._saveable = loop.units.have_state_dict
-        logger.debug("%s Stored saveables: %s", self.log_name, self._saveable)
+        """ Initialize saveable units and configure saving behavior
 
-    def step(self, iteration: int) -> None:  # pylint:disable=unused-argument
-        """ Checks if the current iteration matches the configured save interval and triggers
-        saving operations when appropriate. This method is called during each training step
-        to determine if the on_save method should be run for units during this iteration
+        Stores references to all training units that can provide state dictionaries for inclusion
+        in saved checkpoints
 
         Parameters
         ----------
-        loss
-            The current batch loss value (unused - retained for interface compatibility)
+        loop
+            The training step object managing this unit's lifecycle
+        """
+        self._saveable = loop.units.have_state_dict
+        logger.debug("%s Stored saveables: %s", self.log_name, self._saveable)
+
+    def step(self, iteration: int) -> None:
+        """Check if it's time to trigger a save operation
+
+        Determines whether the current iteration requires saving based on configured save interval
+        and triggers the save event
+
+        Parameters
+        ----------
         iteration
-            The current total iteration count. Saves occur when this is a multiple of
-            the configured ``save_interval``.
+            The current iteration number in the training process
         """
         if iteration > 0 and iteration % self._save_interval == 0:
             logger.debug("%s Save iteration %s. Calling events.save.set()",
@@ -116,13 +153,11 @@ class SaveUnit(TrainingUnit):
             self._events.save.set()
 
     def _get_average_loss(self) -> float:
-        """ Obtain the average loss for the current save iteration
+        """ Obtain latest average loss since the last save iteration and set initial average loss
 
         Returns
         -------
-        The current average loss for this save iteration as a float. If this is the
-        initial loss, it will be stored in ``self._model.state.lowest_avg_loss`` for
-        comparison on future saves.
+        Average loss value since the last save iteration
         """
         retval = float(self._average_loss)
         if self._model.state.lowest_avg_loss <= 0.0 < retval:
@@ -131,16 +166,16 @@ class SaveUnit(TrainingUnit):
         return retval
 
     def _maybe_backup(self, average_loss: float) -> bool:
-        """ Perform a model backup if the average loss is lower than any previously seen
+        """ Create a backup checkpoint if current loss is better than previous best
 
         Parameters
         ----------
         average_loss
-            The average loss since the last save iteration
+            The current average loss value
 
         Returns
         -------
-        ``True`` if a backup was created (new lowest loss), ``False`` otherwise.
+        ``True`` if a backup was created, ``False`` otherwise
         """
         retval = 0.0 < average_loss < self._model.state.lowest_avg_loss
         if not retval:
@@ -157,14 +192,11 @@ class SaveUnit(TrainingUnit):
         Parameters
         ----------
         is_exit
-            ``True`` if this save occurs when exiting training. If the optimizer is set
-            to be saved on exit (via ``save_optimizer="exit"``), it will be included in
-            the checkpoint.
+            Whether this save is happening at training exit
 
         Returns
         -------
-        ``True`` if a checkpoint was saved (optimizer state included), ``False`` for
-        regular model saves without optimizer.
+        ``True`` if this was a full checkpoint (not just a model weights)
         """
         is_checkpoint = self._save_optimizer == "always" or (is_exit and
                                                              self._save_optimizer == "exit")
@@ -176,13 +208,12 @@ class SaveUnit(TrainingUnit):
         return is_checkpoint
 
     def _save(self, is_exit: bool) -> None:
-        """ Perform the complete save operation for either normal saves or exit
+        """ Execute the complete save operation for either normal saves or exit
 
         Parameters
         ----------
         is_exit
-            ``True`` if this save occurs when exiting training. This affects whether
-            optimizer state is included based on the configuration.
+            Whether this save is happening at training exit
         """
         average_loss = self._get_average_loss()
         do_backup = self._maybe_backup(average_loss)  # TODO move to after model save?
@@ -195,17 +226,15 @@ class SaveUnit(TrainingUnit):
         logger.info(msg)
 
     def on_save(self, iteration: int) -> None:
-        """ Save the model weights
+        """ Execute save operation for the current iteration
+
+        Triggers the full saving process and updates related events for preview
+        generation and status reporting
 
         Parameters
         ----------
         iteration
-            The current total iteration count. This is logged for tracking purposes
-
-        Notes
-        -----
-        Called during normal training flow when saving intervals are reached. Triggers
-        loss checking, potential backup, and model save with appropriate logging output.
+            The current iteration number in the training process
         """
         if self._events.exit.is_set():
             return  # Handle in clean up
@@ -214,36 +243,31 @@ class SaveUnit(TrainingUnit):
         self._events.update.set()  # Trigger preview updates on a save
 
     def on_end(self) -> None:
-        """ Save the model when training session ends
+        """ Save final model state at training completion
 
-        Notes
-        -----
-        Called during cleanup phase of training. This save may include optimizer state
-        depending on configuration (``save_optimizer="exit"`` or ``"always"``). Ensures
-        progress is preserved even if interrupted at this stage.
+        Performs the final save operation to ensure all training progress is preserved when
+        training concludes. This save may include optimizer state depending on configuration
+        (``save_optimizer="exit"`` or ``"always"``)
         """
         logger.debug("%s Saving on exit", self.log_name)
         self._save(True)
 
 
 class SnapshotUnit(TrainingUnit):
-    """ Creates periodic model Snapshots
+    """ Creates periodic snapshots of model state for recovery purposes.
+
+    This unit generates snapshot files at regular intervals during training, allowing for recovery
+    from specific points in the training process. Snapshots typically contain model weights and
+    optimizer states.
 
     Parameters
     ----------
     model
-        The FaceswapModel object containing the neural network, state and info for the model
+        The faceswap model to snapshot
     optimizer
-        The Optimizer being used to train the model
+        The optimizer unit containing current state information
     snapshot_interval
-        Number of iterations between snapshots. Set to ``0`` to disable periodic saving,
-        or set to a positive integer (e.g., 1000) to save every N iterations.
-
-    Notes
-    -----
-    This unit performs regular, interval-based saves for long-term preservation and analysis.
-    Unlike SaveUnit which backs up on loss improvement, this creates checkpoints at specific
-    training milestones regardless of model performance.
+        Number of iterations between snapshot creation
     """
     def __init__(self, model: FaceswapModel, optimizer: OptimizerUnit, snapshot_interval: int
                  ) -> None:
@@ -261,20 +285,15 @@ class SnapshotUnit(TrainingUnit):
                 f"snapshot_interval={self._interval!r})")
 
     def step(self, iteration: int) -> None:
-        """ Process a training step and trigger snapshot if interval is reached
+        """ Create a snapshot at specified intervals
+
+        Generates and saves a model snapshot when the current iteration matches the configured
+        snapshot interval
 
         Parameters
         ----------
-        loss
-            The current batch loss (unused here - retained for interface compatibility)
         iteration
-            The current total iteration count. Snapshots occur when this matches the
-            configured ``snapshot_interval``.
-
-        Notes
-        -----
-        This method is called during each training step. It checks if the iteration
-        to save has been reached and, if so, saves a full checkpoint including optimizer state.
+            The current iteration number in the training process
         """
         if iteration < 0 or iteration % self._interval != 0:
             return

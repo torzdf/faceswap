@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-""" Tensorboard call back for PyTorch logging. """
+""" TensorBoard logging unit for training monitoring.
+
+This optional module provides the TensorBoardUnit class which handles logging training metrics to 
+TensorBoard for visualization and analysis. It supports writing model graphs during initialization, 
+logging various loss components, and managing the lifecycle of the TensorBoard writer throughout 
+the training process.
+
+The unit integrates with the Faceswap training loop system and can optionally write model 
+architecture diagrams for better understanding of network structure. It handles both regular and
+live log file reading through the RecordIterator helper class
+"""
 from __future__ import annotations
 
 import logging
@@ -14,7 +24,7 @@ from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
 from lib.training.data import get_label
-from .core import TrainingUnit
+from lib.training.units.core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from lib.training.loss import BatchLoss
@@ -25,18 +35,20 @@ logger = logging.getLogger(__name__)
 
 
 class RecordIterator:
-    """A replacement for tensorflow's :func:`compat.v1.io.tf_record_iterator`
+    """ Iterator for reading TensorBoard event files
+
+    This iterator reads TensorFlow event records from a TensorBoard log file, handling both regular
+    and live (continuously updated) files. It properly manages file positioning and handles partial
+    reads or corrupted data gracefully
 
     Parameters
     ----------
     log_file
-        The event log file to obtain records from
-    is_live
-        ``True`` if the log file is for a live training session that will constantly provide data.
-        Default: ``False``
+        Path to the TensorBoard event log file to read from
+    is_live, optional
+        Whether this is a live (continuous) log file that may still be written to. Default: ``False``
     """
     _max_record_size = 1024 ** 3
-    """Maximum size for a TFRecord. Caps at 1GB to protect against nonsense length bytes"""
 
     def __init__(self, log_file, is_live: bool = False) -> None:
         logger.debug(parse_class_init(locals()))
@@ -47,12 +59,11 @@ class RecordIterator:
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def __iter__(self) -> RecordIterator:
-        """Iterate over a Tensorboard event file"""
+        """ Return the iterator object itself """
         return self
 
     def _on_file_read(self) -> None:
-        """If the file is closed and we are reading live data, re-open the file and seek to the
-        correct position"""
+        """ Handle file operations when reading data """
         if not self._is_live or not self._log_file.closed:
             return
 
@@ -62,7 +73,7 @@ class RecordIterator:
         self._log_file.seek(self._position, 0)
 
     def _on_file_end(self) -> None:
-        """Close the event file. If live data, record the current position"""
+        """ Handle cleanup when reaching end of file """
         if self._is_live:
             self._position = self._log_file.tell()
             logger.trace("Setting live position to %s",  # type:ignore[attr-defined]
@@ -72,16 +83,16 @@ class RecordIterator:
         self._log_file.close()
 
     def __next__(self) -> bytes:
-        """Get the next event log from a Tensorboard event file
+        """ Return the next record from the log file
 
         Returns
         -------
-        A Tensorboard event log
+        The raw event record data
 
         Raises
         ------
         StopIteration
-            When the event log is fully consumed
+            When end of file is reached or partial read occurs
         """
         self._on_file_read()
 
@@ -115,19 +126,22 @@ class RecordIterator:
 
 
 class TensorBoardUnit(TrainingUnit):
-    """ A unit for updating logs required to enable visualizations in TensorBoard.
+    """ TensorBoard logging unit for training monitoring
+
+    This unit handles logging training metrics to TensorBoard for visualization and analysis. It
+    can optionally write model graphs during the initial setup phase, logs various loss components,
+    and manages the lifecycle of the TensorBoard writer throughout the training process
 
     Parameters
     ----------
     model_folder
-        The path of the directory where the model files are being saved to
+        Path to the folder where model files are stored
     model_name
-        The name of the model being trained on
+        Name identifier for this model 
     session_id
-        The training session id that is about to commence
-    write_graph
-        Whether to visualize the graph in TensorBoard. Note that the log file can become quite
-        large when `write_graph` is set to `True`. Default: ``True``
+        Unique identifier for the current training session
+    write_graph, optional
+        Whether to write the model graph during initialization. Default: ``True``
     """
     def __init__(self,
                  model_folder: str,
@@ -150,7 +164,7 @@ class TensorBoardUnit(TrainingUnit):
         self._current_loss: list[BatchLoss]  # set in on_start
 
     def __repr__(self) -> str:
-        """ String representation for debugging and logging """
+        """ Return a string representation for logging purposes """
         params = ", ".join(f"{k[1:]}={v!r}" for k, v in self.__dict__.items()
                            if k in ("_model_folder",
                                     "_model_name",
@@ -162,16 +176,16 @@ class TensorBoardUnit(TrainingUnit):
                            model: ModelPlugin,
                            device: torch.Device,
                            input_shapes: list[tuple[int, int, int]]) -> None:
-        """ Writes Faceswap model graph network to TensorBoard.
+        """ Write the PyTorch model graph to TensorBoard
 
         Parameters
         ----------
         model
-            The Faceswap model plugin to trace
+            The model plugin whose graph will be written
         device
-            The device the model is training on
+            Device on which the model is located
         input_shapes
-            The shape of the inputs to the model [(C, H, W), ]
+            Input shapes for creating dummy inputs for graph tracing [(C, H, W), ]
         """
         logger.debug("%s Writing model graph: %s", self.log_name, model)
         is_training = model.training
@@ -183,12 +197,15 @@ class TensorBoardUnit(TrainingUnit):
             model.train()
 
     def on_start(self, loop: TrainStep) -> None:
-        """ Create a new log file on session start. Write the graph if this is a new model
+        """ Initialize TensorBoard logging and write model graph
+
+        Sets up the TensorBoard writer with appropriate log directory and writes the model 
+        architecture graph for visualization during the first session
 
         Parameters
         ----------
-        trainer
-            The configured trainer object that is about to process it's first batch
+        loop
+            The training step object managing this unit's lifecycle
         """
         self._current_loss = loop.current_loss
         model = loop.model
@@ -200,16 +217,16 @@ class TensorBoardUnit(TrainingUnit):
 
     def _get_logs(self,
                   loss: list[BatchLoss]) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """ Extract the TensorBoard logs from the current batch loss items
+        """ Extract and format loss metrics for logging
 
         Parameters
         ----------
         loss
-            A list of the current batch losses
+            List of batch loss objects to extract metrics from
 
         Returns
         -------
-        The loss for the current batch formatted for TensorBoard logging
+        Dictionary mapping metric names to their values
         """
         retval: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
             "total": T.cast(torch.Tensor, sum(x.total for x in loss))}
@@ -227,12 +244,15 @@ class TensorBoardUnit(TrainingUnit):
         return retval
 
     def step(self, iteration: int) -> None:
-        """ Update Tensorboard logs on batch end
+        """ Log batch metrics to TensorBoard
+
+        Processes the current loss values and logs them to TensorBoard as scalar values. 
+        Skips logging during pre-training phase (negative iterations).
 
         Parameters
         ----------
         iteration
-            The current iteration count
+            Current training iteration number. Negative values indicate pre-training phase
         """
         if iteration < 0:
             logger.trace("%s Pre-training. Not handling Tensorboard",  # type:ignore[attr-defined]
@@ -253,23 +273,22 @@ class TensorBoardUnit(TrainingUnit):
                 raise ValueError(f"Unhandled Tensorboard data: {key}: {value}")
 
     def on_save(self, iteration: int) -> None:
-        """Flush data to disk on save
+        """ Flush the TensorBoard writer
+
+        Forces writing all pending logs to disk at save intervals
 
         Parameters
         ----------
         iteration
-            The total iteration number for the model
+            Current training iteration number when saving occurs
         """
         logger.debug("%s Flushing Tensorboard writer [%s]", self.log_name, iteration)
         self._writer.flush()
 
     def on_end(self) -> None:
-        """Close the writer on train completion
+        """ Close the TensorBoard writer
 
-        Parameters
-        ----------
-        logs
-            Unused
+        Flushes and closes the TensorBoard writer at the end of training.
         """
         logger.debug("%s Exiting Tensorboard writer", self.log_name)
         self._writer.flush()

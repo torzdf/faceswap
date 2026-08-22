@@ -1,6 +1,10 @@
-#!/usr/bin/env python3
-""" Wraps the selected Torch optimizer and handles optimizer related functions such as loss
-scaling, clipping and gradient accumulation """
+#! /usr/bin/env python3
+""" Training unit for managing optimizer operations during training
+
+This module contains the core OptimizerUnit class which is responsible for configuring, managing,
+and executing optimization processes during model training. It handles various optimizers, gradient
+clipping, mixed precision training, and parameter group management
+"""
 from __future__ import annotations
 
 import logging
@@ -37,33 +41,31 @@ _OPTIMIZERS = {"adabelief": optimizers.AdaBelief,
 
 
 # TODO keep for legacy weights update
+# TODO move to legacy
 def get_parameter_group_ids(trainable_variables: list[Variable]
                             ) -> dict[int, T.Literal["decay", "no_decay"]]:
-    """ Obtain the index of each item in Keras model's trainable weights that belong to each
-    of the optimizer's parameter groups (split by weights that take decay and don't)
+    """ Generate parameter group identifiers for weight decay application from legacy Keras models
+
+    Assigns each trainable variable to either a 'decay' or 'no_decay' group based on its
+    dimensionality and name. Bias parameters and 1-dimensional parameters are typically excluded
+    from weight decay, while higher dimensional parameters (weights) usually include it
 
     Parameters
     ----------
     trainable_variables
-        List of trainable variables from a legacy Keras model
+        List of trainable variables from a Keras model to assign group IDs to
 
     Returns
     -------
-    A dictionary mapping each trainable weight index to its parameter group name:
-
-    - "decay": Regular parameters requiring L2 regularization (non-bias, non-flat tensors)
-    - "no_decay": Exempt parameters like biases and flattened layers
+    Dictionary mapping variable indices to their respective group identifiers ('decay' or
+    'no_decay')
 
     Notes
     -----
-    This function is marked for legacy use only. Keras models used a different grouping scheme
-    than PyTorch optimizers. When migrating from Keras to Torch, this maps the old parameter
-    groups to the new torch.optim.Optimizer param_groups format.
-
-    Examples
-    --------
-    >>> group_ids = get_parameter_group_ids(model.trainable_variables)
-    >>> print(group_ids[0])  # "decay" for most weights
+    This function is primarily kept for legacy weight migration purposes and should not be used in
+    new code paths. Keras models used a different grouping scheme than PyTorch optimizers. When
+    migrating from Keras to Torch, this maps the old parameter groups to the new
+    torch.optim.Optimizer param_groups format
     """
     retval: dict[int, T.Literal["decay", "no_decay"]] = {}
     for idx, var in enumerate(trainable_variables):
@@ -74,33 +76,22 @@ def get_parameter_group_ids(trainable_variables: list[Variable]
 
 
 class GradClip:
-    """ Handles the clipping of gradients based on user supplied parameters
+    """ Gradient clipping utility for controlling gradient norms during training
 
-    This class manages different gradient clipping strategies to prevent exploding gradients during
-    training. Supports autoclip (adaptive), global norm, per-parameter norm clipping, and value-
-    based clipping methods with configurable thresholds.
+    This class provides various methods for clipping gradients to prevent exploding gradients
+    during training. It supports multiple clipping strategies including auto-clipping (adaptive),
+    global norm clipping, and value-based clipping with configurable thresholds
 
     Parameters
     ----------
     method
-        The clipping method to use: "autoclip", "global_norm", "norm", or "value"
+        The gradient clipping method to use ("autoclip", "global_norm", "norm", or "value")
     value
-        The clipping threshold. For autoclip this is the percentile to clip at (1.0 = 10th percent,
-        2.5 = 25th percent). For other methods it's the maximum norm/value to apply
-    autoclip_history
-        The history length for auto clipping. Default: 10000
-
-    Notes
-    -----
-    Autoclip uses exponential moving average of gradient norms to determine appropriate thresholds,
-    adapting during training without manual intervention. Other methods use fixed thresholds that
-    should be set based on model architecture and loss scale factors.
-
-    Examples
-    --------
-    >>> clipper = GradClip("global_norm", max_norm=1.0)
-    >>> for param in parameters:
-    ...     clipper([param])  # Clip all parameters by global norm
+        The clipping threshold value for the selected method. For autoclip this is the percentile
+        to clip at (1.0 = 10th percent, 2.5 = 25th percent). For other methods it's the maximum
+        norm/value to apply
+    autoclip_history, optional
+        History size for auto-clipping (only used when method="autoclip"). Default: 10000
     """
     def __init__(self,
                  method: T.Literal["autoclip", "global_norm", "norm", "value"],
@@ -112,19 +103,14 @@ class GradClip:
 
     @classmethod
     def _clip_norm(cls, parameters: list[nn.Parameter], max_norm: float) -> None:
-        """ Clip each parameter independently by its own norm
+        """ Applies gradient clipping based on the L2 norm of parameter gradients
 
         Parameters
         ----------
         parameters
-            The parameters to clip
+            List of model parameters whose gradients need clipping
         max_norm
-            The value to clip by
-
-        Notes
-        -----
-        This method clips gradients on a per-parameter basis rather than globally, which can be
-        useful when different layers benefit from different clipping thresholds.
+            Maximum allowed norm for gradient vectors
         """
         with torch.no_grad():
             for param in parameters:
@@ -139,29 +125,23 @@ class GradClip:
                      method: T.Literal["autoclip", "global_norm", "norm", "value"],
                      autoclip_history: int) -> T.Callable[[list[nn.Parameter], float],
                                                           None | torch.Tensor]:
-        """ Obtain the correct function to clip the gradients based on the selected method
+        """ Get the appropriate gradient clipping function for the selected method
 
         Parameters
         ----------
-        method
-            The clipping method to use
-        autoclip_history
-            The history length for auto clipping
+        method : literal["autoclip", "global_norm", "norm", "value"]
+            The gradient clipping method to use
+        autoclip_history : int
+            History size for auto-clipping (only used when method="autoclip")
 
         Returns
         -------
-        The function used to clip the gradients
-
-        Notes
-        -----
-        Maps each method string to its corresponding clipping implementation. Autoclip uses a
-        custom AutoClipper that tracks gradient norms over time, while other methods use PyTorch's
-        built-in utilities or our per-parameter norm clipping implementation.
+        A callable that performs gradient clipping based on the selected method
 
         Raises
         ------
         ValueError
-            If an unrecognized method is provided
+            If an invalid clipper method is specified
         """
         methods: dict[str, T.Callable[[list[nn.Parameter], float], None | torch.Tensor]] = {
             "autoclip": AutoClipper(int(self._value * 10), history_size=autoclip_history),
@@ -176,74 +156,50 @@ class GradClip:
         return retval
 
     def __call__(self, parameters: list[nn.Parameter]) -> None:
-        """ Clip the given parameters by the chosen method
+        """ Apply gradient clipping to a list of model parameters
+
+        Executes the configured gradient clipping operation on the given parameters
 
         Parameters
         ----------
         parameters
-            The parameters to clip
-
-        Notes
-        -----
-        This is a callable wrapper that accepts parameters as a single argument. It uses
-        the `clipping_value` as the clipping threshold passed to the underlying clipper function.
-
-        Examples
-        --------
-        >>> grad_clipper = GradClip("global_norm", 1.0)
-        >>> grad_clipper(model.parameters())  # Clip all model gradients
+            List of model parameters whose gradients will be clipped
         """
         self._clipper(parameters, self._value)
 
 
 class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attributes
-    """ Object for managing the selected Torch optimizer
+    """ Main optimizer unit that manages training optimization operations
 
-    This unit wraps PyTorch optimizers with additional functionality: gradient accumulation,
-    mixed precision scaling (AMP), learning rate scheduling, warmup phases, and gradient clipping.
+    This unit handles configuration and execution of various optimizers, gradient clipping, mixed
+    precision training, parameter grouping, and state management for training processes. It
+    interfaces with the training loop to perform weight updates during each iteration
 
     Parameters
     ----------
     optimizer_name
-        The name of the optimizer to use ("adabelief", "adam", "adamw", "adamax", "lion", etc.)
+        Name of the optimizer to use (e.g., "adam", "adamw", "lion", etc.)
     model
-        The Torch model that is to be trained
-    learning_rate
-        The base learning rate. Default: 5e-5
-    epsilon_exponent
-        Log-space epsilon for Adam family optimizers. Default: -7
-    mixed_precision
-        ``True`` to use automatic mixed precision training with GradScaler. Default: ``False``
-    accumulation_steps
-        Gradient accumulation factor (processes N batches before optimizer step). Default: 1
-    clipper
-        Optional gradient clipping instance. Default: ``None``
-    weight_decay
-        L2 regularization coefficient applied to non-bias parameters. Default: 0.0
-    ada_beta_1
-        Beta1 parameter for Adam family optimizers (momentum). Default: 0.9
-    ada_beta_2
-        Beta2 parameter for Adam family optimizers (moving average of squared gradients).
-        Default: 0.999
-    ada_amsgrad
-        Whether to use AMSGrad variant for better stability with adaptive moments.
-        Default: ``False``
-
-    Notes
-    -----
-    This unit handles the complete optimization lifecycle including:
-
-    - Gradient accumulation across multiple batches before stepping
-    - Automatic mixed precision scaling when enabled
-    - Gradient clipping to prevent exploding gradients
-    - Learning Rate Finder integration for optimal LR discovery
-
-    Examples
-    --------
-    >>> opt_unit = OptimizerUnit("adamw", model, learning_rate=1e-4)
-    >>> opt_unit.on_start(training_loop)  # Move optimizer to device
-    >>> loss.backward()
-    >>> opt_unit.step(iteration=100)  # Perform optimization step
+        The model plugin containing parameters to optimize
+    learning_rate, optional
+        Base learning rate for the optimizer. Default: 5e-5
+    epsilon_exponent, optional
+        Exponent value used for epsilon in optimizers that support it. Default: -7
+    mixed_precision, optional
+        Whether to use mixed precision training (automatic scaling). Default: ``False``
+    accumulation_steps, optional
+        Number of gradient accumulation steps before updating parameters. Default: 1
+    clipper, optional
+        Gradient clipping configuration, if enabled. Default: ``None``
+    weight_decay, optional
+        L2 Weight decay coefficient for regularization on non-bias parameters. Default: 0.0
+    ada_beta_1, optional
+        Beta 1 (momentum) parameter for adaptive optimizers (Adam-style). Default: 0.9
+    ada_beta_2, optional
+        Beta 2 (moving average of squared gradients) parameter for adaptive optimizers (Adam-
+        style). Default: 0.999
+    ada_amsgrad, optional
+        Whether to use AMSGrad variant of adaptive optimizers. Default: ``False``
     """
     def __init__(  # pylint:disable=too-many-arguments,too-many-positional-arguments
             self,
@@ -287,18 +243,17 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                                               ada_amsgrad=ada_amsgrad)
         self.save = T.cast(T.Literal["always", "exit", "never"],
                            mod_cfg.Optimizer.save_optimizer())
-        """ When the optimizer should be saved """
 
         self._accumulation_count = 0
 
     def __repr__(self) -> str:
-        """ String representation for debugging and logging """
+        """ Return a string representation for logging purposes """
         params = ", ".join(f"{k}={v}" for k, v in self._repr_obj.items())
         return f"{self.__class__.__name__}({params})"
 
     @property
     def optimizer(self) -> Optimizer:
-        """ The current Torch Optimizer instance """
+        """ The configured PyTorch optimizer instance used for parameter updates """
         return self._optimizer
 
     # TODO keep this for weight porting
@@ -309,35 +264,26 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                               ada_beta_1: float = 0.9,
                               ada_beta_2: float = 0.999,
                               ada_amsgrad: bool = False) -> dict[str, T.Any]:
-        """ Obtain the keyword arguments for the requested optimizer from user configuration
+        """ Generate optimizer-specific keyword arguments for initializing the selected optimizer
 
         Parameters
         ----------
         name
-            The optimizer class name (not used directly but passed to constructor)
-        epsilon_exponent
-            Log-space epsilon value. Default: -7
-        weight_decay
-            L2 regularization coefficient. Default: 0.0
-        ada_beta_1
-            Beta1 for Adam family optimizers. Default: 0.9
-        ada_beta_2
-            Beta2 for Adam family optimizers. Default: 0.999
-        ada_amsgrad
-            Whether to use AMSGrad variant. Default: ``False``
+            Name of the optimizer being configured
+        epsilon_exponent, optional
+            Exponent value used for epsilon in optimizers that support it. Default: -7
+        weight_decay, optional
+            Weight decay coefficient for regularization. Default: 0.0
+        ada_beta_1, optional
+            Beta 1 parameter for adaptive optimizers (Adam-style). Default: 0.9
+        ada_beta_2, optional
+            Beta 2 parameter for adaptive optimizers (Adam-style). Default: 0.999
+        ada_amsgrad, optional
+            Whether to use AMSGrad variant of adaptive optimizers. Default: ``False``
 
         Returns
         -------
-        A dictionary of keyword arguments compatible with PyTorch optimizer constructors
-
-        Notes
-        -----
-        Different optimizers require different kwargs:
-
-        - Adam family (adam, adamw, adabelief): eps, betas, amsgrad
-        - RMSprop: eps only
-        - Adamax: eps and betas
-        - Lion/NAdam: no special kwargs beyond standard
+        Dictionary of optimizer configuration parameters kwargs
         """
         retval: dict[str, T.Any] = {"weight_decay": weight_decay}
 
@@ -362,37 +308,35 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                        ada_beta_1: float = 0.9,
                        ada_beta_2: float = 0.999,
                        ada_amsgrad: bool = False) -> torch.optim.Optimizer:
-        """ Create and configure the optimizer based on user settings
+        """ Instantiates an optimizer with appropriate parameters for the given model and options
 
         Parameters
         ----------
         name
-            The name of the optimizer to load ("adam", "adamw", etc.)
+            Name of the optimizer to create (e.g., "adam", "adamw")
         model
-            The Torch model that is to be trained
-        learning_rate
-            The base learning rate. Default: 5e-5
-        epsilon_exponent
-            Log-space epsilon for Adam family optimizers. Default: -7
-        weight_decay
-            L2 regularization coefficient applied to non-bias parameters. Default: 0.0
-        ada_beta_1
-            Beta1 parameter for Adam family optimizers. Default: 0.9
-        ada_beta_2
-            Beta2 parameter for Adam family optimizers. Default: 0.999
-        ada_amsgrad
-            Whether to use AMSGrad variant. Default: ``False``
+            The model plugin containing parameters to optimize
+        learning_rate, optional
+            Base learning rate for the optimizer. Default: 5e-5
+        epsilon_exponent, optional
+            Exponent value used for epsilon in optimizers that support it. Default: -7
+        weight_decay, optional
+            Weight decay coefficient for regularization. Default: 0.0
+        ada_beta_1, optional
+            Beta 1 parameter for adaptive optimizers (Adam-style). Default: 0.9
+        ada_beta_2, optional
+            Beta 2 parameter for adaptive optimizers (Adam-style). Default: 0.999
+        ada_amsgrad, optional
+            Whether to use AMSGrad variant of adaptive optimizers. Default: ``False``
 
         Returns
         -------
-        The configured PyTorch optimizer instance ready for training
+        The configured Torch optimizer instance
 
-        Notes
-        -----
-        Separates parameters into decay and no_decay groups based on:
-
-        - Non-bias tensors (requires weight decay)
-        - Bias terms and flattened layers (exempt from weight decay)
+        Raises
+        ------
+        ValueError
+            If an invalid optimizer name is specified
         """
         if name not in _OPTIMIZERS:
             raise ValueError(f"'{name}' is not a valid optimizer. Select from {list(_OPTIMIZERS)}")
@@ -414,26 +358,22 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
                                               list[nn.Parameter] | float],
                                          dict[T.Literal["params", "weight_decay"],
                                               list[nn.Parameter] | float]]:
-        """ Separate model parameters into decay and no_decay groups for optimizer
+        """ Divides model parameters into decay and no-decay groups to apply appropriate settings
+        (e.g. bias terms typically don't use weight decay).
 
         Parameters
         ----------
         model
-            The Torch model that is to be trained
+            The model plugin containing parameters to group
         weight_decay
-            L2 regularization coefficient applied to non-bias parameters
+            Weight decay coefficient for parameter groups
 
         Returns
         -------
-        A tuple of two parameter group dictionaries:
-        - Position 0: Parameters with weight decay (non-flat, non-bias)
-        - Position 1: Parameters without weight decay (bias, flattened layers)
-
-        Notes
-        -----
-        PyTorch optimizers expect parameters organized by regularization type. This method
-        automatically groups them based on dimensionality and parameter names to ensure proper
-        L2 regularization application.
+        decay
+            The parameters that support weight-decay
+        no_decay
+            The parameters that do not support weight-decay
         """
         decay, no_decay = [], []
         for name, param in model.named_parameters():
@@ -456,22 +396,16 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
 
     def _from_legacy(self,
                      state: dict[str, T.Any]) -> dict[str, T.Any] | None:
-        """ Populate remaining parameter groups from legacy Keras optimizer weights
+        """ Convert legacy Keras optimizer state to PyTorch format
 
         Parameters
         ----------
         state
-            The partial state_dict migrated from a Keras optimizer
+            The legacy state dictionary containing Keras optimizer data
 
         Returns
         -------
-        The final state_dict grouped for torch or ``None`` if weights could not be mapped
-
-        Notes
-        -----
-        This method handles the migration of legacy Keras optimizer states to PyTorch format. It
-        validates parameter counts and shapes before applying weights, returning None if any check
-        fails and warning users that training will restart with new initializations.
+        Converted state dictionary if successful, otherwise ``None`` if migration failed
         """
         # TODO move to legacy?
         logger.debug("%s Loading weights from legacy Keras optimizer", self.log_name)
@@ -504,52 +438,16 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
 
         return state
 
-    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
-        """ Load the serialized data from a state dict into this object
-
-        Parameters
-        ----------
-        state_dict
-            The serialized data to load (typically from a checkpoint file)
-
-        Notes
-        -----
-        Handles version 0.5 legacy Keras optimizer states by migrating them first, then loads:
-
-        - Optimizer weights and momentum buffers
-        - AMP GradScaler state when mixed precision is enabled
-        - Learning Rate Finder scheduler if resuming interrupted LRF session
-
-        Examples
-        --------
-        >>> opt_unit.load_state_dict(torch.load("checkpoint.pth"))  # Resumes from saved state
-        """
-        logger.debug("%s Loading state_dict: %s", self.log_name, list(state_dict))
-
-        if state_dict["version"] == 0.5:  # Migrating from keras optimizer
-            keras_state = self._from_legacy(state_dict)  # TODO validate
-            if keras_state is None:
-                return
-            state_dict = keras_state
-
-        self._optimizer.load_state_dict(T.cast(dict[str, T.Any], state_dict["optimizer"]))
-        if self._scaler is not None and state_dict.get("scaler") is not None:
-            logger.debug("%s Loading scaler state_dict: %s", self.log_name, state_dict["scaler"])
-            self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
-
     def on_start(self, loop: TrainStep) -> None:
-        """ Move the optimizer to the training device
+        """ Initialize optimizer state on the training device
+
+        Moves optimizer internal state tensors to the appropriate device  (CPU/GPU) for training
+        execution
 
         Parameters
         ----------
         loop
-            The active TrainStep instance. Used to access the shared device context.
-
-        Notes
-        -----
-        This method transfers all tensor state variables (momentum buffers, velocity terms, etc.)
-        from CPU to GPU when using CUDA or other accelerators. Essential for distributed training
-        and mixed precision setups where tensors must reside on the same device as parameters.
+            The training step object managing this unit's lifecycle
         """
         logger.debug("%s Moving optimizer to: %s", self.log_name, str(loop.device))
         for state in self._optimizer.state.values():
@@ -560,20 +458,13 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
     def backward(self, loss: torch.Tensor) -> None:
         """ Perform the optimizer's backward pass
 
+        Computes gradients and applies them to model parameters, handling mixed precision scaling
+        and gradient accumulation if enabled
+
         Parameters
         ----------
         loss
-            The loss scalar from the forward pass
-
-        Notes
-        -----
-        Applies gradient accumulation before computing gradients. When using mixed precision (AMP),
-        scales the loss appropriately to maintain numerical stability across training steps.
-
-        Notes
-        -----
-        Called once per batch before optimizer.step(). With gradient accumulation, this is called
-        multiple times before an actual optimization step occurs, with the loss scaled accordingly
+            The computed loss value from the forward pass for backpropagation
         """
         scaled = loss / self._accumulation_steps
         if self._scaler:
@@ -581,23 +472,20 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         else:
             scaled.backward()
 
-    def step(self, iteration: int) -> None:
-        """ Perform the optimizer step if valid and zero the gradients
+    def step(self, iteration: int) -> None:  # pylint:disable=unused-argument
+        """ Execute one optimization step
+
+        Performs:
+            - Gradient accumulation scaling
+            - Gradient clipping (if configured)
+            - Loss scaling/unscaling if mixed precision enabled
+            - Updates model parameters
+            - Zeros gradients for the next forward pass
 
         Parameters
         ----------
         iteration
-            The current total iteration count
-
-        Notes
-        -----
-        This method orchestrates the complete optimization cycle including:
-
-        1. Gradient accumulation check (only steps every N batches)
-        2. Unscales gradients when using AMP for accurate updates
-        3. Applies gradient clipping if configured (prevents exploding gradients)
-        4. Performs optimizer step with optional scaler update
-        5. Zeros gradients in preparation for next iteration
+            The current training iteration number
         """
         self._accumulation_count += 1
         if self._accumulation_count != self._accumulation_steps:
@@ -617,41 +505,58 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
         self._optimizer.zero_grad(set_to_none=True)
         self._accumulation_count = 0
 
-    def state_dict(self) -> dict[str, T.Any]:
-        """ Serialize the optimizer and related state for saving to checkpoint
+    def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
+        """ Load optimizer state from a saved checkpoint
 
-        Returns
-        -------
-        A dictionary containing:
+        Restores the optimizer's internal state including parameter groups, gradient information
+        and scaler information from a previously saved state dictionary
 
-        - version: The serialization format version (1.0)
-        - optimizer: Complete optimizer state including momentum buffers
-        - scaler: AMP GradScaler state when mixed precision is enabled
+        Parameters
+        ----------
+        state_dict
+            The state dictionary containing optimizer configuration and state data
 
         Notes
         -----
-        This method captures all trainable state needed to resume training from a checkpoint,
-        including gradient accumulators and learning rate schedules.
+        Handles migration from legacy Keras-based optimizers if needed
+        """
+        logger.debug("%s Loading state_dict: %s", self.log_name, list(state_dict))
+
+        if state_dict["version"] == 0.5:  # Migrating from keras optimizer
+            keras_state = self._from_legacy(state_dict)  # TODO validate
+            if keras_state is None:
+                return
+            state_dict = keras_state
+
+        self._optimizer.load_state_dict(T.cast(dict[str, T.Any], state_dict["optimizer"]))
+        if self._scaler is not None and state_dict.get("scaler") is not None:
+            logger.debug("%s Loading scaler state_dict: %s", self.log_name, state_dict["scaler"])
+            self._scaler.load_state_dict(T.cast(dict[str, T.Any], state_dict["scaler"]))
+
+    def state_dict(self) -> dict[str, T.Any]:
+        """ Create a state dictionary for saving optimizer state
+
+        Generates a complete state dictionary containing the optimizer's configuration and internal
+        state information, including any scalers that have been applied for mixed precision
+        training
+
+        Returns
+        -------
+        Dictionary containing optimizer state that can be saved to disk
         """
         return {"version": 1.0,
                 "optimizer": self._optimizer.state_dict(),
                 "scaler": None if self._scaler is None else self._scaler.state_dict()}
 
     def set_lr(self, lr: float) -> None:
-        """ Manually assign the optimizer's learning rate with the given value
+        """ Set a new learning rate for all parameter groups
+
+        Updates the learning rate for all optimizer parameter groups
 
         Parameters
         ----------
         lr
-            The learning rate to apply to all parameter groups
-
-        Notes
-        -----
-        Updates both current and initial learning rates if they exist.
-
-        Examples
-        --------
-        >>> optimizer.set_lr(1e-3)  # Set to 0.001 for faster convergence phase
+            The new learning rate value to set
         """
         logger.debug("%s Setting learning rate to: %s", self.log_name, lr)
         for p in self._optimizer.param_groups:
