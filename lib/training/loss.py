@@ -22,21 +22,56 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BatchLoss:
-    """Dataclass for holding Loss values for a batch of data"""
+    """Stores loss values and metadata for a single training batch
+
+    This dataclass holds the unweighted and weighted loss computations for all configured loss
+    functions during one forward pass. It provides lazy computation of total loss via the .total
+    property, which sums contributions from spatial losses, non-spatial losses, and optional mask
+    penalties. The stored values are detached tensors following the backwards pass
+
+    Parameters
+    ----------
+    unweighted
+        List of dictionaries mapping loss function names to their raw (unweighted) tensor losses.
+        Each dictionary corresponds to one sample in the batch, with keys being loss function
+        identifiers and values being scalar loss tensors for that sample
+    weighted
+        List of dictionaries mapping loss function names to their weighted tensor losses.
+        Each entry is multiplied by its corresponding weight from LossCollator configuration,
+        allowing differential emphasis on different loss components during optimization
+    mask
+        Optional mask loss tensor computed when `learn_mask` is enabled
+
+    Notes
+    -----
+    The total property is computed lazily on first access via the @property decorator. This
+    avoids unnecessary loss computation if the value isn't needed
+
+    The detach() method recursively detaches all tensors
+
+    The to_cpu() method is typically called after loss evaluation completes to free up GPU
+    memory before the next iteration begins.
+    """
+
     unweighted: list[dict[str, torch.Tensor]]
-    """For each side output, the unweighted loss scalars for each function for each item in the
-    batch"""
+    """ List of dictionaries mapping loss function names to their raw (unweighted) tensor losses.
+    Each dictionary corresponds to one sample in the batch, with keys being loss function
+    identifiers and values being scalar loss tensors for that sample """
+
     weighted: list[dict[str, torch.Tensor]]
-    """For each side output, the weighted loss scalars for each function for each item in the
-    batch"""
+    """ List of dictionaries mapping loss function names to their weighted tensor losses.
+    Each entry is multiplied by its corresponding weight from LossCollator configuration,
+    allowing differential emphasis on different loss components during optimization """
+
     mask: torch.Tensor | None = None
-    """The loss scalar for the mask for each item in the batch if learn_mask is selected otherwise
-    ``None``. Default: ``None``"""
+    """ Optional mask loss tensor computed when `learn_mask` is enabled """
+
     _total: torch.Tensor | None = field(init=False, default=None)
 
     @property
     def total(self) -> torch.Tensor:
-        """The total single weighted loss scalar for all items in the batch for backprop"""
+        """ Computed sum of all weighted losses plus optional mask contribution. Lazily evaluated
+        on first access to avoid unnecessary computation if not needed """
         if self._total is None:
             total = T.cast(torch.Tensor, sum(sum(y.mean() for y in x.values())
                                              for x in self.weighted))
@@ -47,13 +82,24 @@ class BatchLoss:
 
     def get_contributions(self) -> dict[T.Literal["unweighted", "weighted"],
                                         dict[str, torch.Tensor]]:
-        """Obtain the contributions of each loss function to the total loss score for both weighted
-        both weighted and unweighted scores
+        """ Extract mean contributions from each loss function
+
+        Computes average contribution per loss function across all batch samples and groups
+        results into unweighted and weighted categories. Identity losses (if present) are
+        extracted separately from the last sample if they exist in that position. All values
+        are detached to prevent backpropagation through this computation.
 
         Returns
         -------
-        weighted and unweighted total contributions to the final loss cost
+        Dictionary with keys "unweighted" and "weighted", each mapping loss function names
+        (strings) to their mean contribution tensors across the batch
+
+        Notes
+        -----
+        Identity losses are special-cased when they appear in the last position of either
+        unweighted or weighted lists, as these represent identity-based comparison metrics
         """
+        # TODO check whether detaching is necessary here, or if we are already detached
         unweighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.unweighted)).detach()
                       for k in self.unweighted[0]}
         weighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.weighted)).detach()
@@ -64,7 +110,19 @@ class BatchLoss:
         return {"unweighted": unweighted, "weighted": weighted}
 
     def detach(self) -> T.Self:
-        """Detaches all contained loss values"""
+        """ Detach all stored tensors from computation graph
+
+        Recursively detaches the cached total loss and all entries in unweighted/weighted
+        dictionaries as well as any mask tensor. Returns self for chaining
+
+        Returns
+        -------
+        Self reference after detachment (enables method chaining)
+
+        Notes
+        -----
+        Called at the end of each Optimizer backwards step
+        """
         self._total = None if self._total is None else self._total.detach()
         self.unweighted = [{k: v.detach() for k, v in x.items()} for x in self.unweighted]
         self.weighted = [{k: v.detach() for k, v in x.items()} for x in self.weighted]
@@ -72,11 +130,19 @@ class BatchLoss:
         return self
 
     def to_cpu(self) -> T.Self:
-        """Detaches all contained loss values and moves them to CPU
+        """ Move all stored tensors to CPU memory.
+
+        Detaches and transfers all loss tensors from GPU to CPU after computation completes,
+        freeing up valuable GPU VRAM for the next iteration's batch processing. Returns self
+        for chaining with other methods like detach()
 
         Returns
         -------
-        This object with all tensors detached and moved to CPU
+        Self reference after moving to CPU (enables method chaining)
+
+        Notes
+        -----
+        Called at the end of each Optimizer backwards step
         """
         self._total = None if self._total is None else self._total.detach().cpu()
         self.unweighted = [{k: v.detach().cpu() for k, v in x.items()} for x in self.unweighted]
@@ -86,26 +152,65 @@ class BatchLoss:
 
 
 class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
-    """Compiles the chosen loss functions and calculates the values in the training loop
+    """ Configures and computes weighted/unweighted loss functions for training
+
+    LossCollator inherits from nn.Module to provide the standard PyTorch forward() interface,
+    enabling integration with DataLoader collators and training loops. It configures all loss
+    functions specified in user configuration, applies appropriate weights, handles
+    spatial vs non-spatial losses based on output dimensions, and manages mask-based penalties
+    for face/eye/mouth regions when enabled
+
+    The collator distinguishes between:
+        - Spatial losses : Return per-pixel or region-wise loss (N, C, H, W) shape
+        - Non-spatial losses: Return scalar loss values (N,) shape across batch
+
+    This distinction affects how each loss contributes to gradient computation during
+    backpropagation.
 
     Parameters
     ----------
     functions
-        List of lost function names from configuration file to collate for loss calculation
+        List of loss function names from user config. Names must be valid identifiers recognized by
+        get_loss_function() or will be ignored if weight <= 0
     weights
-        List of weights, corresponding to the the list of functions, to apply to each loss function
+        Corresponding weight values for each loss function. Only functions with positive weights
+        are included in training computation. Zero-weighted functions are configured but excluded
+        from loss summation
     color_order
-        The color order that the model is training in
+        Either "bgr" (default) or "rgb" depending on input image channel order configuration.
+        Affects how loss functions interpret color channels during comparison operations
     use_mask
-        ``True`` if loss should be masked as `penalize mask loss` has been selected
+        Whether a mask is used for training, be it for penalized mask loss, region multipliers or
+        the model is learning a mask
     eye_multiplier
-        The amount of extra weighting to apply to the eye area
+        Multiplier factor applied to eye region losses if > 1.0. Combined with use_mask=True
+        to emphasize eye alignment during training by increasing their gradient contribution
     mouth_multiplier
-        The amount of extra weighting to apply to the mouth area
+        Multiplier factor applied to mouth region losses if > 1.0. Works similarly to
+        eye_multiplier but for mouth alignment emphasis when mask_mouth is available in metadata
     smallest_output
-        The smallest output from the model. Required for initializing some loss functions
+        Width/height of the smallest output tensor among all loss functions. Used to create
+        dummy tensors during function type detection (spatial vs non-spatial classification)
     mask_loss
-        The loss function to use if learn_mask is enabled. Default: ``None`` (not enabled)
+        Optional name of additional mask-based loss function (e.g., "mae", "mse"). If provided,
+        this loss is configured separately and computed for the 'learn_mask' additional output
+
+    Notes
+    -----
+    Loss function registration: Functions with weight <= 0.0 are silently skipped during
+    initialization to allow config flexibility without breaking training if certain loss types
+    aren't desired
+
+    Spatial vs Non-Spatial classification is performed once during __init__ using dummy tensors
+    shaped (1, 3, smallest_output, smallest_output). This categorization determines how each loss
+    contributes gradients - spatial losses sum across pixels first, non-spatial losses accumulate
+    directly as scalars per batch item
+
+    Mask handling: When use_mask=True and meta.mask_face is available, face regions are multiplied
+    by mask values before loss computation. Eye/mouth multipliers add weighted penalties
+    proportional to mask overlap for those specific regions if their masks exist in metadata
+
+    Mask-based loss (mask_loss parameter): Only computed when learn_mask is enabled
     """
     def __init__(self,
                  functions: list[str],
@@ -134,7 +239,7 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
             )
 
     def __repr__(self) -> str:
-        """Pretty print for logging"""
+        """ Return a string representation for logging purposes """
         params = {"functions": list(self._functions),
                   "weights": list(self._weights.values())}
         params |= {k[1:]: v for k, v in self.__dict__.items()
@@ -146,28 +251,28 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
     def _configure_functions(self,
                              names: list[str],
                              weights: list[float]) -> tuple[nn.ModuleDict, dict[str, float]]:
-        """Configure the selected loss functions and send to the correct device
+        """ Configure and initialize loss function modules from configuration values
 
         Parameters
         ----------
         names
-            List of lost function names from configuration file to collate for loss calculation
+            List of loss function names from user config to use
         weights
-            List of weights, corresponding to the the list of functions, to apply to each loss
-            function
+            List of weight values corresponding to each name
 
         Returns
         -------
         functions
-            ModuleDict of configured loss functions
-        weights
-            dict of loss names to weight to apply
+            nn.ModuleDict keyed by function names with the loss function instances as values
+        weight_mapping
+            Dictionary mapping function names to their weight multipliers
 
         Raises
         ------
         ValueError
-            If the number of function names and loss weights do not correspond
+            If len(names) != len(weights), indicating mismatched configuration
         """
+
         if len(names) != len(weights):
             raise ValueError(f"Number of loss functions ({len(names)}) and weights "
                              f"({len(weights)}) should match")
@@ -185,15 +290,19 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
         return functions, weight_dict
 
     def _get_function_types(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Run a small tensor through each of the selected loss functions to determine which are
-        spatial or non-spatial loss functions
+        """ Classify loss functions as spatial or non-spatial based on output dimensions
 
         Returns
         -------
         spatial
-            Tuple of loss names that produce spatial output
+            The function names of the spatial loss functions
         non_spatial
-            Tuple of loss names that produce non-spatial output
+            The function names of the non-spatial loss functions
+
+        Raises
+        ------
+        RuntimeError
+            If any loss function returns output with ndim other than 1 or 4
         """
         size = self._smallest_output
         dummy_a = torch.rand((1, 3, size, size), dtype=torch.float32)
@@ -218,22 +327,23 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                           y_true: torch.Tensor,
                           meta: BatchMeta,
                           index: int) -> dict[str, torch.Tensor]:
-        """Obtain the unweighted loss values for the spatial loss functions
+        """ Compute losses for spatial loss functions with optional mask/eye/mouth multipliers
 
         Parameters
         ----------
         y_pred
-            The batch of model predictions
+            Tensor of predicted feature maps from encoder (shape: [batch, channels, ...])
         y_true
-            The ground truth batch of images
+            Tensor of ground truth feature maps for comparison (same shape as y_pred)
         meta
-            The meta information for the batch
+            Batch metadata containing mask_face, mask_eye, mask_mouth tensors if available
         index
-            The output index for obtaining the correct meta data for the processing output
+            Sample index within the batch for accessing per-sample masks and metadata
 
         Returns
         -------
-        The unweighted loss scalar for each loss function with masks and multipliers applied
+        Dictionary mapping loss function names to their computed mean loss values averaged over
+        spatial dimensions
         """
         retval: dict[str, torch.Tensor] = {}
         for name in self._spatial:
@@ -254,25 +364,25 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                            meta: BatchMeta,
                            index: int
                            ) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], list[float]]:
-        """For non spatial loss functions the inputs need to be masked for each supplied masks
+        """ Prepare masked input pairs for non-spatial loss computation
 
         Parameters
         ----------
         y_pred
-            The batch of model predictions
+            Tensor of predicted feature maps (shape: [batch, channels, ...])
         y_true
-            The ground truth batch of images
+            Tensor of ground truth feature maps for comparison
         meta
-            The meta information for the batch
+            Batch metadata containing mask_face, mask_eye, mask_mouth tensors if available
         index
-            The output index for obtaining the correct meta data for the processing output
+            Sample index within batch for accessing per-sample mask data
 
         Returns
         -------
-        inputs
-            The (y_pred, y_true) inputs to the loss function for each supplied mask
-        weights
-            The weight to be applied for each masked input
+        masked_input
+            List of (masked_pred, masked_truth) pairs ready for feeding non-spatial loss functions
+        multipliers
+            List of weight multipliers for each input pair
         """
         weights = [1.0]
         assert meta.mask_face is not None
@@ -294,22 +404,22 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                               y_true: torch.Tensor,
                               meta: BatchMeta,
                               index: int) -> dict[str, torch.Tensor]:
-        """Obtain the unweighted loss values for the non-spatial loss functions
+        """ Compute losses for non-spatial loss functions using raw or masked inputs
 
         Parameters
         ----------
         y_pred
-            The batch of model predictions
+            Tensor of predicted feature maps from encoder (shape: [batch, channels, ...])
         y_true
-            The ground truth batch of images
+            Tensor of ground truth feature maps for comparison
         meta
-            The meta information for the batch
+            Batch metadata containing mask tensors if use_mask is enabled
         index
-            The output index for obtaining the correct meta data for the processing output
+            Sample index within batch for accessing per-sample mask data or skipping masking
 
         Returns
         -------
-        The unweighted loss scalar for each loss function with masks and multipliers applied
+        Dictionary mapping non-spatial loss function names to their computed scalar loss values
         """
         retval: dict[str, torch.Tensor] = {}
         if not self._use_mask:
@@ -330,21 +440,36 @@ class LossCollator(nn.Module):  # pylint:disable=too-many-instance-attributes
                 y_pred_all: list[torch.Tensor],
                 y_true_all: list[torch.Tensor],
                 meta: BatchMeta) -> BatchLoss:
-        """Call the loss functions, reduce to batch dimension, apply masks and weighting and obtain
-        the weighted and unweighted per function values and the weighted total loss scalar
+        """ Execute the full training step for a complete batch.
+
+        Iterates through each sample in the batch computing spatial and non-spatial losses
+        separately, accumulating results into unweighted/weighted lists. For samples with single-
+        channel targets (binary masks), computes mask_loss using configured mask_loss_function if
+        available instead of standard losses. Returns BatchLoss dataclass containing all computed
+        values for later use by LossUnit or optimizer callbacks
 
         Parameters
         ----------
         y_pred_all
-            The ground truth batch of images for all outputs for a side of the model
+            List of predicted output tensors from each side of the model
         y_true_all
-            The batch of model predictions for all outputs for a side of the model
+            List of ground truth tensors, matching length and order with y_pred_all
         meta
-            The meta information for the batch
+            BatchMeta object containing mask_face, mask_eye, mask_mouth for all samples in the
+            batch
 
         Returns
         -------
-        The loss scalars for the batch
+        Dataclass instance containing:
+            - unweighted list of loss dictionaries
+            - weighted list of loss dictionaries (same structure, weights applied)
+            - mask tensor (if mask_loss was computed during forward pass)
+
+        Notes
+        -----
+        Spatial losses are summed across their output dimensions first before being added to the
+        running total. Non-spatial losses maintain scalar form and are stacked then summed across
+        samples. The mask_loss only gets returned in BatchLoss.mask if learn_mask is enabled
         """
         all_unweighted: list[dict[str, torch.Tensor]] = []
         all_weighted: list[dict[str, torch.Tensor]] = []

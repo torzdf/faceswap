@@ -388,7 +388,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         self._units.add_unit(loss_unit, is_core=True)
         self._units.add_unit(EventUnit(events), is_core=True)
 
-        if snapshot_interval > 0:
+        if snapshot_interval > 0:  # TODO this is an optional unit
             self._units.add_unit(SnapshotUnit(self._model, self.optimizer_unit, snapshot_interval),
                                  is_core=True)
 
