@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-""" Package for handling alignments files, detected faces and aligned faces along with their
-associated objects. """
+""" Responsible for Faceswap's training loop """
 from __future__ import annotations
 import typing as T
 

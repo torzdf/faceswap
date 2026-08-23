@@ -1,5 +1,19 @@
-#!/usr/bin python3
-"""Main entry point to the training process of FaceSwap """
+#! /usr/env/bin/python3
+"""Main training script entry point that orchestrates model training including preview display and
+GUI interaction
+
+This module serves as the command-line interface for running Faceswap training sessions. It
+handles:
+    - Model loading from checkpoints or fresh initialization via FaceswapModel
+    - Data loader setup with augmentation, flipping, warping options
+    - Trainer instantiation (original/distributed) based on hardware configuration
+    - Training loop construction with configurable save intervals and snapshot frequencies
+    - Preview interface management for real-time visualization during training
+
+The script uses the :class:`lib.training.training_loop.TrainingLoop` class to run training in a
+background thread while providing interactive controls via keyboard input or GUI triggers (mask
+toggle, refresh preview)
+"""
 from __future__ import annotations
 import logging
 import os
@@ -41,6 +55,41 @@ logger = logging.getLogger(__name__)
 
 
 class PreviewInterface():
+    """ Manages real-time preview display during training via multiple output modes
+
+    PreviewInterface orchestrates how training previews are displayed to users through three
+    possible mechanisms that can be combined based on CLI flags:
+        - write_preview : Saves PNG images to disk (training_preview.png) for later inspection
+        - gui_preview   : Writes previews to cache directory accessed by GUI for display
+        - show_preview  : Launches FSThread displaying previews in window with interactive controls
+
+    Thread Safety:
+    ----------
+    The PreviewUnit generates previews during training iterations and sets them via TrainingEvents.
+    This class reads from events.get_preview() which is thread-safe (protected by lock in
+    TrainingEvents). Console preview runs in separate FSThread to avoid blocking main training loop
+    with display operations
+
+    Parameters
+    ----------
+    show_preview
+        Whether to launch console-based preview viewer with keyboard controls for interactive
+        training monitoring
+    write_preview
+        Whether to save each preview as PNG file at fixed disk path for later inspection
+    gui_preview
+        Whether to write preview images to GUI cache directory so they can be displayed in the GUI
+    training_events
+        Event system object providing thread-safe access to previews generated during training
+        iterations
+
+    Notes
+    -----
+    The PreviewUnit generates previews during training iterations and stores them in
+    TrainingEvents. We retrieve and clear the preview atomically via get_preview(), then pass to
+    each action. Console preview allows interactive controls ('S' save now, 'R' refresh, 'M' toggle
+    mask, etc.) for monitoring
+    """
     def __init__(self,
                  show_preview: bool,
                  write_preview: bool,
@@ -60,6 +109,21 @@ class PreviewInterface():
 
     def _get_actions(self, show_preview: bool, write_preview: bool, gui_preview: bool
                      ) -> list[T.Callable]:
+        """ Build list of action functions to invoke for each preview image
+
+        Parameters
+        ----------
+        show_preview
+            Whether to include console display action that adds images to PreviewBuffer for viewing
+        write_preview
+            Whether to include disk write action that saves PNG at fixed path for later inspection
+        gui_preview
+            Whether to include GUI cache write action that stores image for GUI display
+
+        Returns
+        -------
+        Filtered list of action function references based on enabled modes
+        """
         retval = []
         if write_preview:
             retval.append(self._write_preview)
@@ -71,7 +135,12 @@ class PreviewInterface():
         return retval
 
     def _launch_thread(self) -> FSThread | None:
-        """ Launch Preview window inside thread """
+        """ Launch background thread for console preview display
+
+        Returns
+        -------
+        Reference to newly started background thread, or ``None`` if preview is disabled
+        """
         thread = FSThread(target=Preview,
                           name="preview",
                           args=(self._display_buffer, ),
@@ -80,7 +149,18 @@ class PreviewInterface():
         return thread
 
     def shutdown(self) -> None:
-        """ Shutdown the Preview interface """
+        """ Signal preview thread to terminate gracefully by setting shutdown trigger event
+
+        Called during training loop cleanup when all iterations complete or exit is requested.
+        Checks if display_thread exists before attempting shutdown - prevents AttributeError on
+        PreviewInterface instances where show_preview=False was initially set
+
+        Notes
+        -----
+        The shutdown trigger in signals the background Preview thread to read and terminate cleanly
+        without force-killing process. This allows proper cleanup of memory and file handles
+        associated with preview operations
+        """
         if self._display_thread is None:
             return
         logger.debug("[PreviewInterface] Sending shutdown to preview viewer")
@@ -88,6 +168,13 @@ class PreviewInterface():
 
     @classmethod
     def _write_preview(cls, image: npt.NDArray[np.uint8]) -> None:
+        """ Save preview image as PNG file at fixed disk path for later inspection
+
+        Parameters
+        ----------
+        image
+            Preview image tensor of shape (height, width, 3) in RGB format ready for saving
+        """
         logger.debug("[PreviewInterface] Saving preview to disk")
         img = "training_preview.png"
         img_file = os.path.join(PROJECT_ROOT, img)
@@ -96,6 +183,13 @@ class PreviewInterface():
 
     @classmethod
     def _gui_preview(cls, image: npt.NDArray[np.uint8]) -> None:
+        """ Write preview to GUI cache directory for display in main training window
+
+        Parameters
+        ----------
+        image
+            Preview image tensor of shape (height, width, 3) ready for the GUI
+        """
         logger.debug("[PreviewInterface] Generating preview for GUI")
         img = TRAINING_PREVIEW
         img_file = os.path.join(PROJECT_ROOT, "lib", "gui", ".cache", "preview", img)
@@ -103,6 +197,13 @@ class PreviewInterface():
         logger.debug("[PreviewInterface] Generated preview for GUI: '%s'", img_file)
 
     def _show_preview(self, image: npt.NDArray[np.uint8]) -> None:
+        """ Add preview image with text header to console display buffer for interactive viewing
+
+        Parameters
+        ----------
+        image
+            Preview image tensor of shape (height, width, 3) in RGB format ready for display
+        """
         assert self._display_buffer is not None
         preview_text = ("Training - 'S': Save Now. 'R': Refresh Preview. 'M': Toggle Mask. 'F': "
                         "Toggle Screen Fit-Actual Size. 'ENTER': Save and Quit")
@@ -110,6 +211,19 @@ class PreviewInterface():
         self._display_buffer.add_image(preview_text, image)
 
     def __call__(self) -> None:
+        """ Main entry point invoked each iteration - retrieve preview and call all registered
+        actions
+
+        Called by the monitoring loop (main thread) after each iteration completes. Retrieves
+        latest preview from TrainingEvents.get_preview() which atomically reads and clears the
+        preview buffer ready for the next generated preview. If no preview available, returns early
+        without performing any operations. Otherwise iterates through all registered actions and
+        calls each with preview image as argument
+
+        Notes
+        -----
+        This method is called by the monitoring loop in the main thread
+        """
         preview = self._events.get_preview()
         if preview is None:
             return
@@ -124,19 +238,42 @@ class PreviewInterface():
 
 
 class Train():
-    """The Faceswap Training Process.
+    """ Main training orchestrator that builds model, configures loop, and runs training session
 
-    The training process is responsible for training a model on a set of source faces and a set of
-    destination faces.
+    Train is the entry point class for running Faceswap model training from command line arguments.
+    It handles all initialization steps including model loading, data loader setup, trainer
+    instantiation (original/distributed), optional units registration (LRFinder, Warmup,
+    TensorBoard, Preview, Timelapse), and interactive monitoring loop with keyboard controls or GUI
+    file triggers
 
-    The training process is self contained and should not be referenced by any other scripts, so it
-    contains no public properties.
+    The class wraps TrainingLoop functionality within a monitoring process that provides real-time
+    feedback via console preview (optional) and allows users to interact during training by
+    pressing keys ('S' save now, 'ENTER' quit, etc.) when running without GUI redirect mode enabled
+
+    Execution Flow:
+    ---------------
+    1. __init__()  : Parse arguments, build model summary output if requested, create training
+    loop and preview interface
+    2. process()   : Start background training thread, enter monitoring loop with periodic checks
+    and user input handling
+    3. Cleanup     : Join background thread when training completes or exits early due to
+    interrupt/quit request
 
     Parameters
     ----------
     arguments
-        The arguments to be passed to the training process as generated from Faceswap's command
-        line arguments
+        Parsed command-line arguments containing all CLI options (model name, batch size,
+        iterations, preview settings, etc.)
+
+    Notes
+    -----
+    The _output_summary method allows inspecting model architecture without running full training -
+    useful for verifying loaded configuration before committing to long training sessions (can take
+    hours/days depending on batch size and iteration count)
+
+    Distributed trainer requires at least 2 GPUs otherwise falls back to original trainer
+    automatically with warning logged. This prevents silent failures when user specifies
+    distributed mode but only single GPU available in system configuration
     """
     def __init__(self, arguments: argparse.Namespace) -> None:
         logger.debug(parse_class_init(locals()))
@@ -156,7 +293,17 @@ class Train():
     # BUILD MODEL + SUMMARY OUTPUT
     @classmethod
     def _output_summary(cls, args: argparse.Namespace) -> FaceswapModel:
-        """ Output or log a summary of the model. Exit if model summary option was selected """
+        """ Load model and optionally display summary information and exit immediately
+
+        Parameters
+        ----------
+        args
+            Parsed command-line arguments
+
+        Returns
+        -------
+        Loaded or created model instance ready for training (or exits early if --summary requested)
+        """
         model = FaceswapModel(name=args.trainer,
                               model_dir=args.model_dir,
                               num_identities=len([args.input_a, args.input_b]),
@@ -171,12 +318,33 @@ class Train():
     # TRAINER SETUP
     @classmethod
     def _get_gui_triggers(cls) -> dict[T.Literal["mask", "refresh"], str]:
+        """ Build dictionary of GUI trigger file paths for mask toggle and preview refresh
+
+        Returns
+        -------
+        Dictionary mapping trigger type names to their corresponding cache file paths
+        """
         gui_cache = os.path.join(PROJECT_ROOT, "lib", "gui", ".cache")
         return {"mask": os.path.join(gui_cache, ".preview_mask_toggle"),
                 "refresh": os.path.join(gui_cache, ".preview_trigger")}
 
     @classmethod
     def _get_trainer(cls, model: ModelPlugin, batch_size: int, distributed: bool) -> TrainerPlugin:
+        """ Instantiate trainer plugin (original/distributed) based on hardware configuration
+
+        Parameters
+        ----------
+        model
+            The loaded neural network module whose parameters will be optimized during training
+        batch_size
+            Number of face samples per-side processed per forward/backward pass.
+        distributed
+            Whether user requested distributed data parallel training
+
+        Returns
+        -------
+        Instantiated trainer plugin either "original" (default) or "distributed"
+        """
         trainer = "distributed" if distributed else "original"
         if trainer == "distributed":
             import torch  # pylint:disable=import-outside-toplevel
@@ -199,6 +367,35 @@ class Train():
                     warp: bool,
                     warp_to_landmarks: bool,
                     sampler: type[RandomSampler] | type[DistributedSampler]) -> TrainLoader:
+        """ Create data loader with specified augmentation options and sampling strategy
+
+        Parameters
+        ----------
+        input_folders
+            List of input directory paths containing extracted faces for training
+        input_size
+            Target image size after preprocessing - all feed images resized to this dimension
+        batch_size
+            Number of samples per side per training iteration
+        output_shapes
+            List of target shape tuples for each face encoding output (channels, height, width)
+        is_rgb
+            Whether input images should be loaded in RGB color order or BGR format
+        augment_color
+            Whether to apply random color jittering (brightness/contrast/saturation changes)
+        flip
+            Whether to apply random horizontal flipping during preprocessing
+        warp
+            Whether to apply affine transformation warping
+        warp_to_landmarks : bool
+            Whether to cache landmark coordinates during preprocessing for "warp-to-landmarks"
+        sampler
+            The sampler to use for shuffling data
+
+        Returns
+        -------
+        Configured data loader instance ready to yield batches for training
+        """
         out_sizes = [[x[1] for x in side if x[0] != 1] for side in output_shapes]
         num_sides = len(input_folders)
 
@@ -222,11 +419,21 @@ class Train():
 
     @classmethod
     def _validate_timelapse(cls, args: argparse.Namespace) -> bool:
-        """ Validate timelapse settings
+        """ Validate timelapse folder inputs exist and contain valid extracted faces
+
+        Parameters
+        ----------
+        args
+            Parsed command-line arguments containing timelapse_input_a, timelapse_input_b paths
 
         Returns
         -------
-        ``True`` if timelapse is enabled and valid otherwise ``False``
+        ``True`` if validation passes (both folders exist with valid PNG images)
+
+        Raises
+        ------
+        FaceswapError
+            If only one timelapse folder provided instead of both required for pair-wise comparison
         """
         if not args.timelapse_input_a and not args.timelapse_input_b:
             return False
@@ -265,6 +472,19 @@ class Train():
                         model: FaceswapModel,
                         images: list[str],
                         args: argparse.Namespace) -> None:
+        """ Register optional training units based on CLI flag configuration
+
+        Parameters
+        ----------
+        loop
+            The training loop instance whose add_unit() method will be called for each unit
+        model
+            Model instance providing name and path references needed by some units
+        images
+            Input folder paths used by PreviewUnit to generate training previews
+        args
+            CLI arguments containing all flag values determining which units to register
+        """
         if args.use_lr_finder:
             loop.add_unit(LRFinderUnit(start_lr=1e-9, end_lr=1e-2))
 
@@ -285,11 +505,18 @@ class Train():
             loop.add_unit(TimelapseUnit(model, in_, out))
 
     def _get_training_loop(self, model: FaceswapModel, args: argparse.Namespace) -> TrainingLoop:
-        """ Load the trainer requested for training.
+        """ Build complete training loop with data loader and trainer and add all optional units
+
+        Parameters
+        ----------
+        model
+            Model instance providing plugin reference for trainer instantiation
+        args
+            CLI arguments containing trainer setup options
 
         Returns
         -------
-        The model training loop with the requested trainer plugin loaded for the requested model
+        Fully configured training loop instance ready to start background thread execution
         """
         logger.debug("[Train] Loading TrainingLoop")
 
@@ -318,7 +545,7 @@ class Train():
 
     # ## MAIN LOOP ##
     def _output_startup_info(self) -> None:
-        """Print the startup information to the console."""
+        """ Print startup banner with instructions for keyboard controls if running in console """
         logger.debug("[Train] Launching Monitor")
         logger.info("===================================================")
         logger.info("  Starting")
@@ -332,7 +559,13 @@ class Train():
         logger.info("===================================================")
 
     def _process_gui_triggers(self, events: TrainingEvents) -> None:
-        """Check whether a file drop has occurred from the GUI to manually update the preview. """
+        """ Monitor GUI trigger files for mask toggle or refresh requests and set events
+
+        Parameters
+        ----------
+        events
+            Event object whose events can be set to signal to the training loop
+        """
         if not self._args.redirect_gui:
             return
 
@@ -348,12 +581,14 @@ class Train():
                     logger.info("Refresh preview requested...")
 
     def _check_keypress(self, keypress: KBHit, training_events: TrainingEvents) -> None:
-        """ Process any keypresses to training loop events
+        """ Check for user keyboard input to control training behavior.
 
         Parameters
         ----------
         keypress
-            The keypress monitor
+            Keyboard hit object providing getch() and kbhit() methods for detecting keypresses
+        training_events
+            Event system allowing communication between main and training threads
         """
         try:
             if keypress.kbhit():
@@ -375,13 +610,20 @@ class Train():
                 raise
 
     def _shutdown(self, keypress: KBHit):
+        """ Signal all background processes to terminate gracefully and reset terminal state.
+
+        Parameters
+        ----------
+        keypress
+            Keyboard hit object that needs to be reset back to standard terminal behavior
+        """
         logger.debug("[Train] Shutting down")
         self._preview.shutdown()
         self._training_loop.events.exit.set()
         keypress.set_normal_term()
 
     def _monitor(self) -> None:
-        """ Monitor main thread for keypresses/GUI updates and training thread for errors. """
+        """ Run interactive monitoring that coordinates preview display + user input handling """
         self._output_startup_info()
         keypress = KBHit(is_gui=self._args.redirect_gui)
         events = self._training_loop.events
@@ -416,9 +658,31 @@ class Train():
         logger.debug("[Train] Closed Monitor")
 
     def process(self) -> None:
-        """The entry point for triggering the Training Process.
+        """ Entry point method that orchestrates complete training lifecycle from start to finish.
 
-        Should only be called from  :class:`lib.cli.launcher.ScriptExecutor`
+        Main workflow executed when training is initiated via command line or GUI. Wraps the
+        TrainingLoop in a background thread, runs the interactive monitoring loop for user
+        interaction and real-time feedback, then waits for completion before flushing output
+        buffers and returning. Provides clean separation between setup (done in __init__),
+        execution (handled here), and any cleanup that may be needed
+
+        Execution Flow:
+        ---------------
+        1. Start background thread running the actual training iterations via TrainingLoop.start()
+        which processes batches and updates loss metrics/plugins
+        2. Enter monitoring loop for user interaction, preview display, and keyboard controls
+        - Runs until exit event is set or KeyboardInterrupt received
+        3. Wait for background thread to complete all queued iterations via join()
+        4. Flush stdout buffer to ensure all logs are written before returning
+
+        Notes
+        -----
+        The method relies on setup completed in __init__() including model loading, data loader
+        configuration, trainer instantiation, and optional units registration (PreviewUnit,
+        TensorBoard, Warmup, etc.). Any errors during training will propagate through exceptions
+        raised by TrainingLoop or caught in monitoring loop with appropriate logging. After
+        completion or early exit, all registered units have had opportunity to perform final save
+        operations before thread cleanup.
         """
         logger.debug("[Train] Starting Training Process")
         self._training_loop.start()
