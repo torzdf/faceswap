@@ -1,6 +1,6 @@
 #! /usr/env/bin/python3
-"""Handles the collation, weighting masking and calculation of the selected Loss functions for
-training Faceswap models"""
+""" Handles the collation, weighting, masking and calculation of the selected Loss functions for
+training Faceswap models """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BatchLoss:
-    """Stores loss values and metadata for a single training batch
+    """ Stores loss values and metadata for a single training batch
 
     This dataclass holds the unweighted and weighted loss computations for all configured loss
     functions during one forward pass. It provides lazy computation of total loss via the .total
