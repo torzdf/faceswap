@@ -23,7 +23,7 @@ if T.TYPE_CHECKING:
     from lib.training.data import TrainLoader
     from lib.training.loss import BatchLoss
     from lib.training.training_loop import TrainStep
-    from lib.model.plugin.handler import FaceswapModel
+    from lib.model.plugin import FaceswapModel
     from plugins.train.trainer.base import TrainerPlugin
     from .optimizer_unit import OptimizerUnit
 
@@ -186,7 +186,8 @@ class PluginUnit(TrainingUnit):
             - Calculates loss using configured functions
             - detaches the loss tensors from the computation graph
             - Performs backwards pass to update the optimizer
-            - Stores the loss for the current iteration in the `current_loss` parameter
+            - Detaches and stores the loss for the current iteration in the `current_loss`
+            parameter
 
         Parameters
         ----------

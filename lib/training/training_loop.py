@@ -25,13 +25,13 @@ from plugins.train import train_config as mod_cfg
 from plugins.train.trainer.base import TrainerPlugin
 
 from .data import TrainLoader
-from .units import EventUnit, LoadUnit, LossUnit, PluginUnit, SaveUnit, SnapshotUnit, StateUnit
+from .units import EventUnit, LoadUnit, LossUnit, PluginUnit, SaveUnit, StateUnit
 from .units.core.optimizer_unit import GradClip, OptimizerUnit
 from .units import TrainingUnit
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt
-    from lib.model.plugin.handler import FaceswapModel
+    from lib.model.plugin import FaceswapModel
     from plugins.train.model.base import ModelPlugin
     from .loss import BatchLoss
 
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 # TODO ping-pong
+# TODO hanging on exit when final iters reached
 
 
 UnitGroupT = T.Literal["core", "optional"]
@@ -48,15 +49,15 @@ UnitStageDictT = dict[UnitStageT, list[TrainingUnit]]
 
 @dataclass
 class Units:
-    """ Organizes all training units by lifecycle stage and category.
+    """ Organizes all training units by lifecycle stage and category
 
     This dataclass acts as the central registry for all TrainingUnit instances participating in
     the training loop. It separates units into core (mandatory) and optional categories, then
-    further groups them by their activation stage within the training lifecycle.
+    further groups them by their activation stage within the training lifecycle
 
     Core units always participate: LoadUnit, SaveUnit, PluginUnit, LossUnit, OptimizerUnit,
-    EventUnit, StateUnit, and optionally SnapshotUnit. Optional units are loaded conditionally
-    based on configuration flags (e.g., TensorBoardUnit for logging, PreviewUnit for GUI previews).
+    EventUnit and StateUnit. Optional units are loaded conditionally based on configuration flags
+    (e.g., TensorBoardUnit for logging, PreviewUnit for GUI previews)
 
     Units are organized into five lifecycle stages:
         - start      : Initialization phase after loading state from checkpoint
@@ -66,12 +67,12 @@ class Units:
         - end        : Final cleanup operations at training completion
 
     The Units object automatically tracks which units support each lifecycle stage via has_*
-    properties and maintains a consolidated view of all active units in the .all property.
+    properties and maintains a consolidated view of all active units in the .all property
 
     Parameters
     ----------
     This object is not expected to be instantiated directly. Instead, it is created and managed
-    internally by the TrainingLoop class based on the configuration provided during initialization.
+    internally by the TrainingLoop class based on the configuration provided during initialization
 
     Notes
     ----
@@ -154,23 +155,23 @@ class Units:
                 if v.has_state_dict}
 
     def add_unit(self, unit: TrainingUnit, is_core: bool) -> None:
-        """ Register a training unit for appropriate lifecycle stages.
+        """ Register a training unit for appropriate lifecycle stages
 
         Automatically determines which lifecycle hooks the unit should participate in based on
         its has_* properties (has_start, has_step, has_save, etc.). Only registers units that
-        declare support for each stage.
+        declare support for each stage
 
         Parameters
         ----------
         unit
-            The TrainingUnit instance to register.
+            The TrainingUnit instance to register
         is_core
-            Whether this is a mandatory core unit or an optional enhancement unit.
+            Whether this is a mandatory core unit or an optional enhancement unit
 
         Notes
         -----
         Units without any lifecycle stage capability (all has_* properties False) are silently
-        ignored during registration.
+        ignored during registration
         """
         stage_group = self.stages_core if is_core else self.stages_optional
         for key in ("start", "step", "save", "update", "end"):
@@ -370,8 +371,8 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         snapshot_interval
             Number of iterations between snapshot creation (0 = disabled)
         """
-        save_optimizer = T.cast(T.Literal["always", "never", "exit"],
-                                mod_cfg.Optimizer.save_optimizer())
+        save_train_state = T.cast(T.Literal["always", "never", "exit"],
+                                  mod_cfg.Optimizer.save_optimizer())
 
         plugin_unit = self._get_plugin_unit(loader, trainer, self.optimizer_unit)
         loss_unit = LossUnit(mod_cfg.nan_protection(), plugin_unit.current_loss, self._device)
@@ -380,18 +381,14 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
                              events,
                              loss_unit.current_average,
                              save_interval,
-                             save_optimizer)
+                             snapshot_interval,
+                             save_train_state)
 
         self._units.add_unit(StateUnit(self._model.state, trainer.batch_size), is_core=True)
         self._units.add_unit(plugin_unit, is_core=True)
         self._units.add_unit(self.optimizer_unit, is_core=True)
         self._units.add_unit(loss_unit, is_core=True)
         self._units.add_unit(EventUnit(events), is_core=True)
-
-        if snapshot_interval > 0:  # TODO this is an optional unit
-            self._units.add_unit(SnapshotUnit(self._model, self.optimizer_unit, snapshot_interval),
-                                 is_core=True)
-
         self._units.add_unit(LoadUnit(self.model), is_core=True)
         self._units.add_unit(save_unit, is_core=True)
 
@@ -485,18 +482,18 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
 @dataclass
 class TrainingEvents:
-    """ Event system enabling communication between training thread and main process.
+    """ Event system enabling communication between training thread and main process
 
     This dataclass provides a synchronized event mechanism for coordinating operations across
     threads. The training loop runs in a background FSThread, while the monitor runs on the main
     thread. Events allow the monitor to request checkpoints (save), preview updates (update),
-    mask toggles, or exit training without blocking the training loop.
+    mask toggles, or exit training without blocking the training loop
 
     Thread Safety:
     -----------
     All event operations are protected by a threading.Lock preventing race conditions when
     accessing preview (shared between threads). The lock ensures atomic reads/writes of the
-    preview data which can be large numpy arrays.
+    preview data which can be large numpy arrays
 
     Preview Support:
     ------------

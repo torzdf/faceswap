@@ -16,7 +16,7 @@ from lib.utils import get_module_objects
 from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
-    from lib.model.plugin.train_state import State
+    from lib.model.plugin import State
 
 logger = logging.getLogger(__name__)
 

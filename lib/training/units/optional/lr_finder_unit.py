@@ -40,7 +40,7 @@ from lib.training.units.core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from torch.optim import Optimizer
-    from lib.model.plugin.train_state import State
+    from lib.model.plugin import State
     from lib.training.training_loop import TrainStep, Units
     from lib.training.units.core import OptimizerUnit
 
@@ -84,14 +84,18 @@ class LRFScheduler(ExponentialLR):
     optimizer
         The Torch optimizer whose learning rate will be adjusted at each step during the LRF sweep
     start_lr
-        Initial learning rate for the sweep, typically 1e-10 (very small to ensure stable starting point)
+        Initial learning rate for the sweep, typically 1e-10 (very small to ensure stable starting
+        point)
     end_lr
-        Final learning rate after complete sweep, typically 1e-1 (large value ensuring divergence at end)
+        Final learning rate after complete sweep, typically 1e-1 (large value ensuring divergence
+        at end)
     beta
-        Smoothing coefficient for exponential moving average of losses. Higher values give more weight
+        Smoothing coefficient for exponential moving average of losses. Higher values give more
+        weight
         to recent losses (default: 0.98).
     total_steps
-        Number of steps over which to perform the LRF sweep. Determines how many learning rate changes occur
+        Number of steps over which to perform the LRF sweep. Determines how many learning rate
+        changes occur
     last_epoch, optional
         The index of the last epoch for scheduler state management. Default: ``-1``
 
@@ -104,12 +108,15 @@ class LRFScheduler(ExponentialLR):
     learning_rates
         Learning rate value applied at each step during the sweep
     best_loss
-        Best (minimum) smoothed loss encountered so far during the sweep, used for early stopping decision
+        Best (minimum) smoothed loss encountered so far during the sweep, used for early stopping
+        decision
 
     Notes
     -----
-    The learning rate at each step follows the formula: lr_i = start_lr * (end_lr/start_lr)^(i/total_steps).
-    This ensures smooth exponential progression from very small starting value to large ending value.
+    The learning rate at each step follows the formula:
+    lr_i = start_lr * (end_lr/start_lr)^(i/total_steps).
+    This ensures smooth exponential progression from very small starting value to large ending
+    value
     """
     def __init__(self,
                  optimizer: Optimizer,
@@ -218,8 +225,8 @@ class LearningRateFinder:
     strength
         Aggressiveness level for finding optimal LR, determining how to divide best_loss result
     stop_factor, optional
-        Factor by which smoothed loss must exceed best_loss before early stopping due to divergence.
-        Default: ``4`` (stops when loss > 4x best value)
+        Factor by which smoothed loss must exceed best_loss before early stopping due to
+        divergence. Default: ``4`` (stops when loss > 4x best value)
     """
     def __init__(self,
                  scheduler: LRFScheduler,
@@ -378,7 +385,7 @@ def plot_loss(filename: str,
     plt.savefig(filename)
 
 
-class LRFState:
+class LRFState:  # pylint:disable=too-many-instance-attributes
     """ State manager for coordinating model backup/restore during LRF process.
 
     This class handles all aspects of the learning rate finder lifecycle including initial
@@ -502,7 +509,7 @@ class LRFState:
         self._optimizer.load_state_dict(original_weights["optimizer"])
 
     def _save_original_model(self) -> None:
-        """ Save fresh model state dict after the LRF run """
+        """ Save fresh initial model state dict after the LRF run """
         if self._mode == "graph_and_exit":
             self._events.exit.set()  # Let main loop handle saving
             return
@@ -510,7 +517,9 @@ class LRFState:
         logger.info("[LearningRateFinder] Restoring original model state")
         fresh_state = self._model.state_dict()
         fresh_state["optimizer"] = self._optimizer.state_dict()
-        self._model.io.save(fresh_state)
+        fname = self._model.checkpoint_path
+        logger.debug("%s Saving original checkpoint: '%s'", self._log_name, fname)
+        torch.save(fresh_state, fname)
 
     def _clean_up(self):
         """ Delete scheduler instance and remove backup file to clean up resources """
@@ -562,7 +571,8 @@ class LRFState:
 
         Assumes scheduler is already loaded (not None), then jumps the progress bar to current
         position by updating it with len(smooth_losses) steps. This makes the visual output match
-        where sweep left off for user awareness, even though actual computation will continue fresh.
+        where sweep left off for user awareness, even though actual computation will continue
+        fresh.
 
         Raises
         ------
@@ -618,9 +628,9 @@ class LRFinderUnit(TrainingUnit):
     Notes
     -----
     The unit integrates with TrainingUnit lifecycle: on_start() initializes components, step()
-    performs sweep iterations, and state_dict()/load_state_dict() handle checkpoint persistence. When
-    LRF completes successfully (step() returns True), the unit removes itself from steppers so main
-    training can continue normally without further LRF interference.
+    performs sweep iterations, and state_dict()/load_state_dict() handle checkpoint persistence.
+    When LRF completes successfully (step() returns True), the unit removes itself from steppers so
+    main training can continue normally without further LRF interference.
     """
     def __init__(self,
                  steps: int = -1,
@@ -714,7 +724,7 @@ class LRFinderUnit(TrainingUnit):
         Parameters
         ----------
         loop
-            Training step providing access to optimizer, events, current_loss for scheduler/state init
+            Training step providing access to optimizer, events, current_loss for sched/state init
 
         Returns
         -------

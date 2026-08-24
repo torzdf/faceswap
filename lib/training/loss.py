@@ -86,8 +86,7 @@ class BatchLoss:
 
         Computes average contribution per loss function across all batch samples and groups
         results into unweighted and weighted categories. Identity losses (if present) are
-        extracted separately from the last sample if they exist in that position. All values
-        are detached to prevent backpropagation through this computation.
+        extracted separately from the last sample if they exist in that position
 
         Returns
         -------
@@ -99,14 +98,13 @@ class BatchLoss:
         Identity losses are special-cased when they appear in the last position of either
         unweighted or weighted lists, as these represent identity-based comparison metrics
         """
-        # TODO check whether detaching is necessary here, or if we are already detached
-        unweighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.unweighted)).detach()
+        unweighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.unweighted))
                       for k in self.unweighted[0]}
-        weighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.weighted)).detach()
+        weighted = {k: T.cast(torch.Tensor, sum(d[k].mean() for d in self.weighted))
                     for k in self.weighted[0]}
         if "identity" in list(self.unweighted)[-1]:
-            unweighted["identity"] = self.unweighted[-1]["identity"].mean().detach()
-            weighted["identity"] = self.weighted[-1]["identity"].mean().detach()
+            unweighted["identity"] = self.unweighted[-1]["identity"].mean()
+            weighted["identity"] = self.weighted[-1]["identity"].mean()
         return {"unweighted": unweighted, "weighted": weighted}
 
     def detach(self) -> T.Self:

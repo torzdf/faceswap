@@ -382,7 +382,7 @@ def log_setup(loglevel, log_file: str, command: str, is_gui: bool = False) -> No
         f_handler = _file_handler(root_loglevel, log_file, log_format, command)
     else:
         log_format = FaceswapFormatter("%(asctime)s %(processName)-15s %(threadName)-30s "
-                                       "%(module)-15s %(funcName)-30s %(levelname)-8s %(message)s",
+                                       "%(module)-20s %(funcName)-30s %(levelname)-8s %(message)s",
                                        datefmt="%m/%d/%Y %H:%M:%S")
         s_handler = _stream_handler(numeric_loglevel, is_gui)
         f_handler = _file_handler(numeric_loglevel, log_file, log_format, command)

@@ -8,9 +8,9 @@ timelapse recording at save intervals for later analysis (TimelapseUnit). The co
 handles all image composition logic including background patches, foreground predictions, mask
 overlays, and header labels for swap/identity identification
 
-The module integrates with the Faceswap training loop system and supports optional mask visualization
-with configurable opacity and color. It can handle both RGB and alpha-channel inputs depending on
-whether learn_mask is enabled in the configuration
+The module integrates with the Faceswap training loop system and supports optional mask
+visualization with configurable opacity and color. It can handle both RGB and alpha-channel inputs
+depending on whether learn_mask is enabled in the configuration
 """
 from __future__ import annotations
 
@@ -25,15 +25,14 @@ import torch
 from lib.image import hex_to_rgb
 from lib.logger import format_array, parse_class_init
 from lib.utils import get_module_objects
+from lib.training.units.core import TrainingUnit
 from lib.training.data import get_label, PreviewLoader
 from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
 
-from lib.training.units.core import TrainingUnit
-
 if T.TYPE_CHECKING:
     import numpy.typing as npt
-    from lib.model.plugin.handler import FaceswapModel
+    from lib.model.plugin import FaceswapModel
     from lib.training.training_loop import TrainingEvents, TrainStep
 
 
@@ -359,7 +358,8 @@ class EvaluateUnit(TrainingUnit):
     Parameters
     ----------
     model
-        The training faceswap model plugin instance used for generating predictions during evaluation
+        The training faceswap model plugin instance used for generating predictions during
+        evaluation
     """
     def __init__(self, model: FaceswapModel) -> None:
         logger.debug(parse_class_init(locals()))

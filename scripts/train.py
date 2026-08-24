@@ -38,7 +38,7 @@ from lib.training import Preview, PreviewBuffer, TriggerType
 from lib.training.data import TrainLoader
 from lib.training.units import (LRFinderUnit, PreviewUnit, TensorBoardUnit, TimelapseUnit,
                                 WarmupUnit)
-from lib.model.plugin.handler import FaceswapModel
+from lib.model.plugin import FaceswapModel
 from lib.training.training_loop import TrainingLoop
 from lib.utils import (FaceswapError, get_module_objects, handle_deprecated_cli_opts)
 

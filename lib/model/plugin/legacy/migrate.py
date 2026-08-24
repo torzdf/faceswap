@@ -15,7 +15,7 @@ from lib.utils import get_module_objects
 from .keras_model import KerasModel
 
 if T.TYPE_CHECKING:
-    from lib.model.plugin.handler import FaceswapModel
+    from lib.model.plugin import FaceswapModel
     from .keras_model import LayerInfo
 
 logger = logging.getLogger(__name__)
