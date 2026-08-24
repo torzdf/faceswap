@@ -33,6 +33,11 @@ The State object enables:
     - Tracking convergence metrics across multiple sessions
     - Preserving optimal learning rates discovered during LRFinder scans
     - Maintaining version compatibility for model architecture upgrades
+
+Additional Utilities:
+---------------------
+- StateMarkdown: Converts state objects into formatted markdown tables for saving to file. Provides
+methods to render summary tables, configuration parameters, and session history.
 """
 from __future__ import annotations
 
@@ -514,6 +519,197 @@ class State:  # pylint:disable=too-many-instance-attributes
         logger.debug("[State] Entering train mode")
         assert self._total_steps == -1, "Train mode can only be called when in pre-train mode."
         self._total_steps = 0
+
+
+class StateMarkdown:
+    """ Converts model training state into formatted markdown tables for reference
+
+    This utility class transforms the internal State object's data into readable markdown format,
+    making it suitable for reading directly or for documentation. It extracts key training
+    information including plugin metadata, current session details, loss metrics, learning rate
+    findings, and configuration parameters into organized table structures.
+
+    The class provides multiple rendering methods:
+        - ``render_model_info()``: Creates a high-level overview table of all important state info
+          (model name, version, iterations, sessions count, lowest loss, lr_finder status)
+        - ``render_config()``: Formats all configuration parameters from the initial state as
+          a key-value table for reference
+        - ``render_summary()``: Generates detailed tables for each training session with batch
+          sizes, iteration counts, and timestamps
+        - ``full_summary()``: Combines all render methods into a comprehensive markdown report
+
+    Parameters
+    ----------
+    state
+        A State object containing the model's training metadata. This includes plugin version,
+        iteration counts, loss values, learning rate finder results, and complete session history.
+
+    Notes
+    -----
+    The class provides structured output suitable for:
+        - Progress reporting during training runs
+        - Status checks in terminal interfaces
+        - Documentation generation from model checkpoints
+        - Comparing configurations across different sessions
+
+    All methods return markdown-formatted strings ready for display or file writing. Session data
+    is sorted by ID and only includes completed sessions (those with iterations > 0). Configuration
+    parameters are presented as they were in the initial state for reference purposes
+    """
+    def __init__(self, state: State) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._state = state
+
+    def __repr__(self) -> str:
+        """ Return a string representation for logging purposes """
+        return f"{self.__class__.__name__}(state={self._state!r})"
+
+    @classmethod
+    def _format_time(cls, timestamp: float) -> str:
+        """ Format a Unix timestamp to human-readable date-time string
+
+        Parameters
+        ----------
+        timestamp
+            Unix epoch time in seconds
+
+        Returns
+        -------
+        Formatted datetime string in "YYYY-MM-DD HH:MM" format
+        """
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+
+    @classmethod
+    def _format_to_table(cls, data: dict[str, str] | dict[str, list[str]]) -> list[str]:
+        """ Format a dictionary of key-value pairs into markdown table rows
+
+        Parameters
+        ----------
+        data
+            Dictionary where keys are column headers (strings) and values are either a strings to
+            be displayed in one column or lists of strings as multiple rows for each column
+
+        Returns
+        -------
+        A list of formatted markdown table rows as strings, ready to be joined with newlines.
+        """
+        data = {k: v if isinstance(v, list) else [v] for k, v in data.items()}
+        col_widths = [max(len(k), *[len(x) for x in v]) for k, v in data.items()]
+
+        lines = [[f" {k.ljust(w)} " if i == 0 else f" {k.rjust(w)} "  # Header
+                  for i, (k, w) in enumerate(zip(data, col_widths))]]
+
+        lines.append(["-" * (w + 2) for w in col_widths])  # Break
+        lines[-1][1:] = [f"{x[:-1]}:" for x in lines[-1][1:]]  # Justify
+        lines.extend([f" {col.ljust(w)} " if i == 0 else f" {col.rjust(w)} "  # Data
+                      for i, (col, w) in enumerate(zip(row, col_widths))]
+                     for row in zip(*data.values()))
+
+        return ["|" + "|".join(line) + "|" for line in lines]
+
+    def render_model_info(self) -> str:
+        """ Generate a summary table of the model's training state
+
+        This method creates a single consolidated markdown table showing key training information
+        in an organized format. The table displays model identity, version number, total
+        iterations, session count, best loss observed, learning rate finder result, and creation
+        timestamp of the first session
+
+        Returns
+        -------
+        A markdown-formatted string containing a single comprehensive table with model
+        information
+        """
+        state = self._state.state_dict()
+        data = {
+            "plugin_name": state["plugin_name"],
+            "plugin_version": state["plugin_version"],
+            "iterations": "Pre-train" if state["iterations"] < 0 else state["iterations"],
+            "sessions": len(state["sessions"]),
+            "lowest_avg_loss": f"{state['lowest_avg_loss']:.8f}",
+            "lr_finder": "N/A" if state["lr_finder"] < 0 else state["lr_finder"],
+            "created": self._format_time(state["sessions"].get(1, {}).get("timestamp",
+                                                                          time.time()))
+        }
+        data = {k.replace("plugin_", "").replace("_", " ").title(): str(v)
+                for k, v in data.items()}
+        return "\n".join(["## Model Information"] + self._format_to_table(data))
+
+    def render_config(self) -> str:
+        """ Format all configuration parameters as a markdown table
+
+        Returns a detailed table showing every configuration parameter and its value set at the
+        initial state
+
+        Returns
+        -------
+        A markdown-formatted string containing a sorted list of all configuration parameters
+        as a two-column table (Parameter | Value)
+
+        Notes
+        -----
+        Configuration parameters are shown in their original state from the checkpoint, not
+        current values that may have been modified since loading. Useful for reference when
+        reviewing saved training runs
+        """
+        state = self._state.state_dict()
+        data = {"Parameter": list(state["config"]),
+                "Value": [f"{x!r}" for x in state["config"].values()]}
+        return "\n".join(["## Initial Config"] + self._format_to_table(data))
+
+    def render_summary(self) -> str:
+        """ Generate a history table of all completed training sessions
+
+        This method creates markdown tables showing each session that has been run (including any
+        session currently running), with its ID, batch size, iteration count, and creation
+        timestamp. Sessions are displayed in reverse chronological order (most recent first).
+
+        Returns
+        -------
+        A markdown-formatted string containing a series of tables for each training session.
+        Each session table has two sections: metadata (ID, batch size, iterations, start time)
+        and configuration parameters specific to that run
+        """
+        state = self._state.state_dict()
+        info = [{"Session": str(k),
+                 "Batch Size": str(v["batch_size"]),
+                 "Iterations": str(v["iterations"]),
+                 "Created":  self._format_time(v["timestamp"])}
+                for k, v in state["sessions"].items()]
+        conf = [{"Parameter": list(v["config"]),
+                 "Value": [f"{x!r}" for x in v["config"].values()]}
+                for v in state["sessions"].values()]
+
+        lines = ["## Sessions"]
+
+        for idx, (session, conf) in enumerate(zip(reversed(info), reversed(conf))):
+            lines.append(f"### Session {len(state["sessions"]) - idx}")
+            lines.extend(self._format_to_table(session) + [""])
+            lines.extend(self._format_to_table(conf) + [""])
+        return "\n".join(lines)
+
+    def full_summary(self) -> str:
+        """ Generate a complete markdown report combining all state information
+
+        This convenience method combines model information, configuration parameters, and
+        training session history into a single comprehensive markdown document. Useful for
+        generating complete status reports or documenting completed training runs
+
+        Returns
+        -------
+        A markdown-formatted string containing:
+            - Model Information section (name, version, iterations, loss metrics)
+            - Initial Configuration section (all parameters from loaded state)
+            - Training Sessions section (detailed session history with configs)
+
+        Notes
+        -----
+        The output is suitable for copying into documentation files or displaying in
+        terminal interfaces. Each major section is separated by blank lines for readability
+        """
+        return "\n".join([self.render_model_info(), "",
+                          self.render_config(), "",
+                          self.render_summary()])
 
 
 __all__ = get_module_objects(__name__)

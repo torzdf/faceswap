@@ -15,6 +15,7 @@ import typing as T
 import torch
 
 from lib.logger import parse_class_init
+from lib.model.plugin.state import StateMarkdown
 from lib.utils import get_module_objects
 
 from .base import TrainingUnit
@@ -171,6 +172,7 @@ class SaveUnit(TrainingUnit):
             logger.debug("%s Calling events.save.set()", self.log_name)
             self._events.save.set()
 
+    # ## BACKUP ##
     def _get_average_loss(self) -> float:
         """ Obtain latest average loss since the last save iteration and set initial average loss
 
@@ -216,32 +218,7 @@ class SaveUnit(TrainingUnit):
         self._model.state.lowest_avg_loss = average_loss
         return retval
 
-    def _save(self, model_state: dict[str, T.Any]) -> None:
-        """ Save the state_dicts to disk
-
-        Parameters
-        ----------
-        model_state
-            The FaceswapModel state_dict
-        """
-        is_checkpoint = bool(model_state.get("optimizer"))
-        fname = self._model.checkpoint_path
-        if not is_checkpoint:
-            fname = f"{os.path.splitext(fname)[0]}.pth"
-        logger.debug("%s Saving %s: '%s'",
-                     self.log_name,
-                     "checkpoint" if is_checkpoint else "weights",
-                     fname)
-        print("\x1b[2K", end="\r")  # Clear last line
-        logger.verbose("Saving %s...",  # type:ignore[attr-defined]
-                       'checkpoint' if is_checkpoint else 'model')
-        # TODO Remove/update
-        import json
-        with open(f"{os.path.splitext(fname)[0]}.json", "w") as o_file:
-            json.dump(model_state["state"], o_file, indent=2)
-
-        torch.save(model_state, fname)
-
+    # ## SAVE & SNAPSHOT ##
     def _get_state_dicts(self, is_checkpoint: bool) -> dict[str, T.Any]:
         """ Obtain the state_dicts required for saving
 
@@ -262,24 +239,44 @@ class SaveUnit(TrainingUnit):
         retval |= saveable
         return retval
 
-    def _save_model(self, is_exit: bool) -> bool:
-        """ Save the model weights and optionally include optimizer state
+    def _write_model_info(self, model_path: str) -> None:
+        """ Write the current model information as markdown file in model folder
 
         Parameters
         ----------
-        is_exit
-            Whether this save is happening at training exit
-
-        Returns
-        -------
-        ``True`` if this was a full checkpoint (not just a model weights)
+        model_path
+            Full path to the model file that information is being written for
         """
-        is_checkpoint = self._save_state == "always" or (is_exit and self._save_state == "exit")
-        state_dict = self._get_state_dicts(is_checkpoint=is_checkpoint)
-        self._save(state_dict)
-        return is_checkpoint
+        fname = f"{os.path.splitext(model_path)[0]}_info.md"
+        with open(fname, "w", encoding="utf-8", errors="replace") as o_file:
+            o_file.write(StateMarkdown(self._model.state).full_summary())
 
-    def _collate_and_save(self, is_exit: bool) -> None:
+    def _save(self, folder: str, is_checkpoint: bool) -> None:
+        """ Save the model weights, optional training state + model info to disk
+
+        Parameters
+        ----------
+        folder
+            The folder to save the model to
+        is_checkpoint
+            ``True`` if this is a full checkpoint. ``False`` for weights only
+        """
+        state_dict = self._get_state_dicts(is_checkpoint=is_checkpoint)
+        fname = os.path.join(folder, os.path.basename(self._model.checkpoint_path))
+        if not is_checkpoint:
+            fname = f"{os.path.splitext(fname)[0]}.pth"
+        logger.debug("%s Saving %s: '%s'",
+                     self.log_name,
+                     "checkpoint" if is_checkpoint else "weights",
+                     fname)
+        logger.verbose("Saving %s...",  # type:ignore[attr-defined]
+                       'checkpoint' if is_checkpoint else 'model')
+
+        torch.save(state_dict, fname)
+        self._write_model_info(fname)
+
+    # ## SAVE ##
+    def _backup_and_save(self, is_exit: bool) -> None:
         """ Execute the complete save operation for either normal saves or exit
 
         Parameters
@@ -289,7 +286,10 @@ class SaveUnit(TrainingUnit):
         """
         average_loss = self._get_average_loss()
         do_backup = self._maybe_backup(average_loss)  # TODO move to after model save?
-        is_checkpoint = self._save_model(is_exit)
+        is_checkpoint = self._save_state == "always" or (is_exit and self._save_state == "exit")
+
+        self._save(os.path.dirname(self._model.checkpoint_path), is_checkpoint)
+
         msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"
         if average_loss != 0.0:
             msg += f" - Average loss since save: {average_loss:.5f}"
@@ -297,28 +297,49 @@ class SaveUnit(TrainingUnit):
             msg += " [Model backed up]"
         logger.info(msg)
 
+    # ## SNAPSHOT ##
+    def _get_snapshot_folder(self) -> str:
+        """ Create the folder where the next snapshot will be saved
+
+        Returns
+        -------
+        The full path to the created snapshot folder
+        """
+        src = os.path.dirname(self._model.checkpoint_path)
+        iters = self._model.state.iterations
+        retval = f"{src}_snapshot_{iters}_iters"
+        if os.path.isdir(retval):
+            logger.debug("%s Removing previously existing snapshot folder: '%s'",
+                         self.log_name, retval)
+            rmtree(retval)
+        os.makedirs(retval)
+        logger.debug("%s Snapshot folder: '%s'", self.log_name, retval)
+        return retval
+
+    def _snapshot_logs(self, destination: str) -> None:
+        """ Copy the current log folder to the snapshot folder
+
+        Parameters
+        ----------
+        destination
+            The full path to the destination snapshot folder to copy logs to
+        """
+        src = os.path.dirname(self._model.checkpoint_path)
+        logs = f"{self._model.name}_logs"
+        if not os.path.exists(os.path.join(src, logs)):
+            return
+        logger.debug("%s Copying logs for snapshot: '%s'",
+                     self.log_name, os.path.join(destination, logs))
+        copytree(os.path.join(src, logs), os.path.join(destination, logs))
+
     def _snapshot(self) -> None:
         """ Create a full .ckpt snapshot + tensorboard logs for the given iterations """
         logger.info("[Snapshot] Creating model snapshot...")
-        src = os.path.dirname(self._model.checkpoint_path)
-        iters = self._model.state.iterations
-        dst = f"{src}_snapshot_{iters}_iters"
-        if os.path.isdir(dst):
-            logger.debug("[ModelIO] Removing previously existing snapshot folder: '%s'", dst)
-            rmtree(dst)
-        os.makedirs(dst)
-
-        logs = f"{self._model.name}_logs"
-        if os.path.exists(os.path.join(src, logs)):
-            logger.debug("[ModelIO] Copying logs for snapshot: '%s'", os.path.join(dst, logs))
-            copytree(os.path.join(src, logs), os.path.join(dst, logs))
-
-        fname = os.path.join(dst, os.path.basename(self._model.checkpoint_path))
-        logger.debug("[ModelIO] Saving snapshot: '%s'", fname)
-        state_dict = self._get_state_dicts(is_checkpoint=True)
-        torch.save(state_dict, fname)
-
-        logger.info("[Snapshot] %s iterations. Saved", iters)
+        dst = self._get_snapshot_folder()
+        self._snapshot_logs(dst)
+        logger.debug("%s Saving snapshot: '%s'", self.log_name, dst)
+        self._save(dst, True)
+        logger.info("[Snapshot] Saved: %s iterations", self._model.state.iterations)
 
     def on_save(self, iteration: int) -> None:
         """ Execute save operation for the current iteration
@@ -334,7 +355,7 @@ class SaveUnit(TrainingUnit):
         if self._events.exit.is_set():
             return  # Handle in clean up
         logger.debug("%s Saving [%s]", self.log_name, iteration)
-        self._collate_and_save(False)
+        self._backup_and_save(False)
         if self._do_snapshot:
             self._snapshot()
             self._do_snapshot = False
@@ -349,7 +370,7 @@ class SaveUnit(TrainingUnit):
         (``save_optimizer="exit"`` or ``"always"``)
         """
         logger.debug("%s Saving on exit", self.log_name)
-        self._collate_and_save(True)
+        self._backup_and_save(True)
 
 
 __all__ = get_module_objects(__name__)
