@@ -39,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 
 # TODO ping-pong
-# TODO hanging on exit when final iters reached
 
 
 UnitGroupT = T.Literal["core", "optional"]
@@ -268,8 +267,13 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
     @property
     def iteration(self) -> int:
-        """ Current training iteration number (exposed via StateUnit). Read-only """
+        """ Current total training iteration number (exposed via StateUnit). Read-only """
         return T.cast(StateUnit, self._units.core["StateUnit"]).iteration
+
+    @property
+    def session_iteration(self) -> int:
+        """ Current session training iteration number (exposed via StateUnit). Read-only """
+        return T.cast(StateUnit, self._units.core["StateUnit"]).session_iteration
 
     @property
     def current_loss(self) -> list[BatchLoss]:
@@ -639,12 +643,14 @@ class TrainingLoop:
 
     def _training_loop(self) -> None:
         """ Execute the core training iteration loop """
-        for _ in range(self._iterations):  # TODO need to track iters because of LRF
+        while True:
+            if self._stepper.session_iteration == self._iterations - 1:
+                logger.debug("[TrainingLoop] Total iterations reached. Signalling exit iter")
+                self._events.exit.set()
+            self._stepper.step()
             if self._events.exit.is_set():
                 logger.debug("[TrainingLoop] Exit requested")
                 break
-
-            self._stepper.step()
 
         self._stepper.on_end()
         logger.debug("[TrainingLoop] Training Complete")

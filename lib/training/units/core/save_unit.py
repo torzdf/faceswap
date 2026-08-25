@@ -30,9 +30,6 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# TODO need to check why save runs twice when exit is on a save iter
-
-
 class LoadUnit(TrainingUnit):
     """ Loads previously saved model states and configurations
 
@@ -317,7 +314,7 @@ class Backup:
         model_path
             The full path to the model save file to back up
         """
-        for file in [f"{os.path.splitext(model_path[0])}.{x}.bk" for x in ("pth", "ckpt")]:
+        for file in [f"{os.path.splitext(model_path)[0]}.{x}.bk" for x in ("pth", "ckpt")]:
             if os.path.exists(file):
                 logger.debug("[Backup] Removing stale backup: '%s'", file)
                 os.remove(file)
