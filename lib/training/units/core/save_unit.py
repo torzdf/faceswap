@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 # TODO need to check why save runs twice when exit is on a save iter
-# TODO track + remove stale saves when file extension changes
 
 
 class LoadUnit(TrainingUnit):
@@ -318,9 +317,12 @@ class Backup:
         model_path
             The full path to the model save file to back up
         """
+        for file in [f"{os.path.splitext(model_path[0])}.{x}.bk" for x in ("pth", "ckpt")]:
+            if os.path.exists(file):
+                logger.debug("[Backup] Removing stale backup: '%s'", file)
+                os.remove(file)
+
         backup_file = model_path + ".bk"
-        if os.path.exists(backup_file):
-            os.remove(backup_file)
         logger.verbose("[Backup] Backing up: '%s' to '%s'",  # type:ignore[attr-defined]
                        model_path, backup_file)
         copyfile(model_path, backup_file)
@@ -443,6 +445,22 @@ class Saver:
         with open(fname, "w", encoding="utf-8", errors="replace") as o_file:
             o_file.write(StateMarkdown(self._model.state).full_summary())
 
+    def _remove_stale_save(self, filename: str) -> None:
+        """ Remove stale save files when switching .pth <-> .ckpt
+
+        Parameters
+        ----------
+        filename
+            The name of the file that has just been saved
+        """
+        mod, ext = os.path.splitext(filename)
+        del_file = mod + (".ckpt" if ext == ".pth" else ".pth")
+        if not os.path.exists(del_file):
+            return
+
+        logger.debug("[Saver] removing stale save file: '%s'", del_file)
+        os.remove(del_file)
+
     def __call__(self, folder: str, is_checkpoint: bool) -> None:
         """ Save the model weights, optional training state + model info to disk
 
@@ -463,6 +481,8 @@ class Saver:
             - If not checkpoint: ``model-name.pth`` (weights only)
             - If checkpoint: ``model-name.ckpt`` (full model with state)
             - Always: ``model-name_info.md`` (documentation file)
+        If the save is switching from weights only to checkpoint (or vice versa) then the previous
+        stale save file is removed
         """
         state_dict = self._get_state_dicts(is_checkpoint=is_checkpoint)
         fname = os.path.join(folder, os.path.basename(self._model.checkpoint_path))
@@ -474,6 +494,7 @@ class Saver:
                        'checkpoint' if is_checkpoint else 'model')
         torch.save(state_dict, fname)
         self._write_model_info(fname)
+        self._remove_stale_save(fname)
 
 
 class Snapshot:
@@ -691,14 +712,15 @@ class SaveUnit(TrainingUnit):  # pylint:disable=too-many-instance-attributes
             Whether this save is happening at training exit
         """
         average_loss = self._get_average_loss()
-        latest_save = self._model.latest_save
-        assert latest_save is not None
-        has_backup = self._backup(latest_save, average_loss)  # TODO move to after model save?
         is_checkpoint = self._save_train_state == "always" or (is_exit and
                                                                self._save_train_state == "exit")
 
         print("\x1b[2K", end="\r")  # Clear last line for line length (verbose/info coming soon)
         self._saver(os.path.dirname(self._model.checkpoint_path), is_checkpoint)
+
+        latest_save = self._model.latest_save
+        assert latest_save is not None
+        has_backup = self._backup(latest_save, average_loss)
 
         msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"
         if average_loss != 0.0:
