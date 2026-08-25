@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 # TODO need to check why save runs twice when exit is on a save iter
+# TODO track + remove stale saves when file extension changes
+
 
 class LoadUnit(TrainingUnit):
     """ Loads previously saved model states and configurations
@@ -271,7 +273,303 @@ class StateMarkdown:
                           self.render_sessions()])
 
 
-class SaveUnit(TrainingUnit):
+class Backup:
+    """ Creates backup copies of model checkpoints when average loss improves between saves
+
+    This utility class monitors training progress and creates automatic backups of model files
+    whenever the current average loss is better (lower) than the best previously recorded loss.
+    This provides recovery points for experiments that show initial improvement but later plateau
+    or NaN
+
+    The Backup object tracks the lowest average loss observed across all saves, enabling it to
+    determine when a backup-worthy improvement has occurred. When triggered, it first creates
+    a backup copy with ".bk" extension before updating the recorded best loss value
+
+    Parameters
+    ----------
+    state
+        A State object containing training metadata including:
+            - ``lowest_avg_loss``: Best (minimum) average loss observed so far
+            - Other state information for context about current model status
+
+    Notes
+    -----
+    This class is designed to be called with a loss value and file path. It only creates backups
+    when:
+        1. Loss is greater than 0 (valid loss measurement)
+        2. Loss is lower than previously recorded best loss
+
+    The backup preserves the original checkpoint intact and adds a ".bk" extension to avoid
+    overwriting files that may have been created by other processes
+    """
+    def __init__(self, state: State) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._state = state
+
+    def __repr__(self) -> str:
+        """ Return a string representation for logging purposes """
+        return f"{self.__class__.__name__}(state={self._state!r})"
+
+    def _backup(self, model_path: str) -> None:
+        """ Backup the given model save file to "{model_name}.bk"
+
+        Parameters
+        ----------
+        model_path
+            The full path to the model save file to back up
+        """
+        backup_file = model_path + ".bk"
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+        logger.verbose("[Backup] Backing up: '%s' to '%s'",  # type:ignore[attr-defined]
+                       model_path, backup_file)
+        copyfile(model_path, backup_file)
+
+    def __call__(self, model_path: str, average_loss: float) -> bool:
+        """ Create a backup checkpoint if current loss is better than previous best
+
+        Monitors the validation loss and creates a backup when improvement occurs. This method
+        should be called after each save to determine if the recent training progress warrants
+        preserving an additional recovery point
+
+        Parameters
+        ----------
+        model_path
+            The full path to the latest model save file that may need backing up
+        average_loss
+            The current average loss value observed since the last save. Must be a non-negative
+            float representing mean loss across training samples
+
+        Returns
+        -------
+        ``True`` if a backup copy was successfully created, ``False`` otherwise
+
+        Notes
+        -----
+        A backup is only created when:
+            - Loss > 0.0 (ensures valid loss measurement)
+            - Loss < lowest_avg_loss (actual improvement over best previously seen loss)
+
+        The method updates the State object's lowest_avg_loss after creating a backup, ensuring
+        proper tracking across training sessions
+        """
+        retval = 0.0 < average_loss < self._state.lowest_avg_loss
+        if not retval:
+            return retval
+        self._backup(model_path)
+        logger.debug("[Backup] Updating lowest average loss from: %s, to: %s",
+                     self._state.lowest_avg_loss, average_loss)
+        self._state.lowest_avg_loss = average_loss
+        return retval
+
+
+class Saver:
+    """ Handles model checkpoint saving and metadata writing operations
+
+    This utility class manages the core functionality of saving trained models to disk. It
+    serializes both model weights and optional training state data into torch-compatible files,
+    and generates markdown documentation files describing the saved model's configuration
+
+    The Saver supports two save modes:
+        1. Weights-only saves (``is_checkpoint=False``): Stores only neural network parameters
+           without optimizer states or training metadata
+        2. Full checkpoint saves (``is_checkpoint=True``): Saves complete model including
+           weights, state dicts from all training units, and version information
+
+    When saving checkpoints, it automatically generates a markdown info file documenting the
+    model's training history, configuration parameters, session details, and performance metrics
+
+    Parameters
+    ----------
+    model
+        The FaceswapModel object containing:
+            - ``state``: Training state with iterations, loss metrics, session history
+            - ``checkpoint_path``: Path for saving model files
+            - Other model metadata
+    saveable_units
+        Dictionary mapping unit names to training units that have ``state_dict()`` methods.
+        These are included in full checkpoint saves (weights + state) but excluded from
+        weights-only saves
+
+    Notes
+    -----
+    Checkpoint saving writes two files:
+        1. Model weights only (``*.pth``): Fast loading for inference or further training
+        2. Full checkpoint (``model-name.ckpt``): Complete recovery point with all metadata
+
+    The markdown info file (``*_info.md``) is always written to provide human-readable
+    documentation of what was saved, useful for progress tracking and debugging
+    """
+    def __init__(self, model: FaceswapModel, saveable_units: dict[str, TrainingUnit]) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._model = model
+        self._saveable = saveable_units
+
+    def __repr__(self) -> str:
+        """ Return a string representation for logging purposes """
+        return (f"{self.__class__.__name__}("
+                f"model={self._model!r}, "
+                f"saveable_units={self._saveable!r})")
+
+    def _get_state_dicts(self, is_checkpoint: bool) -> dict[str, T.Any]:
+        """ Obtain the state_dicts required for saving
+
+        Parameters
+        ----------
+        is_checkpoint
+            ``True`` to obtain full training state. ``False`` for just model weights
+
+        Returns
+        -------
+        The model weights, including full training state if `is_checkpoint` is ``True``
+        """
+        retval = self._model.state_dict()
+        if not is_checkpoint:
+            return retval
+        saveable = {k: v.state_dict() for k, v in self._saveable.items() if v.state_dict()}
+        logger.debug("[Saver] Adding saveable units for checkpoint: %s", list(saveable))
+        retval |= saveable
+        return retval
+
+    def _write_model_info(self, model_path: str) -> None:
+        """ Write the current model information as markdown file in model folder
+
+        Parameters
+        ----------
+        model_path
+            Full path to the model file that information is being written for
+        """
+        fname = f"{os.path.splitext(model_path)[0]}_info.md"
+        with open(fname, "w", encoding="utf-8", errors="replace") as o_file:
+            o_file.write(StateMarkdown(self._model.state).full_summary())
+
+    def __call__(self, folder: str, is_checkpoint: bool) -> None:
+        """ Save the model weights, optional training state + model info to disk
+
+        Executes a complete save operation including writing files to disk and generating
+        documentation. This method should be called after determining that a save is needed
+
+        Parameters
+        ----------
+        folder
+            The directory where model files will be written
+        is_checkpoint
+            ``True`` if this is a full checkpoint with training state. ``False`` for weights
+            only saves which contain just neural network parameters
+
+        Notes
+        -----
+        Creates the following files in the specified folder:
+            - If not checkpoint: ``model-name.pth`` (weights only)
+            - If checkpoint: ``model-name.ckpt`` (full model with state)
+            - Always: ``model-name_info.md`` (documentation file)
+        """
+        state_dict = self._get_state_dicts(is_checkpoint=is_checkpoint)
+        fname = os.path.join(folder, os.path.basename(self._model.checkpoint_path))
+        if not is_checkpoint:
+            fname = f"{os.path.splitext(fname)[0]}.pth"
+        logger.debug("[Saver] Saving %s: '%s'",
+                     "checkpoint" if is_checkpoint else "weights", fname)
+        logger.verbose("Saving %s...",  # type:ignore[attr-defined]
+                       'checkpoint' if is_checkpoint else 'model')
+        torch.save(state_dict, fname)
+        self._write_model_info(fname)
+
+
+class Snapshot:
+    """ Creates periodic snapshot folders for model recovery points
+
+    This utility class manages the creation of complete training snapshots including both
+    model checkpoints and associated logs. Snapshots serve as intermediate recovery points
+    between regular checkpoints, providing detailed documentation at specific iteration milestones
+
+    A snapshot consists of three components:
+        1. New checkpoint folder created at current iterations
+        2. Copy of tensorboard logs for monitoring progress visualization
+        3. Markdown documentation describing the snapshot contents
+
+    The Snapshot class automatically removes any previously existing snapshot folder with
+    matching iteration count to prevent stale snapshots from accumulating
+
+    Parameters
+    ----------
+    model
+        The FaceswapModel object containing training state and checkpoint information
+    saver
+        A Saver instance used for writing the actual checkpoint file into the new snapshot folder
+
+    Notes
+    -----
+    Snapshots are typically created at regular intervals during training (e.g., every 10k
+    iterations) to provide intermediate recovery points. The snapshot folder naming follows
+    the pattern: ``{src_folder}_snapshot_{iters}_iters``
+
+    Log files are copied from the model's log directory into the snapshot folder, enabling
+    detailed progress monitoring through tensorboard or other visualization tools
+    """
+    def __init__(self, model: FaceswapModel, saver: Saver) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._model = model
+        self._saver = saver
+
+    def __repr__(self) -> str:
+        """ Return a string representation for logging purposes """
+        return (f"{self.__class__.__name__}("
+                f"model={self._model!r}, "
+                f"saver={self._saver!r})")
+
+    def _get_snapshot_folder(self) -> str:
+        """ Create the folder where the next snapshot will be saved
+
+        Returns
+        -------
+        The full path to the created snapshot folder
+        """
+        src = os.path.dirname(self._model.checkpoint_path)
+        iters = self._model.state.iterations
+        retval = f"{src}_snapshot_{iters}_iters"
+        if os.path.isdir(retval):
+            logger.debug("[Snapshot] Removing previously existing snapshot folder: '%s'", retval)
+            rmtree(retval)
+        os.makedirs(retval)
+        logger.debug("[Snapshot] Snapshot folder: '%s'", retval)
+        return retval
+
+    def _snapshot_logs(self, destination: str) -> None:
+        """ Copy the current log folder to the snapshot folder
+
+        Parameters
+        ----------
+        destination
+            The full path to the destination snapshot folder to copy logs to
+        """
+        src = os.path.dirname(self._model.checkpoint_path)
+        logs = f"{self._model.name}_logs"
+        if not os.path.exists(os.path.join(src, logs)):
+            return
+        logger.debug("[Snapshot] Copying logs for snapshot: '%s'", os.path.join(destination, logs))
+        copytree(os.path.join(src, logs), os.path.join(destination, logs))
+
+    def __call__(self) -> None:
+        """ Create a full .ckpt snapshot + tensorboard logs for the given iterations
+
+        Executes the complete snapshot creation process including:
+            1. Creating new snapshot directory at current iteration count
+            2. Copying tensorboard log files into the snapshot folder
+            3. Saving model checkpoint with all training state
+            4. Writing markdown documentation file
+
+        This method is typically called when the save interval triggers a snapshot
+        """
+        logger.info("[Snapshot] Creating model snapshot...")
+        dst = self._get_snapshot_folder()
+        self._snapshot_logs(dst)
+        logger.debug("[Snapshot] Saving snapshot: '%s'", dst)
+        self._saver(dst, True)
+        logger.info("[Snapshot] Saved: %s iterations", self._model.state.iterations)
+
+
+class SaveUnit(TrainingUnit):  # pylint:disable=too-many-instance-attributes
     """ Saves model checkpoints and final models during training
 
     This unit manages the saving of trained models at specified intervals, including creating
@@ -312,10 +610,13 @@ class SaveUnit(TrainingUnit):
         self._average_loss = average_loss
         self._save_interval = save_interval
         self._snapshot_interval = snapshot_interval
-        self._save_state = save_train_state
+        self._save_train_state = save_train_state
 
+        self._backup = Backup(model.state)
         self._do_snapshot = False
-        self._saveable: dict[str, TrainingUnit]  # set in on_start
+
+        self._saver: Saver  # set in on_start
+        self._snapshot: Snapshot  # set in on_start
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -326,11 +627,11 @@ class SaveUnit(TrainingUnit):
                                     "_average_loss",
                                     "_save_interval",
                                     "_snapshot_interval",
-                                    "_save_state"))
+                                    "_save_train_state"))
         return f"{self.__class__.__name__}({params})"
 
     def on_start(self, loop: TrainStep) -> None:
-        """ Initialize saveable units and configure saving behavior
+        """ Initialize the model saver and configure saving behavior
 
         Stores references to all training units that can provide state dictionaries for inclusion
         in saved checkpoints
@@ -340,8 +641,10 @@ class SaveUnit(TrainingUnit):
         loop
             The training step object managing this unit's lifecycle
         """
-        self._saveable = loop.units.have_state_dict
-        logger.debug("%s Stored saveables: %s", self.log_name, self._saveable)
+        self._saver = Saver(self._model, loop.units.have_state_dict)
+        self._snapshot = Snapshot(self._model, self._saver)
+        logger.debug("%s Created. saver: %s, snapshot: %s",
+                     self.log_name, self._saver, self._snapshot)
 
     def step(self, iteration: int) -> None:
         """Check if it's time to trigger a save operation
@@ -366,7 +669,6 @@ class SaveUnit(TrainingUnit):
             logger.debug("%s Calling events.save.set()", self.log_name)
             self._events.save.set()
 
-    # ## BACKUP ##
     def _get_average_loss(self) -> float:
         """ Obtain latest average loss since the last save iteration and set initial average loss
 
@@ -380,97 +682,6 @@ class SaveUnit(TrainingUnit):
             self._model.state.lowest_avg_loss = retval
         return retval
 
-    def _backup(self) -> None:
-        """ Backup the latest model save file to "{model_name}.bk" """
-        model_file = self._model.latest_save
-        assert model_file is not None
-        backup_file = model_file + ".bk"
-        if os.path.exists(backup_file):
-            os.remove(backup_file)
-        logger.verbose("%s Backing up: '%s' to '%s'",  # type:ignore[attr-defined]
-                       self.log_name, model_file, backup_file)
-        copyfile(model_file, backup_file)
-
-    def _maybe_backup(self, average_loss: float) -> bool:
-        """ Create a backup checkpoint if current loss is better than previous best
-
-        Parameters
-        ----------
-        average_loss
-            The current average loss value
-
-        Returns
-        -------
-        ``True`` if a backup was created, ``False`` otherwise
-        """
-        retval = 0.0 < average_loss < self._model.state.lowest_avg_loss
-        if not retval:
-            return retval
-        self._backup()
-        logger.debug("%s Updating lowest average loss from: %s, to: %s",
-                     self.log_name, self._model.state.lowest_avg_loss, average_loss)
-        self._model.state.lowest_avg_loss = average_loss
-        return retval
-
-    # ## SAVE & SNAPSHOT ##
-    def _get_state_dicts(self, is_checkpoint: bool) -> dict[str, T.Any]:
-        """ Obtain the state_dicts required for saving
-
-        Parameters
-        ----------
-        is_checkpoint
-            ``True`` to obtain full training state. ``False`` for just model weights
-
-        Returns
-        -------
-        The model weights, including full training state if `is_checkpoint` is ``True``
-        """
-        retval = self._model.state_dict()
-        if not is_checkpoint:
-            return retval
-        saveable = {k: v.state_dict() for k, v in self._saveable.items() if v.state_dict()}
-        logger.debug("%s Adding saveable units for checkpoint: %s", self.log_name, list(saveable))
-        retval |= saveable
-        return retval
-
-    def _write_model_info(self, model_path: str) -> None:
-        """ Write the current model information as markdown file in model folder
-
-        Parameters
-        ----------
-        model_path
-            Full path to the model file that information is being written for
-        """
-        fname = f"{os.path.splitext(model_path)[0]}_info.md"
-        with open(fname, "w", encoding="utf-8", errors="replace") as o_file:
-            o_file.write(StateMarkdown(self._model.state).full_summary())
-
-    def _save(self, folder: str, is_checkpoint: bool) -> None:
-        """ Save the model weights, optional training state + model info to disk
-
-        Parameters
-        ----------
-        folder
-            The folder to save the model to
-        is_checkpoint
-            ``True`` if this is a full checkpoint. ``False`` for weights only
-        """
-        state_dict = self._get_state_dicts(is_checkpoint=is_checkpoint)
-        fname = os.path.join(folder, os.path.basename(self._model.checkpoint_path))
-        if not is_checkpoint:
-            fname = f"{os.path.splitext(fname)[0]}.pth"
-        logger.debug("%s Saving %s: '%s'",
-                     self.log_name,
-                     "checkpoint" if is_checkpoint else "weights",
-                     fname)
-        print("\x1b[2K", end="\r")  # Clear last line for line length (verbose/info coming soon)
-        logger.verbose("Saving %s...",  # type:ignore[attr-defined]
-                       'checkpoint' if is_checkpoint else 'model')
-
-        torch.save(state_dict, fname)
-        self._write_model_info(fname)
-
-    # ## SAVE ##
     def _backup_and_save(self, is_exit: bool) -> None:
         """ Execute the complete save operation for either normal saves or exit
 
@@ -480,61 +691,21 @@ class SaveUnit(TrainingUnit):
             Whether this save is happening at training exit
         """
         average_loss = self._get_average_loss()
-        do_backup = self._maybe_backup(average_loss)  # TODO move to after model save?
-        is_checkpoint = self._save_state == "always" or (is_exit and self._save_state == "exit")
+        latest_save = self._model.latest_save
+        assert latest_save is not None
+        has_backup = self._backup(latest_save, average_loss)  # TODO move to after model save?
+        is_checkpoint = self._save_train_state == "always" or (is_exit and
+                                                               self._save_train_state == "exit")
 
-        self._save(os.path.dirname(self._model.checkpoint_path), is_checkpoint)
+        print("\x1b[2K", end="\r")  # Clear last line for line length (verbose/info coming soon)
+        self._saver(os.path.dirname(self._model.checkpoint_path), is_checkpoint)
 
         msg = f"[Saved {'checkpoint' if is_checkpoint else 'model'}]"
         if average_loss != 0.0:
             msg += f" - Average loss since save: {average_loss:.5f}"
-        if do_backup:
+        if has_backup:
             msg += " [Model backed up]"
         logger.info(msg)
-
-    # ## SNAPSHOT ##
-    def _get_snapshot_folder(self) -> str:
-        """ Create the folder where the next snapshot will be saved
-
-        Returns
-        -------
-        The full path to the created snapshot folder
-        """
-        src = os.path.dirname(self._model.checkpoint_path)
-        iters = self._model.state.iterations
-        retval = f"{src}_snapshot_{iters}_iters"
-        if os.path.isdir(retval):
-            logger.debug("%s Removing previously existing snapshot folder: '%s'",
-                         self.log_name, retval)
-            rmtree(retval)
-        os.makedirs(retval)
-        logger.debug("%s Snapshot folder: '%s'", self.log_name, retval)
-        return retval
-
-    def _snapshot_logs(self, destination: str) -> None:
-        """ Copy the current log folder to the snapshot folder
-
-        Parameters
-        ----------
-        destination
-            The full path to the destination snapshot folder to copy logs to
-        """
-        src = os.path.dirname(self._model.checkpoint_path)
-        logs = f"{self._model.name}_logs"
-        if not os.path.exists(os.path.join(src, logs)):
-            return
-        logger.debug("%s Copying logs for snapshot: '%s'",
-                     self.log_name, os.path.join(destination, logs))
-        copytree(os.path.join(src, logs), os.path.join(destination, logs))
-
-    def _snapshot(self) -> None:
-        """ Create a full .ckpt snapshot + tensorboard logs for the given iterations """
-        logger.info("[Snapshot] Creating model snapshot...")
-        dst = self._get_snapshot_folder()
-        self._snapshot_logs(dst)
-        logger.debug("%s Saving snapshot: '%s'", self.log_name, dst)
-        self._save(dst, True)
-        logger.info("[Snapshot] Saved: %s iterations", self._model.state.iterations)
 
     def on_save(self, iteration: int) -> None:
         """ Execute save operation for the current iteration
@@ -552,6 +723,7 @@ class SaveUnit(TrainingUnit):
         logger.debug("%s Saving [%s]", self.log_name, iteration)
         self._backup_and_save(False)
         if self._do_snapshot:
+            print("\x1b[2K", end="\r")  # Clear last line for line length (verbose/info coming)
             self._snapshot()
             self._do_snapshot = False
 
