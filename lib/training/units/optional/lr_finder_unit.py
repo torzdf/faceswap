@@ -783,13 +783,17 @@ class LRFinderUnit(TrainingUnit):
         For iteration of -1, advances scheduler and checks stopping conditions. If step() returns
         True indicating completion then the unit is cleaned up as we are entering training mode.
 
-        Errors if iteration does not == -1 as this unit removes itself from steppers when entering
-        training mode
+        This unit removes itself from steppers when entering training mode
 
         Parameters
         ----------
         iteration
             Current training iteration number - negative values indicate pre-training phase
+
+        Raises
+        ------
+        AssertionError
+            When a step is attempted in normal training mode
         """
         assert iteration == -1 and self._lrf_state is not None
         if self._lrf_state.step():

@@ -10,7 +10,7 @@ import typing as T
 from tkinter import ttk
 
 from lib.logger import parse_class_init
-from lib.training.preview_tk import PreviewTk
+from lib.training.preview.preview_tk import PreviewTk
 from lib.utils import get_module_objects
 
 from .display_graph import TrainingGraph

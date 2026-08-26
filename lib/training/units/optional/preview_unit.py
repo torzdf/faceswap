@@ -100,7 +100,7 @@ class Samples():
         Parameters
         ----------
         targets
-            Target images with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
+            Target images with shape (num_identies, num_previews, H, W, C) in float32 dtype
         patch_size
             The size of individual patches in pixels (side length for square patches)
         padding
@@ -108,7 +108,8 @@ class Samples():
 
         Returns
         -------
-        Background patches with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
+        Background patches with shape (num_swaps, num_swaps + 1, num_previews, H, W, C) in float32
+        dtype
 
         Raises
         ------
@@ -139,7 +140,8 @@ class Samples():
         Parameters
         ----------
         predictions
-            Predicted face images with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
+            Predicted face images with shape (num_identities, num_identities, num_previews, H, W,
+            C) in float32 dtype
         targets
             Target images matching the prediction batch dimensions for reference cropping
         patch_size
@@ -149,7 +151,8 @@ class Samples():
 
         Returns
         -------
-        Foreground patches with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
+        Foreground patches with shape (num_swaps, num_swaps + 1, num_previews, H, W, C)
+        in float32 dtype
         """
         num_swaps = predictions.shape[0]
         retval = np.empty((num_swaps, num_swaps + 1, *predictions.shape[2:5], 3),
@@ -181,7 +184,8 @@ class Samples():
         Parameters
         ----------
         patches
-            Background/foreground composite patches to apply masks to (H, W x N, C) in float32
+            Background/foreground composite patches to apply masks to (num_identities,
+            num_identities, num_previews, H, W, C) in float32
         predictions
             Prediction images used for mask alpha extraction when learn_mask is enabled
         targets
@@ -193,9 +197,9 @@ class Samples():
 
         Returns
         -------
-        Masked patches with blend applied, maintaining shape (H, W x N, C) in float32 dtype
+        Masked patches with blend applied, maintaining shape (num_identities, num_identities,
+        num_previews, H, W, C) in float32
         """
-
         if not self._display_mask:
             return patches
 
@@ -272,8 +276,9 @@ class Samples():
         Parameters
         ----------
         patches
-            Background/foreground composite patches with shape (src_side, img_count, identities,
-            rows, cols, channels) in float32 dtype that will be transposed and reshaped for display
+            Background/foreground composite patches with shape (num_identities,
+            num_identities + 1, num_previews, H, W, C) in float32 dtype that will be transposed and
+            reshaped for display
 
         Returns
         -------
@@ -307,9 +312,11 @@ class Samples():
         Parameters
         ----------
         predictions
-            Predicted face images with shape (num_swaps, num_swaps + 1, H, W, C) in float32 dtype
+            Predicted face images with shape (num_identities, num_identities, num_previews, H, W,
+            C) in float32 dtype
         targets
-            Target images matching prediction dimensions for background and cropping reference
+            Target images with shape (num_identities, num_previews, H, W, C) for background and
+            cropping reference
         toggle_mask
             Whether to toggle mask display visibility.
 
@@ -397,18 +404,17 @@ class EvaluateUnit(TrainingUnit):
         logger.debug("[%s] Set device to: '%s'", self.log_name, str(self._device))
 
     def _get_predictions(self, feed: torch.Tensor) -> npt.NDArray[np.float32]:
-        # TODO shape docstrings may be incorrect
         """ Generate prediction arrays for a batch of input images
 
         Parameters
         ----------
         feed
-            Input batch of image tensors with shape (num_sides, num_sides, H_in, W_in, C)
+            Input batch of image tensors with shape (num_identites, num_previews, C, H_in, W_in)
 
         Returns
         -------
-        Predictions array with shape (num_sides, num_sides, H_out, W_out, channels) where
-        channels is 3 for RGB or 4 if learn_mask includes alpha channel. float32 range [0, 1]
+        Predictions array with shape (num_identites, num_previews, H_out, W_out, C) where
+        C is 3 for RGB or 4 if learn_mask includes alpha channel. float32 range [0, 1]
         """
         ndim = 4 if mod_cfg.Loss.learn_mask() else 3
         retval = np.empty((feed.shape[0],
@@ -538,6 +544,10 @@ class PreviewUnit(EvaluateUnit):
         super().on_load(loop)
         self._events = loop.events
         logger.debug("%s Referenced events: %s", self.log_name, loop.events)
+        self.on_update()
+
+    def on_start(self) -> None:
+        """ Trigger a preview update on the first real training iteration """
         self.on_update()
 
     def on_update(self) -> None:

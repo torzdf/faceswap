@@ -458,6 +458,7 @@ class Train():
                 raise FaceswapError(f"The Timelapse path '{folder}' does not contain any valid "
                                     "images")
 
+            # pylint:disable=duplicate-code
             if not validate_faceswap_image(filenames[0]):
                 logger.error("The input folder '%s' contains images that are not extracted faces.",
                              folder)
@@ -647,7 +648,7 @@ class Train():
 
                 sleep(1)
             except KeyboardInterrupt:
-                logger.debug("[Train] Keyboard Interrupt received")
+                logger.info("[Train] Keyboard Interrupt Caught. Saving Weights and exiting")
                 break
             except Exception as err:
                 logger.error("[Train] Train Error caught: %s", str(err))

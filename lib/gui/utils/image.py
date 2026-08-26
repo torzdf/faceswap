@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from lib.gui import gui_config as cfg
-from lib.training.preview_cv import PreviewBuffer
+from lib.training import PreviewBuffer
 from lib.utils import get_module_objects
 
 from .config import get_config, PATH_CACHE

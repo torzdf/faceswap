@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 # TODO ping-pong
-# TODO rejig units + preview. Find new home for loss
+# TODO rejig units. Find new home for loss
 
 UnitGroupT = T.Literal["core", "optional"]
 UnitStageT = T.Literal["load", "start", "step", "save", "update", "end"]
@@ -242,7 +242,8 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         self._model = faceswap_model
         self._events = training_events
 
-        self._started = False
+        self._launched = False
+        self._training = False
         self._device = get_device()
         self._units = Units()
 
@@ -435,13 +436,15 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
         if self.iteration < 0:
             logger.debug("[TrainStep] Entering pre-train")
-        self._started = True
+            self._training = False
+        self._launched = True
 
     def _on_train_start(self) -> None:
         """ Execute actions prior to real training for all registered units """
         logger.debug("[TrainStep] Starting main train")
         for unit in self.units.on_start:
             unit.on_start()
+        self._training = True
 
     def _step(self) -> None:
         """ Execute one training iteration step for all units """
@@ -478,10 +481,10 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         The first call to step() automatically initializes the training loop. Subsequent calls
         assume proper initialization has occurred
         """
-        if not self._started:
+        if not self._launched:
             self._on_loop_start()
 
-        if self.iteration == 0:
+        if not self._training and self.iteration >= 0:
             self._on_train_start()
 
         logger.trace("[TrainStep] step %s",  self.iteration)  # type:ignore[attr-defined]
@@ -665,8 +668,9 @@ class TrainingLoop:
         """
         self._thread.check_and_raise_error()
 
-    def _training_loop(self) -> None:
-        """ Execute the core training iteration loop """
+    def _main_loop(self) -> None:
+        """ Wrap the training loop to handle KeyboardInterrupt and start the loop """
+        logger.debug("[TrainingLoop] Commencing Training")
         while True:
             if self._stepper.session_iteration == self._iterations - 1:
                 logger.debug("[TrainingLoop] Total iterations reached. Signalling exit iter")
@@ -678,20 +682,6 @@ class TrainingLoop:
 
         self._stepper.on_end()
         logger.debug("[TrainingLoop] Training Complete")
-
-    def _main_loop(self) -> None:
-        """ Wrap the training loop to handle KeyboardInterrupt and start the loop """
-        logger.debug("[TrainingLoop] Commencing Training")
-        try:
-            self._training_loop()
-        except KeyboardInterrupt:
-            try:
-                logger.info("[Train] Keyboard Interrupt Caught. Saving Weights and exiting")  # TODO check location
-                self._stepper.on_end()
-            except KeyboardInterrupt:
-                logger.warning("Saving model weights has been cancelled!")
-        except Exception as err:
-            raise err
 
     def add_unit(self, unit: TrainingUnit) -> None:
         """ Register an optional training unit for the session.

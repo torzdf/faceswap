@@ -151,12 +151,12 @@ class WarmupUnit(TrainingUnit):
 
         progress = int(round(100 / (len(self._reporting_points) - 1) *
                        self._reporting_points.index(self._iteration), 0))
-        logger.info("[LearningRateWarmup] Step: %s/%s (%s), Current: %s, Target: %s",
+        logger.info("[LearningRateWarmup] Step: %s/%s (%s), Target: %s, Current: %s",
                     self._iteration,
                     self._warmup_steps,
                     f"{progress}%",
-                    self._fmt(current_lr),
-                    self._fmt(target_lr))
+                    self._fmt(target_lr),
+                    self._fmt(current_lr))
 
     def step(self, iteration: int) -> None:
         """ Execute one training step for warmup operations
