@@ -34,7 +34,7 @@ from .core import TrainingUnit
 if T.TYPE_CHECKING:
     import numpy.typing as npt
     from lib.model.plugin import FaceswapModel
-    from lib.training.training_loop import TrainingEvents, TrainStep
+    from lib.training import TrainingEvents, TrainStep
 
 
 logger = logging.getLogger(__name__)

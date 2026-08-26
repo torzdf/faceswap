@@ -39,7 +39,7 @@ from lib.training.data import TrainLoader
 from lib.training.units import (LRFinderUnit, PreviewUnit, TensorBoardUnit, TimelapseUnit,
                                 WarmupUnit)
 from lib.model.plugin import FaceswapModel
-from lib.training.training_loop import TrainingLoop
+from lib.training import TrainingLoop
 from lib.utils import (FaceswapError, get_module_objects, handle_deprecated_cli_opts)
 
 from plugins.plugin_loader import PluginLoader
@@ -47,7 +47,7 @@ from plugins.plugin_loader import PluginLoader
 if T.TYPE_CHECKING:
     import argparse
     import numpy.typing as npt
-    from lib.training.training_loop import TrainingEvents
+    from lib.training import TrainingEvents
     from plugins.train.model.base import ModelPlugin
     from plugins.train.trainer.base import TrainerPlugin
 

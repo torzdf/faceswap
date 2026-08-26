@@ -24,7 +24,7 @@ if T.TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     from lib.model.plugin import FaceswapModel, State
-    from lib.training.training_loop import TrainingEvents, TrainStep
+    from lib.training import TrainingEvents, TrainStep
     from .optimizer_unit import OptimizerUnit
 
 logger = logging.getLogger(__name__)

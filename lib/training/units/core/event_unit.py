@@ -15,7 +15,7 @@ from lib.utils import get_module_objects
 from .base import TrainingUnit
 
 if T.TYPE_CHECKING:
-    from lib.training.training_loop import TrainingEvents
+    from lib.training import TrainingEvents
 
 logger = logging.getLogger(__name__)
 
