@@ -12,7 +12,7 @@ import numpy as np
 from tensorboard.compat.proto import event_pb2  # type:ignore[import-untyped]
 
 from lib.logger import parse_class_init
-from lib.training.units.optional.tensorboard_unit import RecordIterator
+from lib.training.units.tensorboard_unit import RecordIterator
 from lib.utils import get_module_objects
 
 if T.TYPE_CHECKING:

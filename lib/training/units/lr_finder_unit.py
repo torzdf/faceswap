@@ -36,13 +36,13 @@ from tqdm import tqdm
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from lib.training.units.core import TrainingUnit
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from torch.optim import Optimizer
     from lib.model.plugin import State
     from lib.training.training_loop import TrainStep, Units
-    from lib.training.units.core import OptimizerUnit
+    from .core import OptimizerUnit
 
 logger = logging.getLogger(__name__)
 

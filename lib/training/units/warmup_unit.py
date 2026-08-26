@@ -17,7 +17,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
 
-from lib.training.units.core import TrainingUnit
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from torch.optim import Optimizer

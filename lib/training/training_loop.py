@@ -25,7 +25,7 @@ from plugins.train import train_config as mod_cfg
 from plugins.train.trainer.base import TrainerPlugin
 
 from .data import TrainLoader
-from .units import EventUnit, LoadUnit, LossUnit, PluginUnit, SaveUnit, StateUnit
+from .units.core import EventUnit, LoadUnit, LossUnit, PluginUnit, SaveUnit, StateUnit
 from .units.core.optimizer_unit import GradClip, OptimizerUnit
 from .units import TrainingUnit
 
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 # TODO ping-pong
-# TODO rejig units. Find new home for loss
+# TODO Find new home for loss
 
 UnitGroupT = T.Literal["core", "optional"]
 UnitStageT = T.Literal["load", "start", "step", "save", "update", "end"]

@@ -25,7 +25,7 @@ Optional units (conditional)
 ------------------------
     Loaded only when config flags enable them - provide enhancement features
 
-    Located in lib.training.units.optional
+    Located in lib.training.units
         TensorBoardUnit : Logs metrics to visualization dashboard
         PreviewUnit     : Generates live preview images during training
         TimelapseUnit   : Saves timelapse recordings at checkpoints
@@ -36,6 +36,8 @@ Usage pattern: TrainingLoop collects all units, checks their capabilities via ha
 and calls corresponding methods (on_load, on_start, step, on_save) at appropriate times in the
 lifecycle
 """
-from .core import (EventUnit, GradClip, LoadUnit, LossUnit, TrainingUnit, OptimizerUnit,
-                   PluginUnit, SaveUnit, StateUnit)
-from .optional import LRFinderUnit, PreviewUnit, TensorBoardUnit, TimelapseUnit, WarmupUnit
+from .core import TrainingUnit
+from .lr_finder_unit import LRFinderUnit
+from .preview_unit import PreviewUnit, TimelapseUnit
+from .tensorboard_unit import TensorBoardUnit
+from .warmup_unit import WarmupUnit

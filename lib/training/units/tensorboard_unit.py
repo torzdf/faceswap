@@ -21,10 +21,10 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from lib.logger import parse_class_init
+from lib.training.data import get_label
 from lib.utils import get_module_objects
 
-from lib.training.data import get_label
-from lib.training.units.core import TrainingUnit
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     from lib.training.loss import BatchLoss

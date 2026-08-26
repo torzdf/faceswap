@@ -18,7 +18,7 @@ disabled in configuration, these core units must exist for basic training to fun
 from .base import TrainingUnit
 from .event_unit import EventUnit
 from .loss_unit import LossUnit
-from .optimizer_unit import GradClip, OptimizerUnit
+from .optimizer_unit import OptimizerUnit
 from .plugin_unit import PluginUnit
 from .save_unit import LoadUnit, SaveUnit
 from .state_unit import StateUnit

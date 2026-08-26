@@ -25,10 +25,11 @@ import torch
 from lib.image import hex_to_rgb
 from lib.logger import format_array, parse_class_init
 from lib.utils import get_module_objects
-from lib.training.units.core import TrainingUnit
 from lib.training.data import get_label, PreviewLoader
 from plugins.train import train_config as mod_cfg
 from plugins.train.trainer import trainer_config as trn_cfg
+
+from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
     import numpy.typing as npt

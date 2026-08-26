@@ -22,7 +22,7 @@ from lib.utils import FaceswapError, get_module_objects
 if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
     from lib.training.loss import LossCollator, BatchLoss
-    from lib.training.units import OptimizerUnit
+    from lib.training.units.core import OptimizerUnit
     from plugins.train.model.base import ModelPlugin
 
 logger = logging.getLogger(__name__)

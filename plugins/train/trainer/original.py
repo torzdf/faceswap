@@ -13,7 +13,7 @@ from .base import TrainerPlugin
 if T.TYPE_CHECKING:
     from lib.training.data import BatchMeta
     from lib.training.loss import BatchLoss, LossCollator
-    from lib.training.units import OptimizerUnit
+    from lib.training.units.core import OptimizerUnit
 
 
 logger = logging.getLogger(__name__)
