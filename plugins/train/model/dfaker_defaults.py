@@ -25,6 +25,7 @@ Items will be grouped together as per their `group` parameter, but otherwise wil
 the order that they are added to this module.
 from lib.config import ConfigItem
 """
+# pylint:disable=duplicate-code
 from lib.config import ConfigItem
 
 
@@ -40,4 +41,22 @@ output_size = ConfigItem(
          "Must be 128 or 256.",
     rounding=128,
     min_max=(128, 256),
+    fixed=True)
+
+freeze_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'freeze-weights' is enabled, then the layers indicated "
+         "here will be frozen the next time the model starts up.",
+    choices=["encoder", "decoders.0", "decoders.1"],
+    fixed=False)
+
+load_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'load-weights' is populated, then the layers indicated "
+         "here will be loaded from the given weights file if starting a new model.",
+    choices=["encoder", "decoders.0", "decoders.1"],
     fixed=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" The default options for the faceswap Dfl_H128 Model plugin.
+""" The default options for the faceswap IAE Model plugin.
 
 Defaults files should be named `<plugin_name>_defaults.py`
 
@@ -29,16 +29,8 @@ from lib.config import ConfigItem
 from lib.config import ConfigItem
 
 
-HELPTEXT = "DFL H128 Model (Adapted from https://github.com/iperov/DeepFaceLab)"
+HELPTEXT = "IAE Faceswap Model."
 
-
-lowmem = ConfigItem(
-    datatype=bool,
-    default=False,
-    group="settings",
-    info="Lower memory mode. Set to 'True' if having issues with VRAM usage.\n"
-         "NB: Models with a changed lowmem mode are not compatible with each other.",
-    fixed=True)
 
 freeze_layers = ConfigItem(
     datatype=list,
@@ -46,7 +38,7 @@ freeze_layers = ConfigItem(
     group="weights",
     info="If the command line option 'freeze-weights' is enabled, then the layers indicated "
          "here will be frozen the next time the model starts up.",
-    choices=["encoder", "decoders.0", "decoders.1"],
+    choices=["encoder", "inter_side.0", "inter_both", "inter_side.1", "decoder"],
     fixed=False)
 
 load_layers = ConfigItem(
@@ -55,5 +47,5 @@ load_layers = ConfigItem(
     group="weights",
     info="If the command line option 'load-weights' is populated, then the layers indicated "
          "here will be loaded from the given weights file if starting a new model.",
-    choices=["encoder", "decoders.0", "decoders.1"],
+    choices=["encoder", "inter_side.0", "inter_both", "inter_side.1", "decoder"],
     fixed=True)

@@ -91,3 +91,29 @@ multiscale_decoder = ConfigItem(
     group="network",
     info="Multiscale decoder can help to obtain better details.",
     fixed=True)
+
+freeze_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'freeze-weights' is enabled, then the layers indicated "
+         "here will be frozen the next time the model starts up. Note: the layers selected should "
+         "be correct for the chosen architecture (df/liae). Any layers marked for freezing that "
+         "are not within your chosen architecture will be ignored.\n\n"
+         "'encoder' belongs to both architectures, 'decoders.0' and 'decoders.1' to 'df' "
+         "architecture. 'inter_both', 'inter_side' and 'decoder' belong to 'liae' architecture.",
+    choices=["encoder", "decoders.0", "decoders.1", "inter_both", "inter_side", "decoder"],
+    fixed=False)
+
+load_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'load-weights' is populated, then the layers indicated "
+         "here will be loaded from the given weights file if starting a new model. Note: the "
+         "layers selected should be correct for the chosen architecture (df/liae). Any layers "
+         "marked for freezing that are not within your chosen architecture will be ignored.\n\n"
+         "'encoder' belongs to both architectures. 'decoders.0' and 'decoders.1' to 'df' "
+         "architecture. 'inter_both', 'inter_side' and 'decoder' belong to 'liae' architecture.",
+    choices=["encoder", "decoders.0", "decoders.1", "inter_both", "inter_side", "decoder"],
+    fixed=True)

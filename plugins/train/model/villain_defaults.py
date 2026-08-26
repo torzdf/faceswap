@@ -42,3 +42,21 @@ lowmem = ConfigItem(
     info="Lower memory mode. Set to 'True' if having issues with VRAM usage.\n"
          "NB: Models with a changed lowmem mode are not compatible with each other.",
     fixed=True)
+
+freeze_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'freeze-weights' is enabled, then the layers indicated "
+         "here will be frozen the next time the model starts up.",
+    choices=["encoder", "decoders.0", "decoders.1"],
+    fixed=False)
+
+load_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'load-weights' is populated, then the layers indicated "
+         "here will be loaded from the given weights file if starting a new model.",
+    choices=["encoder", "decoders.0", "decoders.1"],
+    fixed=True)

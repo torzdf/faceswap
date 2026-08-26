@@ -92,3 +92,21 @@ complexity_decoder_b = ConfigItem(
     rounding=16,
     min_max=(64, 1024),
     fixed=True)
+
+freeze_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'freeze-weights' is enabled, then the layers indicated "
+         "here will be frozen the next time the model starts up.",
+    choices=["encoder", "decoder_a", "decoder_b"],
+    fixed=False)
+
+load_layers = ConfigItem(
+    datatype=list,
+    default=["encoder"],
+    group="weights",
+    info="If the command line option 'load-weights' is populated, then the layers indicated "
+         "here will be loaded from the given weights file if starting a new model.",
+    choices=["encoder", "decoder_a", "decoder_b"],
+    fixed=True)

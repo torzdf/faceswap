@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" The default options for the faceswap Dfl_H128 Model plugin.
+""" The default options for the faceswap Lightweight Model plugin.
 
 Defaults files should be named `<plugin_name>_defaults.py`
 
@@ -29,16 +29,8 @@ from lib.config import ConfigItem
 from lib.config import ConfigItem
 
 
-HELPTEXT = "DFL H128 Model (Adapted from https://github.com/iperov/DeepFaceLab)"
+HELPTEXT = "Lightweight Faceswap Model."
 
-
-lowmem = ConfigItem(
-    datatype=bool,
-    default=False,
-    group="settings",
-    info="Lower memory mode. Set to 'True' if having issues with VRAM usage.\n"
-         "NB: Models with a changed lowmem mode are not compatible with each other.",
-    fixed=True)
 
 freeze_layers = ConfigItem(
     datatype=list,
