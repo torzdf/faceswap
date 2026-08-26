@@ -26,7 +26,8 @@ class TrainingUnit(abc.ABC):
 
     Lifecycle method conventions:
 
-    `on_start`(loop)          : Initialize resources when training begins (called once at start)
+    `on_load`(loop)           : Initialize resources when training begins (called once at start)
+    `on_start`(loop)          : Perform setup work after pre-training but prior to first real batch
     `step`(iteration)         : Perform per-iteration work during training loop (every batch)
     `on_save`(iteration)      : Save derived data when checkpoint is saved (periodic save points)
     `on_update`()             : Generate previews or metrics
@@ -36,6 +37,7 @@ class TrainingUnit(abc.ABC):
 
     Capability detection properties (used by TrainingLoop to route calls):
 
+    `has_load`       -> bool  : ``True`` if `on_load` is overridden in child class
     `has_start`      -> bool  : ``True`` if `on_start` is overridden in child class
     `has_step`       -> bool  : ``True`` if `step` method is implemented and should be called each iteration
     `has_save`       -> bool  : ``True`` if `on_save` handles checkpoint save events
@@ -51,8 +53,8 @@ class TrainingUnit(abc.ABC):
         self.log_name = f"[{self.__class__.__name__}]"
         """ Standardized prefix for debug logging """
 
-    def on_start(self, loop: TrainStep) -> None:  # pylint:disable=unused-argument
-        """ Initialize resources when training begins
+    def on_load(self, loop: TrainStep) -> None:  # pylint:disable=unused-argument
+        """ Initialize resources when training loop has built
 
         Override this method to perform one-time setup operations needed at the start of training:
         load configurations, initialize external connections, register with other systems, etc.
@@ -69,6 +71,24 @@ class TrainingUnit(abc.ABC):
         Only override this method if your unit requires initialization work. If no setup is needed,
         leave the default implementation which does nothing and will be removed from the training
         loop.
+        """
+        return
+
+    def on_start(self) -> None:  # pylint:disable=unused-argument
+        """ Initialize resources when training begins
+
+        Some units implement pre-training, which can interfere with units that do not expect it.
+        Override this method to perform any actions following pre-training but before training
+        proper starts. Is executed immediately prior to the first "real" training batch being fed
+        through the model. Unlike `on_load` this method provides no parameters, it is purely an
+        ordering function for executing anything that cannot be executed in on_start but must be
+        configured before real training begins
+
+        Notes
+        -----
+        Only override this method if your unit requires initialization work that must occur after.
+        pre-training, If no setup is needed, leave the default implementation which does nothing
+        and will be removed from the training loop.
         """
         return
 
@@ -195,6 +215,11 @@ class TrainingUnit(abc.ABC):
         child_func = getattr(type(self), method_name)
         base_func = getattr(TrainingUnit, method_name)
         return child_func is not base_func
+
+    @property
+    def has_load(self) -> bool:
+        """ ``True`` if this unit implements an `on_load` method """
+        return self._is_overriden("on_load")
 
     @property
     def has_start(self) -> bool:

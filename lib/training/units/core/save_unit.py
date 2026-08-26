@@ -51,7 +51,7 @@ class LoadUnit(TrainingUnit):
         """ Return a string representation for logging purposes """
         return f"{self.__class__.__name__}(model={self._model!r})"
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Load saved states from checkpoint files
 
         Restores optimizer and other training unit information from previously saved checkpoint
@@ -66,7 +66,7 @@ class LoadUnit(TrainingUnit):
         logger.debug("%s got loadables: %s", self.log_name, loadable)
         for name, unit in loadable.items():
             state_dict = self._model.pop_extra_state(name)
-            if not state_dict:  # TODO handle
+            if not state_dict:
                 logger.debug("%s Skipping missing state_dict: '%s'", self.log_name, name)
                 continue
             logger.debug("%s Loading state_dict: '%s'", self.log_name, name)
@@ -180,8 +180,9 @@ class StateMarkdown:
             "plugin_version": state["plugin_version"],
             "iterations": "Pre-train" if state["iterations"] < 0 else state["iterations"],
             "sessions": len(state["sessions"]),
-            "lowest_avg_loss": f"{state['lowest_avg_loss']:.8f}",
-            "lr_finder": "N/A" if state["lr_finder"] < 0 else state["lr_finder"],
+            "lowest_avg_loss": ("N/A" if not state["lowest_avg_loss"]
+                                else f"{state['lowest_avg_loss']:.2e}"),
+            "lr_finder": "N/A" if state["lr_finder"] < 0 else f"{state['lr_finder']:.1e}",
             "created": self._format_time(state["sessions"].get(1, {}).get("timestamp",
                                                                           time.time()))
         }
@@ -633,8 +634,8 @@ class SaveUnit(TrainingUnit):  # pylint:disable=too-many-instance-attributes
         self._backup = Backup(model.state)
         self._do_snapshot = False
 
-        self._saver: Saver  # set in on_start
-        self._snapshot: Snapshot  # set in on_start
+        self._saver: Saver  # set in on_load
+        self._snapshot: Snapshot  # set in on_load
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -648,7 +649,7 @@ class SaveUnit(TrainingUnit):  # pylint:disable=too-many-instance-attributes
                                     "_save_train_state"))
         return f"{self.__class__.__name__}({params})"
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize the model saver and configure saving behavior
 
         Stores references to all training units that can provide state dictionaries for inclusion

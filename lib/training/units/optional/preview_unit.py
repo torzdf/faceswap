@@ -376,13 +376,13 @@ class EvaluateUnit(TrainingUnit):
                                 trn_cfg.Augmentation.mask_opacity(),
                                 trn_cfg.Augmentation.mask_color())
         self._loader: PreviewLoader  # set by child
-        self._device: torch.Device   # set in on_start
+        self._device: torch.Device   # set in on_load
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
         return f"{self.__class__.__name__}(model={self._model!r})"
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize the evaluation unit and set inference device
 
         Retrieves the torch.device from the training loop for running model inference. This ensures
@@ -515,7 +515,7 @@ class PreviewUnit(EvaluateUnit):
                                      folders,
                                      self._batch_size,
                                      torch.utils.data.RandomSampler)
-        self._events: TrainingEvents  # set in on_start
+        self._events: TrainingEvents  # set in on_load
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -523,10 +523,10 @@ class PreviewUnit(EvaluateUnit):
         return (f"{retval}, "
                 f"folders={self._loader.input_folders!r})")
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize the preview unit and trigger first preview generation
 
-        Calls parent's on_start to set up device, then retrieves TrainingEvents reference from the
+        Calls parent's on_load to set up device, then retrieves TrainingEvents reference from the
         training loop. Immediately generates the first preview upon initialization by calling
         on_update(), which will be handled by the main thread
 
@@ -535,7 +535,7 @@ class PreviewUnit(EvaluateUnit):
         loop
             The training step object managing this unit's lifecycle
         """
-        super().on_start(loop)
+        super().on_load(loop)
         self._events = loop.events
         logger.debug("%s Referenced events: %s", self.log_name, loop.events)
         self.on_update()

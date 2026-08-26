@@ -39,10 +39,10 @@ logger = logging.getLogger(__name__)
 
 
 # TODO ping-pong
-
+# TODO rejig units + preview. Find new home for loss
 
 UnitGroupT = T.Literal["core", "optional"]
-UnitStageT = T.Literal["start", "step", "save", "update", "end"]
+UnitStageT = T.Literal["load", "start", "step", "save", "update", "end"]
 UnitStageDictT = dict[UnitStageT, list[TrainingUnit]]
 
 
@@ -59,7 +59,8 @@ class Units:
     (e.g., TensorBoardUnit for logging, PreviewUnit for GUI previews)
 
     Units are organized into five lifecycle stages:
-        - start      : Initialization phase after loading state from checkpoint
+        - load       : Initialization phase after loading state from checkpoint
+        - start      : Executed immediately prior to the first real training iteration
         - step       : Called once per training iteration after backward pass
         - save       : Triggers when checkpoints should be written to disk
         - update     : Signals GUI refresh or preview generation
@@ -76,21 +77,27 @@ class Units:
     Notes
     ----
     The order of units within each stage matters. Core units always execute before optional units,
-    except LoadUnit which intentionally runs last during the start phase to ensure all state loads
+    except LoadUnit which intentionally runs last during the load phase to ensure all state loads
     first
     """
-    stages_core: UnitStageDictT = field(
-        default_factory=lambda: T.cast(
-            UnitStageDictT, {"start": [], "step": [], "save": [], "update": [], "end": []}
-            )
-        )
+    stages_core: UnitStageDictT = field(default_factory=lambda: T.cast(UnitStageDictT,
+                                                                       {"load": [],
+                                                                        "start": [],
+                                                                        "step": [],
+                                                                        "save": [],
+                                                                        "update": [],
+                                                                        "end": []}))
     """ Dictionary mapping lifecycle stages to lists of core training units. Core units always
     participate regardless of configuration flags """
 
     stages_optional: UnitStageDictT = field(
-        default_factory=lambda: T.cast(
-            UnitStageDictT, {"start": [], "step": [], "save": [], "update": [], "end": []}
-            )
+        default_factory=lambda: T.cast(UnitStageDictT,
+                                       {"load": [],
+                                        "start": [],
+                                        "step": [],
+                                        "save": [],
+                                        "update": [],
+                                        "end": []})
         )
     """ Dictionary mapping lifecycle stages to lists of optional training units. These are loaded
     only if their corresponding configuration dictates that they are """
@@ -119,12 +126,18 @@ class Units:
         return self.all["optional"]
 
     @property
-    def on_start(self) -> list[TrainingUnit]:
-        """ Units registered for the start phase. Core units first, then optional. The LoadUnit is
+    def on_load(self) -> list[TrainingUnit]:
+        """ Units registered for the load phase. Core units first, then optional. The LoadUnit is
         always last to ensure all units are configured before attempting to load state """
-        load_unit = next(x for x in self.stages_core["start"] if isinstance(x, LoadUnit))
-        core = [x for x in self.stages_core["start"] if x != load_unit]
-        return core + self.stages_optional["start"] + [load_unit]
+        load_unit = next(x for x in self.stages_core["load"] if isinstance(x, LoadUnit))
+        core = [x for x in self.stages_core["load"] if x != load_unit]
+        return core + self.stages_optional["load"] + [load_unit]
+
+    @property
+    def on_start(self) -> list[TrainingUnit]:
+        """ Units registered for the start phase. Only optional units as core units can
+        handle pre-training """
+        return self.stages_optional["start"]
 
     @property
     def step(self) -> list[TrainingUnit]:
@@ -173,7 +186,7 @@ class Units:
         ignored during registration
         """
         stage_group = self.stages_core if is_core else self.stages_optional
-        for key in ("start", "step", "save", "update", "end"):
+        for key in ("load", "start", "step", "save", "update", "end"):
             if not getattr(unit, f"has_{key}"):
                 continue
             logger.debug("[Units] '%s' Adding 'stage_%s'['%s']",
@@ -186,7 +199,8 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
 
     TrainStep orchestrates each iteration of the training process, coordinating all registered
     TrainingUnit instances through their respective lifecycle hooks. It handles:
-        - Initialization phase (on_start) with model loading and state restoration
+        - Initialization phase (on_load) with model loading and state restoration
+        - Pre-training setup (on_start) immediately prior to the first real iteration
         - Per-iteration work (step) including forward/backward passes via PluginUnit
         - Checkpoint management (save/update events from TrainingEvents)
         - Final cleanup (on_end) when training concludes
@@ -412,14 +426,22 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         """
         self._units.add_unit(unit, is_core=False)
 
-    def _on_train_start(self) -> None:
+    def _on_loop_start(self) -> None:
         """ Execute initialization phase for all registered units """
-        logger.debug("[TrainStep] Starting")
-        for unit in self._units.on_start:
-            logger.debug("[TrainStep] Executing on_start: '%s'", unit.__class__.__name__)
-            unit.on_start(self)
+        logger.debug("[TrainStep] Loading")
+        for unit in self._units.on_load:
+            logger.debug("[TrainStep] Executing on_load: '%s'", unit.__class__.__name__)
+            unit.on_load(self)
 
+        if self.iteration < 0:
+            logger.debug("[TrainStep] Entering pre-train")
         self._started = True
+
+    def _on_train_start(self) -> None:
+        """ Execute actions prior to real training for all registered units """
+        logger.debug("[TrainStep] Starting main train")
+        for unit in self.units.on_start:
+            unit.on_start()
 
     def _step(self) -> None:
         """ Execute one training iteration step for all units """
@@ -446,7 +468,7 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         """ Execute one complete training iteration
 
         Orchestrates the full training loop for a single batch:
-            1. If not started, triggers initialization phase (on_start hooks)
+            1. If not started, triggers initialization phase (on_load hooks)
             2. Executes per-iteration work (step hooks via core and optional TrainingUnit)
             3. Checks for save request event and saves if needed
             4. Checks for update request event and updates preview if needed
@@ -457,8 +479,9 @@ class TrainStep:  # pylint:disable=too-many-instance-attributes
         assume proper initialization has occurred
         """
         if not self._started:
-            # TODO We currently have a problem here if both lrf + warmup selected. Warmup sets the
-            # initial LR to 0.0 even if step() not called
+            self._on_loop_start()
+
+        if self.iteration == 0:
             self._on_train_start()
 
         logger.trace("[TrainStep] step %s",  self.iteration)  # type:ignore[attr-defined]
@@ -578,10 +601,11 @@ class TrainingLoop:
     ------------
     1. start() : Begins FSThread execution of _main_loop()
     2. Loop runs iterations calling stepper.step() each time:
-       a. Initialize via on_start hooks (LoadUnit loads checkpoint state first)
-       b. Execute iteration via step hooks (PluginUnit.forward/backward/optimizer)
-       c. Save checkpoints if requested or at intervals
-       d. Update GUI if preview available or update requested
+       a. Initialize via on_load hooks (LoadUnit loads checkpoint state first)
+       b. Handle pre-train to train transition via in_start hooks
+       c. Execute iteration via step hooks (PluginUnit.forward/backward/optimizer)
+       d. Save checkpoints if requested or at intervals
+       e. Update GUI if preview available or update requested
     3. on_end() : Called when iterations complete or exit requested, runs cleanup hooks
 
     Parameters
@@ -662,7 +686,7 @@ class TrainingLoop:
             self._training_loop()
         except KeyboardInterrupt:
             try:
-                logger.info("[Train] Keyboard Interrupt Caught. Saving Weights and exiting")
+                logger.info("[Train] Keyboard Interrupt Caught. Saving Weights and exiting")  # TODO check location
                 self._stepper.on_end()
             except KeyboardInterrupt:
                 logger.warning("Saving model weights has been cancelled!")

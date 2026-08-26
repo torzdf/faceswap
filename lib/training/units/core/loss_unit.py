@@ -60,8 +60,6 @@ class LossUnit(TrainingUnit):
         self._loss_count = 0
         self._current_average: npt.NDArray[np.float32] = np.array(0.0).astype("float32")
 
-        self._loss: list[BatchLoss]  # set in on_start
-
     def __repr__(self) -> str:
         """ String representation for debugging and logging """
         return (f"{self.__class__.__name__} ("

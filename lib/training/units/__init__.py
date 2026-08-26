@@ -33,7 +33,8 @@ Optional units (conditional)
         LRFinderUnit    : Performs learning rate finding before training
 
 Usage pattern: TrainingLoop collects all units, checks their capabilities via has_* properties,
-and calls corresponding methods (on_start, step, on_save) at appropriate times in the lifecycle.
+and calls corresponding methods (on_load, on_start, step, on_save) at appropriate times in the
+lifecycle
 """
 from .core import (EventUnit, GradClip, LoadUnit, LossUnit, TrainingUnit, OptimizerUnit,
                    PluginUnit, SaveUnit, StateUnit)

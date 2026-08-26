@@ -438,7 +438,7 @@ class OptimizerUnit(TrainingUnit):  # pylint:disable=too-many-instance-attribute
 
         return state
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize optimizer state on the training device
 
         Moves optimizer internal state tensors to the appropriate device  (CPU/GPU) for training

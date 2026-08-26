@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """ TensorBoard logging unit for training monitoring.
 
-This optional module provides the TensorBoardUnit class which handles logging training metrics to 
-TensorBoard for visualization and analysis. It supports writing model graphs during initialization, 
-logging various loss components, and managing the lifecycle of the TensorBoard writer throughout 
+This optional module provides the TensorBoardUnit class which handles logging training metrics to
+TensorBoard for visualization and analysis. It supports writing model graphs during initialization,
+logging various loss components, and managing the lifecycle of the TensorBoard writer throughout
 the training process.
 
-The unit integrates with the Faceswap training loop system and can optionally write model 
+The unit integrates with the Faceswap training loop system and can optionally write model
 architecture diagrams for better understanding of network structure. It handles both regular and
 live log file reading through the RecordIterator helper class
 """
@@ -46,7 +46,7 @@ class RecordIterator:
     log_file
         Path to the TensorBoard event log file to read from
     is_live, optional
-        Whether this is a live (continuous) log file that may still be written to. Default: ``False``
+        ``True`` if this is a live log file that may still be written to. Default: ``False``
     """
     _max_record_size = 1024 ** 3
 
@@ -137,7 +137,7 @@ class TensorBoardUnit(TrainingUnit):
     model_folder
         Path to the folder where model files are stored
     model_name
-        Name identifier for this model 
+        Name identifier for this model
     session_id
         Unique identifier for the current training session
     write_graph, optional
@@ -161,7 +161,7 @@ class TensorBoardUnit(TrainingUnit):
         logger.debug("%s Logging to: '%s'", self.log_name, log_dir)
         self._writer = SummaryWriter(log_dir)
 
-        self._current_loss: list[BatchLoss]  # set in on_start
+        self._current_loss: list[BatchLoss]  # set in on_load
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -192,14 +192,14 @@ class TensorBoardUnit(TrainingUnit):
         model.eval()
         with torch.no_grad():
             inputs = tuple(torch.rand((1, *shape)).to(device) for shape in input_shapes)
-            self._writer.add_graph(model, (inputs, ), use_strict_trace=True)  # TODO to False
+            self._writer.add_graph(model, (inputs, ))
         if is_training:
             model.train()
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize TensorBoard logging and write model graph
 
-        Sets up the TensorBoard writer with appropriate log directory and writes the model 
+        Sets up the TensorBoard writer with appropriate log directory and writes the model
         architecture graph for visualization during the first session
 
         Parameters
@@ -246,7 +246,7 @@ class TensorBoardUnit(TrainingUnit):
     def step(self, iteration: int) -> None:
         """ Log batch metrics to TensorBoard
 
-        Processes the current loss values and logs them to TensorBoard as scalar values. 
+        Processes the current loss values and logs them to TensorBoard as scalar values.
         Skips logging during pre-training phase (negative iterations).
 
         Parameters

@@ -126,6 +126,7 @@ class LRFScheduler(ExponentialLR):
                  total_steps: int,
                  last_epoch: int = -1
                  ) -> None:
+        logger.debug(parse_class_init(locals()))
 
         self.total_steps = total_steps
         """ Total number of LRF sweep iterations planned """
@@ -135,7 +136,6 @@ class LRFScheduler(ExponentialLR):
         """ Learning rate value applied at each step during the sweep """
         self.best_loss = torch.tensor(float("inf"), dtype=torch.float32)
         """ Best (minimum) smoothed loss encountered so far during the sweep """
-
         self._beta = beta
         self._average_loss = torch.tensor(0.0, dtype=torch.float32)
 
@@ -159,7 +159,7 @@ class LRFScheduler(ExponentialLR):
         retval = super().state_dict()
         retval["beta"] = self._beta
         retval["total_steps"] = self.total_steps
-        retval["smooth_losses"] = self.smooth_losses  # TODO name change for state_dict
+        retval["smooth_losses"] = self.smooth_losses
         retval["learning_rates"] = self.learning_rates
         retval["average_loss"] = self._average_loss
         retval["best_loss"] = self.best_loss
@@ -175,7 +175,7 @@ class LRFScheduler(ExponentialLR):
         """
         self._beta = state_dict.pop("beta")
         self.total_steps = state_dict.pop("total_steps")
-        self.smooth_losses = state_dict.pop("smooth_losses")  # TODO name change for state_dict
+        self.smooth_losses = state_dict.pop("smooth_losses")
         self.learning_rates = state_dict.pop("learning_rates")
         self._average_loss = state_dict.pop("average_loss")
         self.best_loss = state_dict.pop("best_loss")
@@ -381,7 +381,7 @@ def plot_loss(filename: str,
     plt.title("Learning Rate Finder")
     plt.legend()
 
-    logger.info("[LearningRateFinder] Saving graph to: '%s'", filename)
+    logger.info("[LearningRateFinder] Graph saved: '%s'", filename)
     plt.savefig(filename)
 
 
@@ -439,7 +439,7 @@ class LRFState:  # pylint:disable=too-many-instance-attributes
         logger.debug("%s Saving initial weights: '%s'", self._log_name, self._backing_file)
         torch.save(state_dict, self._backing_file)
 
-    def on_start(self):
+    def on_load(self) -> None:
         """ Initialize LRF by setting start LR, backing up weights, and entering pre-training mode.
 
         Sets the optimizer's learning rate to _start_lr (typically 1e-10), saves initial model/
@@ -486,6 +486,13 @@ class LRFState:  # pylint:disable=too-many-instance-attributes
             return False
         return True
 
+    def _restore_initial_weights(self) -> None:
+        """ Load saved backup weights and restore model to pre-LRF state """
+        logger.debug("%s Restoring model weights from: '%s'", self._log_name, self._backing_file)
+        original_weights = torch.load(self._backing_file)
+        self._model.plugin.load_state_dict(original_weights["model"])
+        self._optimizer.load_state_dict(original_weights["optimizer"])
+
     def _set_learning_rate(self, new_lr: float) -> None:
         """ Store optimal learning rate in state and update optimizer
 
@@ -495,18 +502,11 @@ class LRFState:  # pylint:disable=too-many-instance-attributes
             The optimal learning rate computed by LRF to replace current value
         """
         logger.debug("%s Storing result in state file: %s", self._log_name, new_lr)
-        if self._mode == "graph_and_exit":
+        if self._mode != "graph_and_exit":
             logger.info("[LearningRateFinder] Setting learning rate to: %s", f"{new_lr:.1e}")
         self._model.state.session_config["learning_rate"] = new_lr
         self._model.state.lr_finder = new_lr
         self._optimizer.set_lr(new_lr)
-
-    def _restore_initial_weights(self) -> None:
-        """ Load saved backup weights and restore model to pre-LRF state """
-        logger.debug("%s Restoring model weights from: '%s'", self._log_name, self._backing_file)
-        original_weights = torch.load(self._backing_file)
-        self._model.plugin.load_state_dict(original_weights["model"])
-        self._optimizer.load_state_dict(original_weights["optimizer"])
 
     def _save_original_model(self) -> None:
         """ Save fresh initial model state dict after the LRF run """
@@ -514,7 +514,7 @@ class LRFState:  # pylint:disable=too-many-instance-attributes
             self._events.exit.set()  # Let main loop handle saving
             return
 
-        logger.info("[LearningRateFinder] Restoring original model state")
+        logger.debug("[LearningRateFinder] Restoring original model state")
         fresh_state = self._model.state_dict()
         fresh_state["optimizer"] = self._optimizer.state_dict()
         fname = self._model.checkpoint_path
@@ -537,8 +537,8 @@ class LRFState:  # pylint:disable=too-many-instance-attributes
             self._events.exit.set()
             return
 
-        self._set_learning_rate(new_lr)
         self._restore_initial_weights()
+        self._set_learning_rate(new_lr)
         self._clean_up()
         self._model.state.set_training()
         self._save_original_model()
@@ -627,7 +627,7 @@ class LRFinderUnit(TrainingUnit):
 
     Notes
     -----
-    The unit integrates with TrainingUnit lifecycle: on_start() initializes components, step()
+    The unit integrates with TrainingUnit lifecycle: on_load() initializes components, step()
     performs sweep iterations, and state_dict()/load_state_dict() handle checkpoint persistence.
     When LRF completes successfully (step() returns True), the unit removes itself from steppers so
     main training can continue normally without further LRF interference.
@@ -649,8 +649,9 @@ class LRFinderUnit(TrainingUnit):
         self._lrf_state_kwargs = {"mode": mode, "start_lr": start_lr}
         self._lrf_kwargs = {"strength": strength, "stop_factor": stop_factor}
 
-        self._lrf_state: LRFState | None = None  # set in on_start if required
-        self._scheduler: LRFScheduler | None = None  # set in on_start if required
+        self._lrf_state: LRFState | None = None  # set in on_load if required
+        self._scheduler: LRFScheduler | None = None  # set in on_load if required
+        self._units: Units  # set in on_load
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -690,9 +691,8 @@ class LRFinderUnit(TrainingUnit):
 
     def _set_learning_rate_from_lrf(self,
                                     state: State,
-                                    optimizer: OptimizerUnit,
-                                    units: Units) -> None:
-        """ Apply stored optimal LR and remove LRF unit from steppers
+                                    optimizer: OptimizerUnit) -> None:
+        """ Apply stored optimal LR
 
         Parameters
         ----------
@@ -700,8 +700,6 @@ class LRFinderUnit(TrainingUnit):
             Model's state object containing lr_finder attribute with stored optimal rate
         optimizer
             Reference to optimizer unit whose learning_rate method must be called
-        units
-            TrainingUnits collection used for removing self from step stage steppers list
 
         Raises
         ------
@@ -714,9 +712,6 @@ class LRFinderUnit(TrainingUnit):
 
         state.session_config["learning_rate"] = new_lr
         optimizer.set_lr(new_lr)
-
-        logger.debug("%s removing self from steppers", self.log_name)
-        units.stages_optional["step"].remove(self)
 
     def _setup_lr_finder(self, loop: TrainStep) -> tuple[LRFScheduler, LRFState]:
         """ Create and initialize LRFScheduler and LRFState instances with full configuration
@@ -741,26 +736,29 @@ class LRFinderUnit(TrainingUnit):
                     self._scheduler_kwargs["start_lr"],
                     self._scheduler_kwargs["end_lr"],
                     self._scheduler_kwargs["total_steps"])
-        lrf_state.on_start()
+        lrf_state.on_load()
         return scheduler, lrf_state
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize LRF by either resuming from checkpoint or starting a fresh sweep
 
         Detects if should resume an LRF sweep based on session_id==1 AND file_exists==True
         (checkpoint exists) AND iterations<0 (negative indicates still pre-training).
 
-        If this is the main train then the learning rate it set from the stored optimal LR and we
-        remove Self from steppers so that this unit is not accessed again
+        If this is the main train then the learning rate it set from the stored optimal LR.
 
         Otherwise runs new LRF sweep: checks if not session 1 or no checkpoint file exist (valid
         for fresh start) to get the optimal learning rate
+
+        We add a reference to Units so that we can remove Self from steppers when we commence full
+        training, so that this unit is not accessed again
 
         Parameters
         ----------
         loop
             Training step providing access to model state, optimizer, events for initialization
         """
+        self._units = loop.units
         is_resume = (loop.model.state.session_id == 1 and
                      loop.model.io.file_exists and
                      loop.model.state.iterations < 0)
@@ -768,27 +766,32 @@ class LRFinderUnit(TrainingUnit):
             logger.debug("%s Resuming LRF", self.log_name)
 
         if not is_resume and (loop.model.state.session_id != 1 or loop.model.io.file_exists):
-            self._set_learning_rate_from_lrf(loop.model.state, loop.optimizer_unit, loop.units)
+            self._set_learning_rate_from_lrf(loop.model.state, loop.optimizer_unit)
             return
 
         self._scheduler, self._lrf_state = self._setup_lr_finder(loop)
 
+    def on_start(self) -> None:
+        """ When commencing main training LRF has completed all tasks, so remove this object from
+        steppers """
+        logger.debug("%s removing self from steppers", self.log_name)
+        self._units.stages_optional["step"].remove(self)
+
     def step(self, iteration: int) -> None:
         """ Perform LRF sweep step if still in initial phase (iteration <= 0).
 
-        When iteration > 0 returns immediately since first few iterations already set up pre-
-        training mode and completed the sweep. For iteration <= 0, advances scheduler and checks
-        stopping conditions. If step() returns True indicating completion then the unit is cleaned
-        up as we are entering training mode
+        For iteration of -1, advances scheduler and checks stopping conditions. If step() returns
+        True indicating completion then the unit is cleaned up as we are entering training mode.
+
+        Errors if iteration does not == -1 as this unit removes itself from steppers when entering
+        training mode
 
         Parameters
         ----------
         iteration
             Current training iteration number - negative values indicate pre-training phase
         """
-        if iteration > 0:
-            return  # LRF finder has run and we are now training
-        assert self._lrf_state is not None
+        assert iteration == -1 and self._lrf_state is not None
         if self._lrf_state.step():
             del self._scheduler
             self._scheduler = None
@@ -821,7 +824,7 @@ class LRFinderUnit(TrainingUnit):
         state_dict
             Dictionary from torch.load() containing saved LRF state
         """
-        if self._scheduler is None:  # TODO we need to catch this if we are resuming LRF
+        if self._scheduler is None:  # Only when in LRF sweep
             logger.debug("%s No LRF scheduler. Not loading state_dict", self.log_name)
             return
         assert self._lrf_state is not None

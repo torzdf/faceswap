@@ -40,7 +40,7 @@ class WarmupScheduler(LRScheduler):
     optimizer
         The Torch optimizer whose learning rate will be adjusted during warmup
     steps
-        Number of warmup steps over which the learning rate will be increased from 0 to target value
+        Number of warmup steps over which the learning rate will be increased from 0 to target
     last_epoch, optional
         The index of the last epoch. Default: ``-1``
     """
@@ -51,7 +51,7 @@ class WarmupScheduler(LRScheduler):
 
     def get_lr(self) -> list[float | torch.Tensor]:
         """ Calculate learning rate for current epoch
-        
+
         Returns
         -------
         A list containing learning rate values for each parameter group in the optimizer
@@ -88,9 +88,10 @@ class WarmupUnit(TrainingUnit):
         super().__init__()
         self._warmup_steps = warmup_steps
         self._reporting_points = [int(warmup_steps * i / 10) for i in range(11)]
+        self._iteration = 0
 
+        self._optimizer: Optimizer  # set in on_load
         self._scheduler: WarmupScheduler  # set in on_start
-        self._optimizer: Optimizer  # set in on_start
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
@@ -99,7 +100,7 @@ class WarmupUnit(TrainingUnit):
     @classmethod
     def _fmt(cls, value: float) -> str:
         """ Format float value in scientific notation
-        
+
         Parameters
         ----------
         value
@@ -111,44 +112,47 @@ class WarmupUnit(TrainingUnit):
         """
         return f"{value:.1e}"
 
-    def on_start(self, loop: TrainStep) -> None:
-        """ Initialize the warmup scheduler with optimizer
+    def on_load(self, loop: TrainStep) -> None:
+        """ Take a reference to the optimizer
 
-        Sets up the warmup scheduler using the Torch optimizer from the training loop
+        Takes an optimizer reference for deferred Scheduler set up
 
         Parameters
         ----------
         loop
             The training step object that manages this unit's lifecycle
         """
+        logger.debug("%s Referencing optimizer", self.log_name)
         self._optimizer = loop.optimizer_unit.optimizer
 
-    def _report_progress(self, iteration: int) -> None:
-        """ Log learning rate warmup progress at predefined reporting points
-        
-        Parameters
-        ----------
-        iteration
-            The current training iteration number. Logging only occurs if this value is valid
+    def on_start(self) -> None:
+        """ Initialize the warmup scheduler
+
+        Sets up the warmup scheduler using the Torch optimizer from the training loop
         """
-        if iteration not in ([1] + self._reporting_points + [self._warmup_steps]):
+        logger.debug("%s Enabling warmup scheduler", self.log_name)
+        self._scheduler = WarmupScheduler(self._optimizer, self._warmup_steps)
+
+    def _report_progress(self) -> None:
+        """ Log learning rate warmup progress at predefined reporting points """
+        if self._iteration not in ([1] + self._reporting_points + [self._warmup_steps]):
             return
 
         current_lr = T.cast(float, self._scheduler.get_last_lr()[0])
         target_lr = T.cast(float, self._scheduler.base_lrs[0])
 
-        if iteration == 1:
-            logger.info("[Learning Rate Warmup] Start: %s, Target: %s, Steps: %s",
+        if self._iteration == 1:
+            logger.info("[LearningRateWarmup] Start: %s, Target: %s, Steps: %s",
                         self._fmt(current_lr), self._fmt(target_lr), self._warmup_steps)
             return
-        if iteration == self._warmup_steps:
-            logger.info("%s Final Learning Rate: %s", self.log_name, self._fmt(target_lr))
+        if self._iteration == self._warmup_steps:
+            logger.info("[LearningRateWarmup] Final Learning Rate: %s", self._fmt(target_lr))
             return
 
         progress = int(round(100 / (len(self._reporting_points) - 1) *
-                       self._reporting_points.index(iteration), 0))
-        logger.info("[Learning Rate Warmup] Step: %s/%s (%s), Current: %s, Target: %s",
-                    iteration,
+                       self._reporting_points.index(self._iteration), 0))
+        logger.info("[LearningRateWarmup] Step: %s/%s (%s), Current: %s, Target: %s",
+                    self._iteration,
                     self._warmup_steps,
                     f"{progress}%",
                     self._fmt(current_lr),
@@ -166,14 +170,17 @@ class WarmupUnit(TrainingUnit):
         iteration
             Current training iteration number. Negative values indicate pre-training phase
         """
-        if iteration < 0:  # TODO need to make sure this doesn't still kick in
+        if self._iteration > self._warmup_steps:
+            return
+
+        if iteration < 1:
             logger.trace("%s Pre-training. Not handling warmup",  # type:ignore[attr-defined]
                          self.log_name)
             return
-        if iteration > self._warmup_steps:
-            return
+
+        self._iteration += 1
         self._scheduler.step()
-        self._report_progress(iteration)
+        self._report_progress()
 
 
 __all__ = get_module_objects(__name__)

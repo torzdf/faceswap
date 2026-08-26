@@ -162,7 +162,7 @@ class PluginUnit(TrainingUnit):
         logger.debug("%s Configured loss: %s", self.log_name, loss)
         return loss
 
-    def on_start(self, loop: TrainStep) -> None:
+    def on_load(self, loop: TrainStep) -> None:
         """ Initialize the model and loss function on the specified device
 
         Moves the trainer model and loss functions to the configured training device
