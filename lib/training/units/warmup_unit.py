@@ -142,16 +142,20 @@ class WarmupUnit(TrainingUnit):
         target_lr = T.cast(float, self._scheduler.base_lrs[0])
 
         if self._iteration == 1:
-            logger.info("[LearningRateWarmup] Start: %s, Target: %s, Steps: %s",
-                        self._fmt(current_lr), self._fmt(target_lr), self._warmup_steps)
+            logger.info("%s Start: %s, Target: %s, Steps: %s",
+                        self.log_name,
+                        self._fmt(current_lr),
+                        self._fmt(target_lr),
+                        self._warmup_steps)
             return
         if self._iteration == self._warmup_steps:
-            logger.info("[LearningRateWarmup] Final Learning Rate: %s", self._fmt(target_lr))
+            logger.info("%s Final Learning Rate: %s", self.log_name, self._fmt(target_lr))
             return
 
         progress = int(round(100 / (len(self._reporting_points) - 1) *
                        self._reporting_points.index(self._iteration), 0))
-        logger.info("[LearningRateWarmup] Step: %s/%s (%s), Target: %s, Current: %s",
+        logger.info("%s Step: %s/%s (%s), Target: %s, Current: %s",
+                    self.log_name,
                     self._iteration,
                     self._warmup_steps,
                     f"{progress}%",

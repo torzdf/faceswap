@@ -36,8 +36,8 @@ from lib.utils import PROJECT_ROOT
 
 from lib.training import Preview, PreviewBuffer, TriggerType
 from lib.training.data import TrainLoader
-from lib.training.units import (LRFinderUnit, PreviewUnit, TensorBoardUnit, TimelapseUnit,
-                                WarmupUnit)
+from lib.training.units import (FreezeWeightsUnit, LoadWeightsUnit, LRFinderUnit, PreviewUnit,
+                                TensorBoardUnit, TimelapseUnit, WarmupUnit)
 from lib.model.plugin import FaceswapModel
 from lib.training import TrainingLoop
 from lib.utils import (FaceswapError, get_module_objects, handle_deprecated_cli_opts)
@@ -486,6 +486,16 @@ class Train():
         args
             CLI arguments containing all flag values determining which units to register
         """
+        if args.load_weights:
+            if model.io.file_exists:
+                logger.warning("'load_weights' selected whilst resuming an existing model. "
+                               "No weights will be loaded")
+            else:
+                loop.add_unit(LoadWeightsUnit(args.load_weights, model))
+
+        if args.freeze_weights:
+            loop.add_unit(FreezeWeightsUnit(model))
+
         if args.use_lr_finder:
             loop.add_unit(LRFinderUnit(start_lr=1e-9, end_lr=1e-2))
 

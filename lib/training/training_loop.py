@@ -36,7 +36,7 @@ if T.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# TODO ping-pong, MSG, Optimizer legacy, weights loading, imgnet + weights init, reset optimizer
+# TODO ping-pong, MSG, Optimizer legacy, imgnet + weights init, reset optimizer
 
 UnitGroupT = T.Literal["core", "optional"]
 UnitStageT = T.Literal["load", "start", "step", "save", "update", "end"]
@@ -618,7 +618,8 @@ class TrainingLoop:
         """ Register an optional training unit for the session.
 
         Adds a non-core unit to be executed during training iterations. Units can be added
-        dynamically based on runtime configuration or user requests from main thread
+        dynamically based on runtime configuration or user requests from main thread. Units are
+        executed in the order that they are added to the stack
 
         Parameters
         ----------

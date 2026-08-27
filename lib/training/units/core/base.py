@@ -50,7 +50,10 @@ class TrainingUnit(abc.ABC):
     """  # pylint:disable=line-too-long  # noqa[E501]
 
     def __init__(self) -> None:
-        self.log_name = f"[{self.__class__.__name__}]"
+        log_name = self.__class__.__name__
+        if log_name.endswith("Unit"):
+            log_name = log_name[:-4]
+        self.log_name = f"[{log_name}]"
         """ Standardized prefix for debug logging """
 
     def on_load(self, loop: TrainStep) -> None:  # pylint:disable=unused-argument

@@ -41,3 +41,4 @@ from .lr_finder_unit import LRFinderUnit
 from .preview_unit import PreviewUnit, TimelapseUnit
 from .tensorboard_unit import TensorBoardUnit
 from .warmup_unit import WarmupUnit
+from .weights_unit import FreezeWeightsUnit, LoadWeightsUnit

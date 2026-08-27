@@ -708,7 +708,7 @@ class LRFinderUnit(TrainingUnit):
         """
         new_lr = state.lr_finder
         assert new_lr > 0, "LRF information has not been stored"
-        logger.info("[LearningRateFinder] Setting learning rate to: %s", f"{new_lr:.1e}")
+        logger.info("%s Setting learning rate to: %s", self.log_name, f"{new_lr:.1e}")
 
         state.session_config["learning_rate"] = new_lr
         optimizer.set_lr(new_lr)
@@ -732,7 +732,8 @@ class LRFinderUnit(TrainingUnit):
         scheduler = LRFScheduler(loop.optimizer_unit.optimizer, **self._scheduler_kwargs)
         lrf = LearningRateFinder(scheduler=scheduler, **self._lrf_kwargs)
         lrf_state = LRFState(loop, scheduler, lrf, **self._lrf_state_kwargs)
-        logger.info("[LearningRateFinder] start: %s, end: %s, steps: %s",
+        logger.info("%s start: %s, end: %s, steps: %s",
+                    self.log_name,
                     self._scheduler_kwargs["start_lr"],
                     self._scheduler_kwargs["end_lr"],
                     self._scheduler_kwargs["total_steps"])
@@ -832,7 +833,7 @@ class LRFinderUnit(TrainingUnit):
             logger.debug("%s No LRF scheduler. Not loading state_dict", self.log_name)
             return
         assert self._lrf_state is not None
-        logger.info("[LearningRateFinder] Resuming")
+        logger.info("%s Resuming", self.log_name)
         self._scheduler.load_state_dict(state_dict)
         self._lrf_state.resume()
 
