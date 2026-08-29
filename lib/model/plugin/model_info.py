@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Obtain summary information about a Faceswap Model"""
+""" Obtain summary information about a Faceswap Model """
 from __future__ import annotations
 
 import logging
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 def _recurse_to_tensor(obj: list[torch.Tensor] | torch.Tensor,
                        return_attr: str | None = None
                        ) -> list[torch.Tensor] | list[T.Any] | torch.Tensor | T.Any:
-    """Recurse through nested lists or tuples to obtain the contained tensors and return
+    """ Recurse through nested lists or tuples to obtain the contained tensors and return
     information in the same layout
 
     Parameters
@@ -62,7 +62,7 @@ def _flatten_list(to_flatten: list[T.Any]) -> T.Generator[T.Any, None, None]:
 
 
 class Layer:  # pylint:disable=too-many-instance-attributes
-    """Hold's information about a Faceswap model's layer
+    """ Hold's information about a Faceswap model's layer
 
     Parameters
     ----------
@@ -102,40 +102,41 @@ class Layer:  # pylint:disable=too-many-instance-attributes
                  buffer_bytes: int,
                  requires_grad: bool) -> None:
         self.name = name
-        """The module name of the layer"""
+        """ The module name of the layer """
         self.type = layer_type
-        """The type (ClassName) of the layer"""
+        """ The type (ClassName) of the layer """
         self.is_plugin = is_plugin
-        """``True`` if the layer originates from plugins.train.model"""
+        """ ``True`` if the layer originates from plugins.train.model """
         self.is_parent = is_parent
-        """``True`` if this module contains sub-modules"""
+        """ ``True`` if this module contains sub-modules """
         self.input_shape = input_shape
-        """The tensor information for the layer inputs"""
+        """ The tensor information for the layer inputs """
         self.output_shape = T.cast(tuple[int, ...] | list[tuple[int, ...]],
                                    _recurse_to_tensor(output, "shape"))
-        """The output shape(s) from the layer"""
+        """ The output shape(s) from the layer """
         self.num_params = num_params
-        """The number of parameters in the layer"""
+        """ The number of parameters in the layer """
         self.num_buffers = num_buffers
-        """The number of (non-trainable) buffers in the layer"""
+        """ The number of (non-trainable) buffers in the layer """
         self.param_bytes = param_bytes
-        """The number of bytes for the parameters"""
+        """ The number of bytes for the parameters """
         self.buffer_bytes = buffer_bytes
-        """The number of bytes for the buffers"""
+        """ The number of bytes for the buffers """
         self.requires_grad = requires_grad
-        """True if the layer requires grad"""
+        """ True if the layer requires grad """
         self.call_count: int = 0
-        """The number of times that the layer was called"""
+        """ The number of times that the layer was called """
         self.input_layers: list[str] = []
-        """The input layer(s) to this layer"""
+        """ The input layer(s) to this layer """
         self.grad_fn = T.cast("Node | list[Node] | None", _recurse_to_tensor(output, "grad_fn"))
-        """The grad function(s) for the layer if exists and the backwards path has not been
-        processed otherwise ``None``"""
+        """ The grad function(s) for the layer if exists and the backwards path has not been
+        processed otherwise ``None`` """
 
         self._output_repr = (type(output), len(output))
         self._output: torch.Tensor | list[torch.Tensor] | None = output
 
     def __repr__(self) -> str:
+        """ Return a string representation for logging purposes """
         params = {k if k != "type" else "layer_type": self._output_repr if k == "output" else v
                   for k, v in self.__dict__.items()
                   if k not in ("call_count", "input_layers", "grad_fn")
@@ -144,7 +145,7 @@ class Layer:  # pylint:disable=too-many-instance-attributes
         return f"{self.__class__.__name__}({s_params})"
 
     def release_references(self) -> None:
-        """Release the references to the output Tensor and the grad_fn"""
+        """ Release the references to the output Tensor and the grad_fn """
         logger.debug("[Layer] releasing references for '%s'", self.name)
         del self._output
         del self.grad_fn
@@ -153,7 +154,7 @@ class Layer:  # pylint:disable=too-many-instance-attributes
 
 
 class _Structure:
-    """Passes a tensor through a faceswap model to collect information about the model structure
+    """ Passes a tensor through a faceswap model to collect information about the model structure
 
     Parameters
     ----------
@@ -164,15 +165,15 @@ class _Structure:
         logger.debug(parse_class_init(locals()))
         self._structure = self._get_structure(model)
         self.num_inputs = model.num_identities
-        """The number of identities the model is configured for"""
+        """ The number of identities the model is configured for """
 
     @property
     def structure(self) -> dict[str, Layer]:
-        """The structure from tracing the model for the current configuration"""
+        """ The structure from tracing the model for the current configuration """
         return self._structure
 
     def _add_forward_hook(self, summary: dict[str, Layer], name: str) -> T.Callable:
-        """Add a forward hook to the model
+        """ Add a forward hook to the model
 
         Parameters
         ----------
@@ -209,7 +210,7 @@ class _Structure:
         return hook_fn
 
     def _forward_trace(self, model: ModelPlugin) -> dict[str, Layer]:
-        """Run a forward pass through the model and collect outputs for auditing
+        """ Run a forward pass through the model and collect outputs for auditing
 
         Returns
         -------
@@ -227,6 +228,9 @@ class _Structure:
         model.eval()
         model(inp)
 
+        if not retval[model.__class__.__name__].input_shape:  # Top-level input shape
+            retval[model.__class__.__name__].input_shape = [(-1, *x.shape[1:]) for x in inp]
+
         for hook in hooks:
             hook.remove()
 
@@ -237,7 +241,7 @@ class _Structure:
 
     @classmethod
     def _map_grad_fns_to_layers(cls, layers: dict[str, Layer]) -> dict[Node, str]:
-        """Parse the collected layer's grad function and create a unique mapping from grad_fn back
+        """ Parse the collected layer's grad function and create a unique mapping from grad_fn back
         to original layer
 
         Parameters
@@ -282,7 +286,7 @@ class _Structure:
         return results
 
     def _resolve_backwards(self, layers: dict[str, Layer]) -> None:
-        """Pass through the grad functions to discover layer connectivity and update the layers
+        """ Pass through the grad functions to discover layer connectivity and update the layers
         dict in place
 
         Parameters
@@ -302,7 +306,7 @@ class _Structure:
             layers[name].input_layers = list(dict.fromkeys(inputs))  # de-duped in order
 
     def _get_structure(self, model: ModelPlugin) -> dict[str, Layer]:
-        """Process a sample tensor through the model and store information about each layer
+        """ Process a sample tensor through the model and store information about each layer
         visited
 
         Returns
@@ -317,7 +321,7 @@ class _Structure:
 
 
 class _Summary:
-    """Generates model summary information from a collected structure
+    """ Generates model summary information from a collected structure
 
     Parameters
     ----------
@@ -333,7 +337,7 @@ class _Summary:
         self._header = [["Layer (type)", "Input Shape", "Output Shape", "Params", "Connected To"]]
 
     def _get_parents(self) -> dict[str, list[str]]:
-        """Obtain the top-level module names and the number of instances of the module that exists
+        """ Obtain the top-level module names and the number of instances of the module that exists
         within the model
 
         Returns
@@ -363,7 +367,7 @@ class _Summary:
                       input_layers: list[str],
                       total_params: int,
                       instances: int) -> list[str]:
-        """Generate a row of summary data for tabulation from the given information
+        """ Generate a row of summary data for tabulation from the given information
 
         Parameters
         ----------
@@ -396,7 +400,7 @@ class _Summary:
             ]
 
     def _sub_module_builder(self, module: str, instances: int) -> list[list[str]]:
-        """Generate the rows for the model layers to be output to the summary table
+        """ Generate the rows for the model layers to be output to the summary table
 
         Parameters
         ----------
@@ -431,7 +435,7 @@ class _Summary:
         return retval
 
     def _top_level_builder(self, parents: list[str]) -> list[list[str]]:
-        """Generate the rows for the top-level summary
+        """ Generate the rows for the top-level summary
 
         Parameters
         ----------
@@ -458,7 +462,7 @@ class _Summary:
         return retval
 
     def _get_param_info(self, module: str) -> tuple[int, int, float, float]:
-        """Obtain the count and size in megabytes of trainable and non-trainable parameters for
+        """ Obtain the count and size in megabytes of trainable and non-trainable parameters for
         the given module
 
         Parameters
@@ -495,7 +499,7 @@ class _Summary:
                               parameters: tuple[int, int, float, float],
                               instances: int,
                               print_fn: T.Callable[[str], T.Any]) -> None:
-        """Generate the parameter count and memory summaries and output to print_fn
+        """ Generate the parameter count and memory summaries and output to print_fn
 
         Parameters
         ----------
@@ -538,7 +542,7 @@ class _Summary:
                 f"{val[1][1].rjust(col_widths[1][1])}")
 
     def __call__(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
-        """Generate the preview
+        """ Generate the preview
 
         Parameters
         ----------
@@ -571,7 +575,7 @@ class _Summary:
 
 
 class Info:
-    """Obtain summary information about a Faceswap Model.
+    """ Obtain summary information about a Faceswap Model.
 
     Note: The information collected is correct at the time of calling. No model references are held
     so data is not updated if the model is changed subsequent to creating this class instance"""
@@ -588,47 +592,50 @@ class Info:
         self._output_size: int = 0
 
     def __repr__(self) -> str:
-        """Better logging"""
+        """ Return a string representation for logging purposes """
         return f"{self.__class__.__name__}(model={self._model_info[1]})"
 
     @property
     def device(self) -> torch.Device:
-        """The device that the model resides on"""
+        """ The device that the model resides on """
         return self._device
 
     @property
     def output_shapes(self) -> list[list[tuple[int, int, int]]]:
-        """The output sizes for each side of the model, excluding batch dimension. List of length
-        num_identities, sub-list of length num_outputs, in shape (C, H, W)"""
+        """ The output sizes for each side of the model, excluding batch dimension. List of length
+        num_identities, sub-list of length num_outputs, in shape (C, H, W) """
         if not self._output_shapes:
             sizes = T.cast(list[list[torch.Size]],
                            self._structure.structure[self._model_info[0]].output_shape)
             assert isinstance(sizes, list)
             self._output_shapes = [[out[1:] for out in side] for side in sizes]
+            logger.debug("[Info] output_shapes: %s", self._output_shapes)
         return T.cast(list[list[tuple[int, int, int]]], self._output_shapes)
 
     @property
     def input_shapes(self) -> list[tuple[int, int, int]]:
-        """The input sizes to the model. List of length num_identities containing inputs shaped
-        (3, H, W)"""
+        """ The input sizes to the model. List of length num_identities containing inputs shaped
+        (3, H, W) """
         if not self._input_shapes:
             inputs = self._structure.structure[self._model_info[0]].input_shape
             assert isinstance(inputs, list)
             self._input_shapes = [i[1:] for i in inputs]
+            logger.debug("[Info] input_shapes: %s", self._input_shapes)
         return T.cast(list[tuple[int, int, int]], self._input_shapes)
 
     @property
     def input_size(self) -> int:
-        """The pixel input size to the model, regardless of side"""
+        """ The pixel input size to the model, regardless of side """
         if not self._input_size:
             input_sizes = set(x[1] for x in self.input_shapes)
             assert len(input_sizes) == 1, f"Multiple input sizes not supported. Got {input_sizes}"
             self._input_size = input_sizes.pop()
+            logger.debug("[Info] input_size: %s", self._input_size)
         return self._input_size
 
     @property
     def output_size(self) -> int:
-        """The largest pixel image output size from the model, regardless of side"""
+        """ The largest pixel image output size from the model, regardless of side """
         if not self._output_size:
             max_out_sizes = set(max(out[1] for out in side if out[0] != 1)
                                 for side in self.output_shapes)
@@ -639,11 +646,11 @@ class Info:
 
     @property
     def structure(self) -> dict[str, Layer]:
-        """The parsed model structure"""
+        """ The parsed model structure """
         return self._structure.structure
 
     def summary(self, print_fn: T.Callable[[str], T.Any] | None = None) -> None:
-        """Output the model summary table
+        """ Output the model summary table
 
         Parameters
         ----------

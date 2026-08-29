@@ -66,7 +66,7 @@ To extract trump from photos in a folder (Right hand folder icon):
 To extract cage from a video file (Left hand folder icon):
 ![ExtractVideo](https://i.imgur.com/TK02F0u.jpg)
 
-For input we either specify our photo directory or video file and for output we specify the folder where our extracted faces will be saved. The script will then try its best to recognize face landmarks, crop the images to a consistent size, and save the faces to the output folder. An `alignments.json` file will also be created and saved into your input folder. This file contains information about each of the faces that will be used by FaceSwap.
+For input we either specify our photo directory or video file and for output we specify the folder where our extracted faces will be saved. The script will then try its best to recognize face landmarks, crop the images to a consistent size, and save the faces to the output folder. An `alignments.fsa` file will also be created and saved into your input folder. This file contains information about each of the faces that will be used by FaceSwap.
 
 Note: this script will make grabbing test data much easier, but it is not perfect. It will (incorrectly) detect multiple faces in some photos and does not recognize if the face is the person whom we want to swap. Therefore: **Always check your training data before you start training.** The training data will influence how good your model will be at swapping.
 
