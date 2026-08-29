@@ -204,7 +204,7 @@ class PluginLoader():
         return plugins
 
     @classmethod
-    def get_model_path(cls, name: str, module: bool = False) -> str:
+    def _get_model_path(cls, name: str, module: bool = False) -> str:
         """ Obtain the full dot separated path to a training model plugin relative to the project
         root
 
@@ -245,7 +245,7 @@ class PluginLoader():
         -------
         A training model plugin
         """
-        path = cls.get_model_path(name, module=False)
+        path = cls._get_model_path(name, module=False)
         retval = cls._import_plugin(path)
         logger.info("Loading Model from %s plugin", path.rsplit(".", maxsplit=1)[-1])
         return retval
