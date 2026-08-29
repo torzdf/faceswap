@@ -25,7 +25,7 @@ from lib.utils import FaceswapError, get_module_objects
 from .core import TrainingUnit
 
 if T.TYPE_CHECKING:
-    from lib.model.plugin import FaceswapModel, State
+    from lib.model.plugin import FaceswapModel
     from lib.training.training_loop import TrainStep
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class LoadWeightsUnit(TrainingUnit):
 
         self._model_name = model.name
         self._plugin = model.plugin
-        self._layers: list[str] = model.state.config.get("load_layers", [])
+        self._layers: list[str] = model.plugin.load_layers
         self._weights_file = weights_file
 
         self._validate()
@@ -248,34 +248,33 @@ class FreezeWeightsUnit(TrainingUnit):
 
         self._plugin = model.plugin
         self._name = model.name
-        self._layers: list[str] = self._validate_layers(model.state)
+        self._layers: list[str] = self._validate_layers(model.plugin.freeze_layers)
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
         return self._repr_obj
 
-    def _validate_layers(self, state: State) -> list[str]:
+    def _validate_layers(self, layers: list[str]) -> list[str]:
         """ Validate and filter freeze layer names against actual model structure
 
         Parameters
         ----------
-        state
-            Model's state object containing config with "freeze_layers" key
+        layers
+            The list of Torch nn.Module names that are selected for freezing
 
         Returns
         -------
         List of valid layer names that exist in current model and will be frozen
         """
 
-        freeze_layers = state.config.get("freeze_layers", [])
-        if not freeze_layers:
+        if not layers:
             logger.warning("%s `freeze_weights` selected but no layers specified to freeze. All "
                            "layers will be trainable.", self.log_name)
-            return freeze_layers
+            return []
 
         selected = {x: [m[0] for m in self._plugin.named_modules()
                         if m[0] == x or m[0].startswith(f"{x}.")]
-                    for x in freeze_layers}
+                    for x in layers}
         retval = []
         for k, v in selected.items():
             if not v:

@@ -758,19 +758,22 @@ class Optimizer(GlobalSection):
 
 
 # pylint:disable=duplicate-code
-_IS_LOADED: bool = False
+_CONFIG: _Config | None = None
 
 
-def load_config(config_file: str | None = None) -> None:
-    """Load the Train configuration .ini file
+def load_config(config_file: str | None = None) -> _Config:
+    """ Load the Train configuration .ini file
 
     Parameters
     ----------
-    config_file
-        Path to a custom .ini configuration file to load. Default: ``None`` (use default
-        configuration file)
+    Path to a custom .ini configuration file to load. Default: ``None`` (use default configuration
+    file)
+
+    Returns
+    -------
+    The loaded training config object
     """
-    global _IS_LOADED  # pylint:disable=global-statement
-    if not _IS_LOADED:
-        _Config(config_file=config_file)
-    _IS_LOADED = True
+    global _CONFIG  # pylint:disable=global-statement
+    if _CONFIG is None:
+        _CONFIG = _Config(config_file=config_file)
+    return _CONFIG

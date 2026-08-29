@@ -1479,16 +1479,17 @@ class PhazeA(ModelPlugin):
         self.inter_gblock, self.gblock = self._build_gblock()
         self.decoder = self._build_decoder()
 
-    # TODO these 2 properties are hangovers from old system. Revisit when implemented
+    # Resolve configured layer names (from ModelPlugin's shared live config, via the base property) into the
+    # actual torch module names this model uses. Only mapping is Phaze-A specific; naming/resolution stays on base.
     @property
     def freeze_layers(self) -> list[str]:
-        """ Valid layers to freeze based on configured options """
-        return self._select_real_layers(cfg.freeze_layers())
+        """ Resolved real-module layer names to freeze during training (see ModelPlugin.freeze_layers). """
+        return self._select_real_layers(super().freeze_layers)
 
     @property
     def load_layers(self) -> list[str]:
-        """ Valid layers to load based on configured options """
-        return self._select_real_layers(cfg.load_layers())
+        """ Resolved real-module layer names to load weights into during training (see ModelPlugin.load_layers). """
+        return self._select_real_layers(super().load_layers)
 
     def _get_input_size(self, version: float) -> int:
         """ Obtain the input shape for the model.

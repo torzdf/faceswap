@@ -1,4 +1,4 @@
-#!/usr/bin/env/python3
+#!/usr/bin/env python3
 """ Manages persistent model training state across sessions and checkpoints
 
 This module provides the core state management infrastructure for Faceswap's deep learning
@@ -40,13 +40,11 @@ from dataclasses import dataclass, asdict
 import logging
 import time
 import typing as T
-from importlib import import_module
-from inspect import isclass
 
-from lib.config.objects import ConfigItem, GlobalSection
+from lib.config.objects import ConfigItem
 from lib.logger import parse_class_init
 from lib.utils import get_module_objects
-from plugins.train import train_config as cfg
+from plugins.train.train_config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +70,8 @@ class _Config:
 
     Parameters
     ----------
-    plugin_path
-        The relative import path string to the model plugin's module from the faceswap root
-        (e.g., "lib.model.plugin.networks.resnet"). This is used to load model-specific
-        configuration defaults from ``{plugin_path}_defaults`` module during initialization
+    plugin_name
+        The standardized internal name of the plugin that is being loaded
 
     Notes
     -----
@@ -88,15 +84,15 @@ class _Config:
     and model-specific defaults (architecture-dependent settings). This separation allows both
     general-purpose configurations and plugin-specific optimizations to coexist in the same state
     """
-    def __init__(self, plugin_path: str) -> None:
+    def __init__(self, plugin_name: str) -> None:
         logger.debug(parse_class_init(locals()))
-        self._import_path = plugin_path
-        self._name = f"[_Config.{plugin_path.rsplit(".", maxsplit=1)[-1]}]"
+        self._plugin_name = plugin_name
+        self._log_name = f"[_Config.{plugin_name.rsplit(".", maxsplit=1)[-1]}]"
         self._config, self._updatable = self._generate_config()
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
-        return f"{self.__class__.__name__}(plugin_path={repr(self._import_path)})"
+        return f"{self.__class__.__name__}(plugin_name={self._plugin_name!r})"
 
     @property
     def config(self) -> dict[str, T.Any]:
@@ -114,49 +110,6 @@ class _Config:
         """ Dictionary of config items that are fixed on model creation """
         return {k: v() for k, v in self._config.items() if k not in self._updatable}
 
-    def _get_global_options(self) -> dict[str, ConfigItem]:
-        """ Obtain all of the current global user config options
-
-        Returns
-        -------
-        All of the current global user configuration options
-        """
-        objects = {key: val for key, val in vars(cfg).items()
-                   if isinstance(val, ConfigItem)
-                   or isclass(val) and issubclass(val, GlobalSection) and val != GlobalSection}
-
-        retval: dict[str, ConfigItem] = {}
-        for key, obj in objects.items():
-            if isinstance(obj, ConfigItem):
-                retval[key] = obj
-                continue
-            for name, opt in obj.__dict__.items():
-                if isinstance(opt, ConfigItem):
-                    retval[name] = opt
-        logger.debug("%s Loaded global config options: %s",
-                     self._name, {k: v.value for k, v in retval.items()})
-        return retval
-
-    def _get_model_options(self) -> dict[str, ConfigItem]:
-        """ Obtain all of the currently configured model user config options
-
-        Returns
-        -------
-        The currently configured model plugin options
-        """
-        mod_name = f"{self._import_path}_defaults"
-        try:
-            mod = import_module(mod_name)
-        except ModuleNotFoundError:
-            logger.debug("%s No plugin specific defaults file found at '%s'",
-                         self._name, mod_name)
-            return {}
-
-        retval = {k: v for k, v in vars(mod).items() if isinstance(v, ConfigItem)}
-        logger.debug("%s Loaded plugin config options: %s",
-                     self._name, {k: v.value for k, v in retval.items()})
-        return retval
-
     def _generate_config(self) -> tuple[dict[str, ConfigItem], list[str]]:
         """ Generate initial state configuration by merging global and model-specific options
 
@@ -169,14 +122,22 @@ class _Config:
         """
         config: dict[str, ConfigItem] = {}
         updatable: list[str] = []
-        options = self._get_global_options() | self._get_model_options()
-        for key, val in options.items():
+
+        opts = load_config().sections
+        global_opts = {k: v for name, sect in opts.items()
+                       for k, v in sect.options.items()
+                       if not name.startswith(("model.", "trainer."))}
+        local_opts = {k: v for name, sect in opts.items()
+                      for k, v in sect.options.items()
+                      if name == f"model.{self._plugin_name}"}
+
+        for key, val in (global_opts | local_opts).items():
             config[key] = val
             if not val.fixed:
                 updatable.append(key)
 
-        logger.debug("%s Generated initial state config: %s", self._name, config)
-        logger.debug("%s Updatable items: %s", self._name, updatable)
+        logger.debug("%s Generated initial state config: %s", self._log_name, config)
+        logger.debug("%s Updatable items: %s", self._log_name, updatable)
         return config, updatable
 
     def load_state_dict(self, state_dict: dict[str, T.Any]) -> None:
@@ -210,10 +171,10 @@ class _Config:
 
             if val != loaded_val:
                 logger.debug("%s Fixed config item '%s' Updated from %s to %s from state file",
-                             self._name, key, repr(val), repr(loaded_val))
+                             self._log_name, key, repr(val), repr(loaded_val))
                 opt.set(loaded_val)
         logger.info("Using configuration saved in state file")
-        logger.debug("%s Loaded state_dict: %s", self._name, state_dict)
+        logger.debug("%s Loaded state_dict: %s", self._log_name, state_dict)
 
     def state_dict(self) -> dict[str, T.Any]:
         """ Serialize all current configuration values to a dictionary for checkpoint saving
@@ -283,16 +244,12 @@ class State:  # pylint:disable=too-many-instance-attributes
 
     Parameters
     ----------
-    plugin_path
-        Relative import path string to the model plugin module (e.g.
-        "lib.model.plugin.networks.resnet"). Used to identify the plugin and load model-specific
-        configuration defaults
+    plugin_name
+        The standardized internal name of the plugin that is being loaded
     """
-    def __init__(self, plugin_path: str) -> None:
+    def __init__(self, plugin_name: str) -> None:
         logger.debug(parse_class_init(locals()))
-        self._repr_obj = (f"{self.__class__.__name__}(plugin_path={repr(plugin_path)})")
-
-        self.plugin_name = plugin_path.rsplit(".")[-1].replace("_", "-")
+        self.plugin_name = plugin_name.replace("_", "-")
         """ The model name with underscores converted to dashes for user-friendly display """
 
         self.lr_finder = -1.0
@@ -303,13 +260,13 @@ class State:  # pylint:disable=too-many-instance-attributes
 
         self._sessions: dict[int, Session] = {}
         self._plugin_version = 0.0
-        self._config = _Config(plugin_path)
+        self._config = _Config(plugin_name)
         self._total_steps = 0
         self._step_called = False
 
     def __repr__(self) -> str:
         """ Return a string representation for logging purposes """
-        return self._repr_obj
+        return (f"{self.__class__.__name__}(plugin_name={self.plugin_name.replace('-', '_')!r})")
 
     @property
     def config(self) -> dict[str, T.Any]:

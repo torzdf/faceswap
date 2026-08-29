@@ -1,4 +1,4 @@
-#! /usr/env/bin/python3
+#!/usr/bin/env python3
 """ Handles Faceswap model loading, initialization, and configuration including weight initializers
 
 This module provides the _ModelConfigure utility class for applying custom weight initializations
@@ -417,7 +417,7 @@ class FaceswapModel:
         self.name = name.replace("-", "_")
         """ Model identifier with dashes replaced by underscores for internal consistency """
 
-        self.state = State(PluginLoader.get_model_path(name, module=True))
+        self.state = State(self.name)
         """ State management object tracking plugin version and configuration parameters """
         self.io = _ModelLoader(name, model_dir)  # TODO Private this
         """ File I/O handler for loading/saving checkpoints from model_dir directory """
