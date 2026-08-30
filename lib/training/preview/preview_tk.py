@@ -1,8 +1,4 @@
-#!/usr/bin/python
-"""The pop up preview window for Faceswap.
-
-If Tkinter is installed, then this will be used to manage the preview image, otherwise we
-fallback to opencv's imshow"""
+#!/usr/bin/env python3
 from __future__ import annotations
 import logging
 import os
@@ -21,25 +17,16 @@ import cv2
 
 from lib.utils import get_module_objects
 
-from .preview_cv import PreviewBase, TriggerKeysType
+from .preview import PreviewBase
 
 if T.TYPE_CHECKING:
     import numpy as np
-    from .preview_cv import PreviewBuffer, TriggerType
+    from .preview import PreviewBuffer, TriggerKeysType, TriggerType
 
 logger = logging.getLogger(__name__)
 
 
 class _Taskbar():
-    """Taskbar at bottom of Preview window
-
-    Parameters
-    ----------
-    parent
-        The parent frame that holds the canvas and taskbar
-    taskbar
-        None if preview is a pop-up window otherwise ttk.Frame if taskbar is managed by the GUI
-    """
     def __init__(self, parent: tk.Frame, taskbar: ttk.Frame | None) -> None:
         logger.debug("Initializing %s (parent: '%s', taskbar: %s)",
                      self.__class__.__name__, parent, taskbar)
@@ -66,58 +53,43 @@ class _Taskbar():
 
     @property
     def min_scale(self) -> int:
-        """The minimum allowed scale"""
         return self._min_max_scales[0]
 
     @property
     def max_scale(self) -> int:
-        """The maximum allowed scale"""
         return self._min_max_scales[1]
 
     @property
     def save_var(self) -> tk.BooleanVar:
-        """Variable which is set to ``True`` when the save button has been. pressed"""
         retval = self._vars["save"]
         assert isinstance(retval, tk.BooleanVar)
         return retval
 
     @property
     def scale_var(self) -> tk.StringVar:
-        """The variable holding the currently selected "##%" formatted percentage scaling amount
-        displayed in the Combobox."""
         retval = self._vars["scale"]
         assert isinstance(retval, tk.StringVar)
         return retval
 
     @property
     def slider_var(self) -> tk.IntVar:
-        """The variable holding the currently selected percentage scaling amount in the slider."""
         retval = self._vars["slider"]
         assert isinstance(retval, tk.IntVar)
         return retval
 
     @property
     def interpolator_var(self) -> tk.IntVar:
-        """The variable holding the CV2 Interpolator Enum."""
         retval = self._vars["interpolator"]
         assert isinstance(retval, tk.IntVar)
         return retval
 
     def _track_widget(self, widget: tk.Widget) -> None:
-        """If running embedded in the GUI track the widgets so that they can be destroyed if
-        the preview is disabled"""
         if self._is_standalone:
             return
         logger.debug("Tracking option bar widget for GUI: %s", widget)
         self._gui_mapped.append(widget)
 
     def _add_scale_combo(self) -> ttk.Combobox:
-        """Add a scale combo for selecting zoom amount.
-
-        Returns
-        -------
-        The Combobox widget
-        """
         logger.debug("Adding scale combo")
         self.scale_var.set("100%")
         scale = ttk.Combobox(self._frame,
@@ -132,20 +104,12 @@ class _Taskbar():
         return scale
 
     def _clear_combo_focus(self, *args) -> None:  # pylint:disable=unused-argument
-        """Remove the highlighting and stealing of focus that the combobox annoyingly
-        implements."""
         logger.debug("Clearing scale combo focus")
         self._scale.selection_clear()
         self._scale.winfo_toplevel().focus_set()
         logger.debug("Cleared scale combo focus")
 
     def _add_scale_slider(self) -> tk.Scale:
-        """Add a scale slider for zooming the image.
-
-        Returns
-        -------
-        The scale widget
-        """
         logger.debug("Adding scale slider")
         self.slider_var.set(100)
         slider = tk.Scale(self._frame,
@@ -160,7 +124,6 @@ class _Taskbar():
         return slider
 
     def _add_interpolator_radio(self) -> None:
-        """Add a radio box to choose interpolator"""
         frame = tk.Frame(self._frame)
         for text, mode in self._interpolators:
             logger.debug("Adding %s radio button", text)
@@ -174,7 +137,6 @@ class _Taskbar():
         self._track_widget(frame)
 
     def _add_save_button(self) -> None:
-        """Add a save button for saving out original preview"""
         logger.debug("Adding save button")
         button = tk.Button(self._frame,
                            text="Save",
@@ -184,27 +146,9 @@ class _Taskbar():
         logger.debug("Added save button: '%s'", button)
 
     def _on_slider_update(self, value) -> None:
-        """Callback for when the scale slider is adjusted. Adjusts the combo box display to the
-        current slider value.
-
-        Parameters
-        ----------
-        value
-            The value that the slider has been set to
-         """
         self.scale_var.set(f"{value}%")
 
     def set_min_max_scale(self, min_scale: int, max_scale: int) -> None:
-        """Set the minimum and maximum value that we allow an image to be scaled down to. This
-        impacts the slider and combo box min/max values:
-
-        Parameters
-        ----------
-        min_scale
-            The minimum percentage scale that is permitted
-        max_scale
-            The maximum percentage scale that is permitted
-        """
         logger.debug("Setting min/max scales: (min: %s, max: %s)", min_scale, max_scale)
         self._min_max_scales = (min_scale, max_scale)
         self._slider.config(from_=self.min_scale, to=max_scale)
@@ -219,14 +163,12 @@ class _Taskbar():
                      self._min_max_scales, choices)
 
     def cycle_interpolators(self, *args) -> None:  # pylint:disable=unused-argument
-        """Cycle interpolators on a keypress callback"""
         current = next(i for i in self._interpolators if i[1] == self.interpolator_var.get())
         next_idx = self._interpolators.index(current) + 1
         next_idx = 0 if next_idx == len(self._interpolators) else next_idx
         self.interpolator_var.set(self._interpolators[next_idx][1])
 
     def destroy_widgets(self) -> None:
-        """Remove the taskbar widgets when the preview within the GUI has been disabled"""
         if self._is_standalone:
             return
 
@@ -249,19 +191,6 @@ class _Taskbar():
 
 
 class _PreviewCanvas(tk.Canvas):  # pylint:disable=too-many-ancestors
-    """The canvas that holds the preview image
-
-    Parameters
-    ----------
-    parent
-        The parent frame that will hold the Canvas and taskbar
-    scale_var
-        The variable that holds the value from the scale combo box
-    screen_dimensions
-        The (`width`, `height`) of the displaying monitor
-    is_standalone
-        ``True`` if the preview is standalone, ``False`` if it is in the GUI
-    """
     def __init__(self,
                  parent: tk.Frame,
                  scale_var: tk.StringVar,
@@ -288,27 +217,17 @@ class _PreviewCanvas(tk.Canvas):  # pylint:disable=too-many-ancestors
 
     @property
     def image_id(self) -> int:
-        """The ID of the preview image item within the canvas"""
         return self._image_id
 
     @property
     def width(self) -> int:
-        """The pixel width of canvas"""
         return self.winfo_width()
 
     @property
     def height(self) -> int:
-        """The pixel width of the canvas"""
         return self.winfo_height()
 
     def _configure_scrollbars(self, frame: tk.Frame) -> None:
-        """Add X and Y scrollbars to the frame and set to scroll the canvas.
-
-        Parameters
-        ----------
-        frame
-            The parent frame to the canvas
-        """
         logger.debug("Configuring scrollbars")
         x_scrollbar = tk.Scrollbar(frame, orient="horizontal", command=self.xview)
         x_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -320,13 +239,6 @@ class _PreviewCanvas(tk.Canvas):  # pylint:disable=too-many-ancestors
         logger.debug("Configured scrollbars. x: '%s', y: '%s'", x_scrollbar, y_scrollbar)
 
     def _resize(self, event: tk.Event) -> None:  # pylint:disable=unused-argument
-        """Place the image in center of canvas on resize event and move to top left
-
-        Parameters
-        ----------
-        event
-            The canvas resize event. Unused.
-        """
         if self._var_scale.get() == "Fit":  # Trigger an update to resize image
             logger.debug("Triggering redraw for 'Fit' Scaling")
             self._var_scale.set("Fit")
@@ -347,15 +259,6 @@ class _PreviewCanvas(tk.Canvas):  # pylint:disable=too-many-ancestors
             self.yview_moveto(0.0)
 
     def _center_image(self, point_x: float, point_y: float) -> None:
-        """Center the image on the canvas on a resize or image update.
-
-        Parameters
-        ----------
-        point_x
-            The x point to center on
-        point_y
-            The y point to center on
-        """
         canvas_location = (self.canvasx(point_x), self.canvasy(point_y))
         logger.debug("Centering canvas for size (%s, %s). New image coordinates: %s",
                      point_x, point_y, canvas_location)
@@ -364,15 +267,6 @@ class _PreviewCanvas(tk.Canvas):  # pylint:disable=too-many-ancestors
     def set_image(self,
                   image: ImageTk.PhotoImage,
                   center_image: bool = False) -> None:
-        """Update the canvas with the given image and update area/scrollbars accordingly
-
-        Parameters
-        ----------
-        image
-            The preview image to display in the canvas
-        center_image
-            ``True`` if the image should be re-centered. Default ``True``
-        """
         logger.debug("Setting canvas image. ID: %s, size: %s for canvas size: %s (recenter: %s)",
                      self.image_id, (image.width(), image.height()), (self.width, self.height),
                      center_image)
@@ -390,16 +284,6 @@ class _PreviewCanvas(tk.Canvas):  # pylint:disable=too-many-ancestors
 
 
 class _Image():
-    """Holds the source image and the resized display image for the canvas
-
-    Parameters
-    ----------
-    save_variable
-        Variable that indicates a save preview has been requested in standalone mode
-    is_standalone
-        ``True`` if the preview is running in standalone mode. ``False`` if it is running in the
-        GUI
-    """
     def __init__(self, save_variable: tk.BooleanVar, is_standalone: bool) -> None:
         logger.debug("Initializing %s: (save_variable: %s, is_standalone: %s)",
                      self.__class__.__name__, save_variable, is_standalone)
@@ -415,36 +299,23 @@ class _Image():
 
     @property
     def display_image(self) -> ImageTk.PhotoImage:
-        """The current display image"""
         assert self._display is not None
         return self._display
 
     @property
     def source(self) -> np.ndarray:
-        """The current source preview image"""
         assert self._source is not None
         return self._source
 
     @property
     def scale(self) -> int:
-        """The current display scale as a percentage of original image size"""
         return int(self._scale * 100)
 
     def set_source_image(self, name: str, image: np.ndarray) -> None:
-        """Set the source image to :attr:`source`
-
-        Parameters
-        ----------
-        name
-            The name of the preview image to load
-        image
-            The image to use in RGB format
-        """
         logger.debug("Setting source image. name: '%s', shape: %s", name, image.shape)
         self._source = image
 
     def set_display_image(self) -> None:
-        """Obtain the scaled image and set to :attr:`display_image`"""
         logger.debug("Setting display image. Scale: %s", self._scale)
         image = self.source[..., 2::-1]  # TO RGB
         if self._scale not in (0.0, 1.0):  # Scale will be 0,0 on initial load in GUI
@@ -457,17 +328,6 @@ class _Image():
                      (self._display.width(), self._display.height()))
 
     def set_scale(self, scale: float) -> bool:
-        """Set the display scale to the given value.
-
-        Parameters
-        ----------
-        scale
-            The value to set scaling to
-
-        Returns
-        -------
-        ``True`` if the scale has been changed otherwise ``False``
-        """
         if self._scale == scale:
             return False
         logger.debug("Setting scale: %s", scale)
@@ -475,17 +335,6 @@ class _Image():
         return True
 
     def set_interpolation(self, interpolation: int) -> bool:
-        """Set the interpolation enum to the given value.
-
-        Parameters
-        ----------
-        interpolation
-            The value to set interpolation to
-
-        Returns
-        -------
-        ``True`` if the interpolation has been changed otherwise ``False``
-        """
         if self._interpolation == interpolation:
             return False
         logger.debug("Setting interpolation: %s", interpolation)
@@ -493,14 +342,6 @@ class _Image():
         return True
 
     def save_preview(self, *args) -> None:
-        """Save out the full size preview to the faceswap folder on a save button press
-
-        Parameters
-        ----------
-        args
-            Tuple containing either the key press event (Ctrl+s shortcut), the tk variable
-            arguments (standalone save button press) or the folder location (GUI save button press)
-        """
         if self._is_standalone and not self._save_var.get() and not isinstance(args[0], tk.Event):
             return
 
@@ -520,19 +361,6 @@ class _Image():
 
 
 class _Bindings():  # pylint:disable=too-few-public-methods
-    """Handle Mouse and Keyboard bindings for the canvas.
-
-    Parameters
-    ----------
-    canvas
-        The canvas that holds the preview image
-    taskbar
-        The taskbar widget which holds the scaling variables
-    image
-        The object which holds the source and display version of the preview image
-    is_standalone
-        ``True`` if the preview is standalone, ``False`` if it is embedded in the GUI
-    """
     def __init__(self,
                  canvas: _PreviewCanvas,
                  taskbar: _Taskbar,
@@ -550,13 +378,6 @@ class _Bindings():  # pylint:disable=too-few-public-methods
         logger.debug("Initialized %s", self.__class__.__name__,)
 
     def _on_bound_zoom(self, event: tk.Event) -> None:
-        """Action to perform on a valid zoom key press or mouse wheel action
-
-        Parameters
-        ----------
-        event
-            The key press or mouse wheel event
-        """
         if event.keysym in ("KP_Add", "plus") or event.num == 4 or event.delta > 0:
             scale = min(self._taskbar.max_scale, self._image.scale + 25)
         else:
@@ -565,26 +386,12 @@ class _Bindings():  # pylint:disable=too-few-public-methods
         self._taskbar.scale_var.set(f"{scale}%")
 
     def _on_mouse_click(self, event: tk.Event) -> None:
-        """log initial click coordinates for mouse click + drag action
-
-        Parameters
-        ----------
-        event
-            The mouse event
-        """
         self._drag_data = [event.x / self._image.display_image.width(),
                            event.y / self._image.display_image.height()]
         logger.trace("Mouse click action: (event: %s, drag_data: %s)",  # type: ignore
                      event, self._drag_data)
 
     def _on_mouse_drag(self, event: tk.Event) -> None:
-        """Drag image left, right, up or down
-
-        Parameters
-        ----------
-        event
-            The mouse event
-        """
         location_x = event.x / self._image.display_image.width()
         location_y = event.y / self._image.display_image.height()
 
@@ -598,13 +405,6 @@ class _Bindings():  # pylint:disable=too-few-public-methods
         self._drag_data = [location_x, location_y]
 
     def _on_key_move(self, event: tk.Event) -> None:
-        """Action to perform on a valid move key press
-
-        Parameters
-        ----------
-        event
-            The key press event
-        """
         move_axis = self._canvas.xview if event.keysym in ("Left", "Right") else self._canvas.yview
         visible = move_axis()[1] - move_axis()[0]
         amount = -visible / 25 if event.keysym in ("Up", "Left") else visible / 25
@@ -613,11 +413,6 @@ class _Bindings():  # pylint:disable=too-few-public-methods
         move_axis(tk.MOVETO, min(1.0, max(0.0, move_axis()[0] + amount)))
 
     def _set_mouse_bindings(self) -> None:
-        """Set the mouse bindings for interacting with the preview image
-
-        Mousewheel: Zoom in and out
-        Mouse click: Move image
-        """
         logger.debug("Binding mouse events")
         if system() == "Linux":
             self._canvas.tag_bind(self._canvas.image_id, "<Button-4>", self._on_bound_zoom)
@@ -630,18 +425,6 @@ class _Bindings():  # pylint:disable=too-few-public-methods
         logger.debug("Bound mouse events")
 
     def _set_key_bindings(self, is_standalone: bool) -> None:
-        """Set the keyboard bindings.
-
-        Up/Down/Left/Right: Moves image
-        +/-: Zooms image
-        ctrl+s: Save
-        i: Cycle interpolators
-
-        Parameters
-        ----------
-        is_standalone
-            ``True`` if the preview is standalone, ``False`` if it is embedded in the GUI
-        """
         if not is_standalone:
             # Don't bind keys for GUI as it adds complication
             return
@@ -657,22 +440,6 @@ class _Bindings():  # pylint:disable=too-few-public-methods
 
 
 class PreviewTk(PreviewBase):
-    """Holds a preview window for displaying the pop out preview.
-
-    Parameters
-    ----------
-    preview_buffer
-        The thread safe object holding the preview images
-    parent
-        If this viewer is being called from the GUI the parent widget should be passed in here.
-        If this is a standalone pop-up window then pass ``None``. Default: ``None``
-    taskbar
-        If this viewer is being called from the GUI the parent's option frame should be passed in
-        here. If this is a standalone pop-up window then pass ``None``. Default: ``None``
-    triggers
-        Dictionary of event triggers for pop-up preview. Not required when running inside the GUI.
-        Default: `None`
-    """
     def __init__(self,
                  preview_buffer: PreviewBuffer,
                  parent: tk.Widget | None = None,
@@ -713,33 +480,19 @@ class PreviewTk(PreviewBase):
 
     @property
     def master_frame(self) -> tk.Frame:
-        """The master frame that holds the preview window"""
         return self._master_frame
 
     def pack(self, *args, **kwargs):
-        """Redirect calls to pack the widget to pack the actual :attr:`_master_frame`.
-
-        Takes standard :class:`tkinter.Frame` pack arguments
-        """
         logger.debug("Packing master frame: (args: %s, kwargs: %s)", args, kwargs)
         self._master_frame.pack(*args, **kwargs)
 
     def save(self, location: str) -> None:
-        """Save action to be performed when save button pressed from the GUI.
-
-        Parameters
-        ----------
-        location
-            Full path to the folder to save the preview image to
-        """
         self._image.save_preview(location)
 
     def remove_option_controls(self) -> None:
-        """Remove the taskbar options controls when the preview is disabled in the GUI"""
         self._taskbar.destroy_widgets()
 
     def _output_helptext(self) -> None:
-        """Output the keybindings to Console."""
         if not self._is_standalone:
             return
         logger.info("---------------------------------------------------")
@@ -751,16 +504,6 @@ class PreviewTk(PreviewBase):
         logger.info("---------------------------------------------------")
 
     def _get_geometry(self) -> tuple[int, int]:
-        """Obtain the geometry of the current screen (standalone) or the dimensions of the widget
-        holding the preview window (GUI).
-
-        Just pulling screen width and height does not account for multiple monitors, so dummy in a
-        window to pull actual dimensions before hiding it again.
-
-        Returns
-        -------
-        The (`width`, `height`) of the current monitor's display
-        """
         if not self._is_standalone:
             root = self._root.winfo_toplevel()  # Get dims of whole GUI
             retval = root.winfo_width(), root.winfo_height()
@@ -779,7 +522,6 @@ class PreviewTk(PreviewBase):
         return retval
 
     def _set_min_max_scales(self) -> None:
-        """Set the minimum and maximum area that we allow to scale image to."""
         logger.debug("Calculating minimum scale for screen dimensions %s", self._screen_dimensions)
         half_screen = tuple(x // 2 for x in self._screen_dimensions)
         min_scales = (half_screen[0] / self._image.source.shape[1],
@@ -797,7 +539,6 @@ class PreviewTk(PreviewBase):
         self._taskbar.set_min_max_scale(min_scale, max_scale)
 
     def _initialize_window(self) -> None:
-        """Initialize the window to fit into the current screen"""
         logger.debug("Initializing window")
         assert isinstance(self._root, tk.Tk)
         width = min(self._master_frame.winfo_reqwidth(), self._screen_dimensions[0])
@@ -810,26 +551,12 @@ class PreviewTk(PreviewBase):
         logger.debug("Initialized window: (width: %s, height: %s)", width, height)
 
     def _update_image(self, center_image: bool = False) -> None:
-        """Update the image displayed in the canvas and set the canvas size and scroll region
-        accordingly
-
-        Parameters
-        ----------
-        center_image
-            ``True`` if the image in the canvas should be re-centered. Default:``True``
-        """
         logger.debug("Updating image (center_image: %s)", center_image)
         self._image.set_display_image()
         self._canvas.set_image(self._image.display_image, center_image)
         logger.debug("Updated image")
 
     def _convert_fit_scale(self) -> str:
-        """Convert "Fit" scale to the actual scaling amount
-
-        Returns
-        -------
-        The fit scaling in '##%' format
-        """
         logger.debug("Converting 'Fit' scaling")
         width_scale = self._canvas.width / self._image.source.shape[1]
         height_scale = self._canvas.height / self._image.source.shape[0]
@@ -840,7 +567,6 @@ class PreviewTk(PreviewBase):
         return retval
 
     def _set_scale(self, *args) -> None:  # pylint:disable=unused-argument
-        """Update the image on a scale request"""
         txt_scale = self._taskbar.scale_var.get()
         logger.debug("Setting scale: '%s'", txt_scale)
         txt_scale = self._convert_fit_scale() if txt_scale == "Fit" else txt_scale
@@ -853,20 +579,12 @@ class PreviewTk(PreviewBase):
             self._update_image(center_image=True)
 
     def _set_interpolation(self, *args) -> None:  # pylint:disable=unused-argument
-        """Callback for when the interpolator is change"""
         interpolator = self._taskbar.interpolator_var.get()
         if not self._image.set_interpolation(interpolator) or self._image.scale <= 1.0:
             return
         self._update_image(center_image=False)
 
     def _process_triggers(self) -> None:
-        """Process the standard faceswap key press triggers:
-
-        m = toggle_mask
-        r = refresh
-        s = save
-        enter = quit
-        """
         if self._triggers is None:  # Don't need triggers for GUI
             return
         logger.debug("Processing triggers")
@@ -879,17 +597,10 @@ class PreviewTk(PreviewBase):
         logger.debug("Processed triggers")
 
     def _on_keypress(self, event: tk.Event) -> None:
-        """Update the triggers on a keypress event for picking up by main faceswap process.
-
-        Parameters
-        ----------
-        event
-            The valid preview trigger keypress
-        """
         if self._triggers is None:  # Don't need triggers for GUI
             return
         keypress = "enter" if event.keysym == "Return" else event.keysym
-        key = T.cast(TriggerKeysType, keypress)
+        key = T.cast("TriggerKeysType", keypress)
         logger.debug("Processing keypress '%s'", key)
         if key == "r":
             print("\x1b[2K", end="\r")  # Clear last line
@@ -899,7 +610,6 @@ class PreviewTk(PreviewBase):
         logger.debug("Processed keypress '%s'. Set event for '%s'", key, self._keymaps[key])
 
     def _display_preview(self) -> None:
-        """Handle the displaying of the images currently in :attr:`_preview_buffer`"""
         if self._should_shutdown:
             self._root.destroy()
 
@@ -929,10 +639,6 @@ class PreviewTk(PreviewBase):
 
 
 def main():
-    """Load image from first given argument and display
-
-    python -m lib.training.preview_tk <filename>
-    """
     from lib.logger import log_setup  # pylint:disable=import-outside-toplevel
     from .preview_cv import PreviewBuffer  # pylint:disable=import-outside-toplevel
     log_setup("DEBUG", "faceswap_preview.log", "Test", False)
