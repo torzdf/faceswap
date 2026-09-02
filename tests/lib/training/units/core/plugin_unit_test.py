@@ -2,17 +2,7 @@
 # pylint:disable=protected-access,redefined-outer-name,too-few-public-methods,import-error
 # pylint:disable=too-many-arguments,too-many-positional-arguments,unused-argument
 # pylint:disable=missing-function-docstring
-""" Unit tests for :mod:`lib.training.units.core.plugin_unit`.
-
-Tests the observable behavior of ``PluginUnit``: construction wiring of the composite loss
-function, string representation echoing configuration, per-step batch-loss tracking (count and
-detach), device placement on load and during a step, and the training-unit capability contract.
-
-Follows black-box testing: assertions target only observable outputs or collaborator boundary
-state (devices recorded via ``to()``, losses returned/recorded by the trainer, the configuration
-forwarded to loss setup) and never internal call counts or private mechanics of the unit itself.
-Mocking collaborators only at their seams keeps these tests CPU-only and refactor-safe.
-"""
+""" Unit tests for :mod:`lib.training.units.core.plugin_unit` """
 from __future__ import annotations
 
 import typing as T

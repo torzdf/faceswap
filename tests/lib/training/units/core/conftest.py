@@ -9,13 +9,13 @@ from lib.model.plugin import State
 from lib.training.events import TrainingEvents
 
 
-@pytest.fixture(name="mock_state")
-def fixture_mock_state() -> State:
+@pytest.fixture()
+def mock_state() -> State:
     """ Fixture providing a fresh :class:`lib.model.plugin.State` instance per test """
     return State("mock_plugin")
 
 
-@pytest.fixture(name="events")
-def fixture_events() -> TrainingEvents:
+@pytest.fixture()
+def events() -> TrainingEvents:
     """ Fixture providing a real shared :class:`lib.training.events.TrainingEvents` instance """
     return TrainingEvents()

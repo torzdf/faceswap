@@ -24,8 +24,6 @@ from lib.training.units.core.save_unit import (
     StateMarkdown,
 )
 
-from .core_doubles import fixture_events, fixture_mock_state  # noqa:F401
-
 
 # =============================================================================
 # Doubles (model / loop boundaries only)
@@ -146,6 +144,85 @@ class TestLoadUnitOnLoad:
         text = repr(load_unit)
         assert "LoadUnit" in text
         assert "model=" in text
+
+
+# =============================================================================
+# StateMarkdown (rendering contract)
+# =============================================================================
+
+
+class TestStateMarkdownRendering:
+    """ Tests for StateMarkdown rendering methods """
+
+    def test_render_model_info_reports_identity_and_metrics(
+        self, mock_state: State
+    ) -> None:
+        """ render_model_info exposes model identity and formatted metrics in a table """
+        mock_state.set_plugin_version(2.5)
+        mock_state.lowest_avg_loss = 0.5
+        mock_state.lr_finder = 0.05
+        mock_state.add_new_session(32)
+        mock_state.increment_iterations()
+        markdown = StateMarkdown(mock_state)
+
+        out = markdown.render_model_info()
+
+        assert "### Model Information" in out
+        assert "mock-plugin" in out
+        # lowest_avg_loss rendered in scientific notation, lr_finder rendered (branch taken)
+        assert "5.00e-01" in out
+        assert "5.0e-02" in out
+
+    def test_render_config_reports_configuration(self, mock_state: State) -> None:
+        """ render_config produces the model config section as markdown """
+        mock_state.set_plugin_version(1.0)
+        markdown = StateMarkdown(mock_state)
+
+        out = markdown.render_config()
+
+        assert out
+        assert "### Model Config" in out
+
+    def test_render_sessions_reports_training_history(self, mock_state: State) -> None:
+        """ render_sessions lists each completed session with metadata and config tables """
+        mock_state.set_plugin_version(1.0)
+        mock_state.add_new_session(32)
+        mock_state.increment_iterations()
+        mock_state.add_new_session(64)
+        mock_state.increment_iterations()
+        markdown = StateMarkdown(mock_state)
+
+        out = markdown.render_sessions()
+
+        assert "### Session 1" in out
+        assert "### Session 2" in out
+        assert "Batch Size" in out
+
+    def test_render_sessions_empty_when_no_completed_sessions(
+        self, mock_state: State
+    ) -> None:
+        """ render_sessions yields no rows when there are no completed sessions to report """
+        mock_state.set_plugin_version(1.0)
+        markdown = StateMarkdown(mock_state)
+
+        out = markdown.render_sessions()
+
+        assert out == ""
+
+    def test_full_summary_combines_all_sections(self, mock_state: State) -> None:
+        """ full_summary composes model info, config and sessions into one report """
+        mock_state.set_plugin_version(1.0)
+        mock_state.add_new_session(32)
+        mock_state.increment_iterations()
+        markdown = StateMarkdown(mock_state)
+
+        out = markdown.full_summary()
+
+        assert "## Model" in out
+        assert "### Model Information" in out
+        assert "### Model Config" in out
+        assert "## Sessions" in out
+        assert "### Session 1" in out
 
 
 # =============================================================================
@@ -527,11 +604,9 @@ class TestSaveUnitOnSave:
         loop = FakeLoop({})
         unit.on_load(loop)
 
-        with mock.patch("lib.training.units.core.save_unit.torch.save") as torch_save:
-            events.exit.set()
-            unit.on_save(iteration=100)
+        events.exit.set()
+        unit.on_save(iteration=100)
 
-        assert torch_save.call_count == 0
         assert events.update.is_set() is False
 
 

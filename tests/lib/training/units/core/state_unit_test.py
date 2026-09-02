@@ -8,8 +8,6 @@ import pytest
 from lib.model.plugin import State
 from lib.training.units.core.state_unit import StateUnit
 
-from .core_doubles import fixture_mock_state  # noqa:F401
-
 
 # =============================================================================
 # Initialization and Configuration

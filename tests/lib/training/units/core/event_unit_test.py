@@ -7,7 +7,6 @@ import pytest
 
 from lib.training.events import TrainingEvents
 from lib.training.units.core.event_unit import EventUnit
-from .core_doubles import fixture_events  # noqa:F401
 
 
 # =============================================================================
@@ -40,49 +39,40 @@ class TestEventUnitRepr:
 class TestEventUnitStep:
     @pytest.mark.parametrize("iteration", [-2, -1, 0, 5])
     def test_step_update_on_mask_toggled_no_pending(self,
-                                                    caplog: pytest.LogCaptureFixture,
                                                     events: TrainingEvents,
                                                     iteration: int) -> None:
         """ A pending mask toggle with no update queued triggers an update """
-        with caplog.at_level("CRITICAL"):
-            events.toggle_mask.set()
-            unit = EventUnit(events)
-            unit.step(iteration)
-            assert events.update.is_set() is True
+        events.toggle_mask.set()
+        unit = EventUnit(events)
+        unit.step(iteration)
+        assert events.update.is_set() is True
 
     @pytest.mark.parametrize("iteration", [-2, -1, 0, 5])
     def test_step_no_action_when_mask_not_toggled(self,
-                                                  caplog: pytest.LogCaptureFixture,
                                                   events: TrainingEvents,
                                                   iteration: int) -> None:
         """ With no mask toggle pending, step leaves the update event clear """
-        with caplog.at_level("CRITICAL"):
-            unit = EventUnit(events)
-            unit.step(iteration)
-            assert events.update.is_set() is False
+        unit = EventUnit(events)
+        unit.step(iteration)
+        assert events.update.is_set() is False
 
     @pytest.mark.parametrize("iteration", [-2, -1, 0, 5])
     def test_step_no_trigger_on_update_pending(self,
-                                               caplog: pytest.LogCaptureFixture,
                                                events: TrainingEvents,
                                                iteration: int) -> None:
         """ If an update is already pending, step must not raise or alter state """
-        with caplog.at_level("CRITICAL"):
-            events.toggle_mask.set()
-            unit = EventUnit(events)
-            events.update.set()
-            unit.step(iteration)
-            assert events.update.is_set() is True
+        events.toggle_mask.set()
+        unit = EventUnit(events)
+        events.update.set()
+        unit.step(iteration)
+        assert events.update.is_set() is True
 
-    def test_step_triggers_once_per_pending_request(self,
-                                                    caplog: pytest.LogCaptureFixture,
-                                                    events: TrainingEvents) -> None:
+    def test_step_triggers_once_per_pending_request(self, events: TrainingEvents) -> None:
         """ Each consumed pending request triggers exactly one update while mask stays toggled """
-        with caplog.at_level("CRITICAL"):
-            events.toggle_mask.set()
-            unit = EventUnit(events)
-            unit.step(1)
-            assert events.update.is_set() is True
-            events.update.clear()
-            unit.step(2)
-            assert events.update.is_set() is True
+        events.toggle_mask.set()
+        unit = EventUnit(events)
+        unit.step(1)
+        assert events.update.is_set() is True
+        events.update.clear()
+        unit.step(2)
+        assert events.update.is_set() is True

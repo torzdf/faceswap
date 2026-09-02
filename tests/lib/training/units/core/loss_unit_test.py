@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # pylint:disable=protected-access, redefined-outer-name, unused-argument
-""" Unit tests for LossUnit - loss calculation and monitoring during training
-
-Tests the observable behavior of the LossUnit class: configuration echoed in the
-string representation, running-average computation, save-time contribution
-reporting, NaN protection, console loss printing, and the training-unit
-capability contract. Follows black-box testing: asserts only on observable
-outputs (current_average, console output, log messages, exceptions) and never
-on private state or internal call counts
-"""
+""" Unit tests for LossUnit - loss calculation and monitoring during training """
 # pylint:disable=import-error
 from __future__ import annotations
 
