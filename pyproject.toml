@@ -15,6 +15,9 @@ max-positional-arguments = 10
 [tool.pylint.TYPECHECK]
 generated-members = ["av", "cv2"]
 
+[tool.autopep8]
+max_line_length = 99
+
 [[tool.mypy.overrides]]
 module = [
     "fastcluster.*",
