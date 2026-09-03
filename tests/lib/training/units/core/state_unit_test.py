@@ -70,3 +70,19 @@ class TestStateUnitStep:
         unit.step(1)
         assert unit.iteration == 1
         assert unit.session_iteration == 1
+
+
+# =============================================================================
+# Session Iteration Property
+# =============================================================================
+
+
+class TestStateUnitSessionIteration:
+    """ Tests for the session_iteration property """
+
+    def test_session_iteration_tracks_current_session(self, mock_state: State) -> None:
+        """ session_iteration reflects the current session's iteration count """
+        unit = StateUnit(mock_state, 32)
+        unit.step(1)
+        unit.step(2)
+        assert unit.session_iteration == 2

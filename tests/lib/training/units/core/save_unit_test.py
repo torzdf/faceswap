@@ -226,6 +226,23 @@ class TestStateMarkdownRendering:
 
 
 # =============================================================================
+# StateMarkdown (repr contract)
+# =============================================================================
+
+
+class TestStateMarkdownRepr:
+    """ Tests for StateMarkdown repr. """
+    def test_repr_surfaces_class_name_and_state(self, mock_state: State) -> None:
+        """ The repr exposes the class name and wrapped state object """
+        mock_state.set_plugin_version(1.0)
+        markdown = StateMarkdown(mock_state)
+        text = repr(markdown)
+        assert "StateMarkdown" in text
+        assert "state=" in text
+        assert f"{mock_state!r}" in text
+
+
+# =============================================================================
 # StateMarkdown (pure formatting + rendering contract)
 # =============================================================================
 
@@ -469,7 +486,7 @@ class TestSaveUnitInit:
                        save_model: FakeSaveModel,
                        events: TrainingEvents,
                        avg_loss: npt.NDArray[np.float32]) -> None:
-        """ The repr exposes the class name and key parameters """
+        """ The repr exposes the class name and all key parameters """
         unit = SaveUnit(save_model,
                         FakeSaveableUnit("optimizer"),
                         events,
@@ -479,7 +496,13 @@ class TestSaveUnitInit:
                         save_train_state="always")
         text = repr(unit)
         assert "SaveUnit" in text
+        assert "model=" in text
+        assert "optimizer=" in text
+        assert "events=" in text
+        assert "average_loss=" in text
         assert "save_interval=100" in text
+        assert "snapshot_interval=100" in text
+        assert "save_train_state='always'" in text
 
 
 class TestSaveUnitStep:
@@ -567,18 +590,25 @@ class TestSaveUnitOnLoad:
 
 class TestSaveUnitOnSave:
     """ Tests for SaveUnit.on_save() """
+
+    @pytest.mark.parametrize(("save_train_state", "expected_ext"),
+                             [("always", ".ckpt"),
+                              ("exit", ".pth"),
+                              ("never", ".pth")])
     def test_on_save_writes_model_and_triggers_update(self,
                                                       save_model: FakeSaveModel,
                                                       events: TrainingEvents,
-                                                      avg_loss: npt.NDArray[np.float32]) -> None:
-        """ Saving writes the model file and requests a preview refresh """
+                                                      avg_loss: npt.NDArray[np.float32],
+                                                      save_train_state: str,
+                                                      expected_ext: str) -> None:
+        """ Saving writes the model file with the extension matching ``save_train_state`` """
         unit = SaveUnit(save_model,
                         FakeSaveableUnit("optimizer"),
                         events,
                         avg_loss,
                         save_interval=100,
                         snapshot_interval=100,
-                        save_train_state="always")
+                        save_train_state=save_train_state)
         loop = FakeLoop({})
         unit.on_load(loop)
 
@@ -586,7 +616,7 @@ class TestSaveUnitOnSave:
             unit.on_save(iteration=100)
 
         saved_fname = torch_save.call_args.args[1]
-        assert saved_fname.endswith(".ckpt")
+        assert saved_fname.endswith(expected_ext)
         assert events.update.is_set() is True
 
     def test_on_save_noop_when_exit_requested(self,
@@ -612,18 +642,25 @@ class TestSaveUnitOnSave:
 
 class TestSaveUnitOnEnd:
     """ Tests for SaveUnit.on_end() """
-    def test_on_end_saves_final_model(self,
-                                      save_model: FakeSaveModel,
-                                      events: TrainingEvents,
-                                      avg_loss: npt.NDArray[np.float32]) -> None:
-        """ Completing training performs a final checkpoint save """
+
+    @pytest.mark.parametrize(("save_train_state", "expected_ext"),
+                             [("always", ".ckpt"),
+                              ("exit", ".ckpt"),
+                              ("never", ".pth")])
+    def test_on_end_saves_with_correct_extension(self,
+                                                 save_model: FakeSaveModel,
+                                                 events: TrainingEvents,
+                                                 avg_loss: npt.NDArray[np.float32],
+                                                 save_train_state: str,
+                                                 expected_ext: str) -> None:
+        """ Completing training saves the correct file type for ``save_train_state`` """
         unit = SaveUnit(save_model,
                         FakeSaveableUnit("optimizer"),
                         events,
                         avg_loss,
                         save_interval=100,
                         snapshot_interval=100,
-                        save_train_state="always")
+                        save_train_state=save_train_state)
         loop = FakeLoop({})
         unit.on_load(loop)
 
@@ -631,7 +668,39 @@ class TestSaveUnitOnEnd:
             unit.on_end()
 
         saved_fname = torch_save.call_args.args[1]
-        assert saved_fname.endswith(".ckpt")
+        assert saved_fname.endswith(expected_ext)
+
+
+class TestSaveUnitGetAverageLoss:
+    """ Tests for SaveUnit._get_average_loss() """
+
+    def test_sets_initial_lowest_loss_on_first_save(self, save_model: FakeSaveModel) -> None:
+        """ The first non-zero average becomes the initial lowest when no best exists """
+        save_model.state.lowest_avg_loss = 0.0
+        unit = SaveUnit(save_model,
+                        FakeSaveableUnit("optimizer"),
+                        TrainingEvents(),
+                        np.array(3.14, dtype=np.float32),
+                        save_interval=100,
+                        snapshot_interval=100,
+                        save_train_state="always")
+        result = unit._get_average_loss()
+        assert result == pytest.approx(3.14)
+        assert save_model.state.lowest_avg_loss == pytest.approx(3.14)
+
+    def test_does_not_overwrite_existing_lowest_loss(self, save_model: FakeSaveModel) -> None:
+        """ An existing lowest loss is preserved when a new average is higher """
+        save_model.state.lowest_avg_loss = 2.0
+        unit = SaveUnit(save_model,
+                        FakeSaveableUnit("optimizer"),
+                        TrainingEvents(),
+                        np.array(5.0, dtype=np.float32),
+                        save_interval=100,
+                        snapshot_interval=100,
+                        save_train_state="always")
+        result = unit._get_average_loss()
+        assert result == pytest.approx(5.0)
+        assert save_model.state.lowest_avg_loss == 2.0
 
 
 # =============================================================================

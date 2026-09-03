@@ -479,9 +479,8 @@ class LRFState:  # pylint:disable=too-many-instance-attributes
             logger.error("The optimal learning rate could not be found. This is most likely "
                          "because you did not run the finder for enough iterations.")
             for fname in [self._backing_file, self._checkpoint_file]:
-                if os.path.exists(self._checkpoint_file):
-                    logger.debug("%s Removing generated file: %s",
-                                 self._log_name, self._checkpoint_file)
+                if os.path.exists(fname):
+                    logger.debug("%s Removing generated file: %s", self._log_name, fname)
                     os.remove(fname)
             return False
         return True

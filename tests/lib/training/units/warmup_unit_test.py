@@ -3,6 +3,8 @@
 """ Pytest unit tests for :mod:`lib.training.units.warmup_unit` """
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 from torch import nn
@@ -14,6 +16,20 @@ def _make_optimizer(lr: float = 0.01) -> torch.optim.Optimizer:
     """ Helper to create a minimal real PyTorch optimizer for testing """
     param = nn.Parameter(torch.randn(1, requires_grad=True))
     return torch.optim.SGD([param], lr=lr)
+
+
+@pytest.fixture(autouse=True)
+def _ignore_lr_scheduler_ordering_warning() -> None:
+    """ Silence PyTorch's LR-order warning for schedulers driven outside optimizer.step()
+
+    WarmupScheduler and the warmup unit itself advance their scheduler without a preceding
+    optimizer.step(), since warmup drives learning rate via its own linear schedule rather than
+    PyTorch's standard update cycle; this ordering heuristic is therefore a false positive here.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore",
+                                message=r"Detected call of .*?before .*?optimizer\.step\(\)")
+        yield
 
 
 # =============================================================================

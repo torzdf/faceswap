@@ -177,6 +177,17 @@ def test_nan_with_protection_raises(loss_unit_nan: LossUnit) -> None:
         loss_unit_nan.step(iteration=1)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_invalid_loss_with_protection_raises(loss_unit_nan: LossUnit, value: float) -> None:
+    """ With protection enabled NaN or infinite losses terminate training via FaceswapError """
+    invalid_loss = BatchLossMock(unweighted=[{"loss1": torch.tensor(value)}],
+                                 weighted=[{"loss1": torch.tensor(value)}],
+                                 mask=None)
+    loss_unit_nan._loss = [invalid_loss]
+    with pytest.raises(FaceswapError, match="NaN"):
+        loss_unit_nan.step(iteration=1)
+
+
 def test_valid_loss_passes_nan_check(loss_unit_nan: LossUnit) -> None:
     """ Valid losses pass the NaN check when protection is enabled """
     good_loss = BatchLossMock(unweighted=[{"loss1": torch.tensor(1.0)}],
