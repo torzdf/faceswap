@@ -20,7 +20,7 @@ from lib.serializer import get_serializer
 from lib.convert import Converter
 from lib.align import AlignedFace, DetectedFace
 from lib.infer.objects import FrameFaces
-from lib.gpu_stats import GPUStats
+from lib.system import GPUStats
 from lib.image import read_image_meta_batch, ImagesLoader
 from lib.multithreading import MultiThread, total_cpus
 from lib.queue_manager import queue_manager

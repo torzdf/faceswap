@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from lib.gpu_stats import GPUInfo
+from lib.system.gpu_stats import GPUInfo
 from lib.system.sysinfo import _Configs, _State, _SysInfo, get_sysinfo
 
 if T.TYPE_CHECKING:

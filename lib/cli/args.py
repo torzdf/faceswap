@@ -10,7 +10,7 @@ import textwrap
 import typing as T
 
 from lib.utils import get_backend, get_module_objects
-from lib.gpu_stats import GPUStats
+from lib.system import GPUStats
 
 from .actions import FileFullPaths, MultiOption, SaveFileFullPaths
 from .launcher import ScriptExecutor

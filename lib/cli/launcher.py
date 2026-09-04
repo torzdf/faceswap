@@ -9,7 +9,7 @@ import typing as T
 
 from importlib import import_module
 
-from lib.gpu_stats import GPUStats
+from lib.system import GPUStats
 from lib.logger import crash_log, log_setup
 from lib.system.system import VALID_TORCH
 from lib.utils import (FaceswapError, get_backend, get_torch_version,

@@ -9,9 +9,9 @@ import sys
 from subprocess import PIPE, Popen
 
 from lib.git import git
-from lib.gpu_stats import GPUInfo, GPUStats
 from lib.utils import get_backend, get_module_objects, PROJECT_ROOT
 
+from .gpu_stats import GPUInfo, GPUStats
 from .ml_libs import Cuda, ROCm
 from .system import Packages, System
 
