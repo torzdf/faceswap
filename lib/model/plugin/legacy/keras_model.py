@@ -377,6 +377,12 @@ class KerasConfigParser:
         if is_sequential and config.get("inbound_nodes"):
             return  # top-level Sequential with no outer context to resolve
 
+        # TODO: Add test for Sequential model without inbound_nodes (Gap 4).
+        # When inbound_nodes is falsy (e.g. [] or absent), this guard is bypassed
+        # and inbounds will be empty (since the loop over inbound_nodes yields nothing).
+        # The subsequent assert len(inbounds) == 1 will then fail. This may be intentional
+        # (unhandled case) or a bug — needs investigation.
+
         inbound_set: set[str] = set()
         for node in config["inbound_nodes"]:
             for args in node["args"]:
@@ -443,6 +449,11 @@ class KerasConfigParser:
         retval = {}
 
         if is_sequential:
+            # TODO: Add test for Sequential nested inside a Functional/Model parent
+            # (Gap 3). Currently only Model-in-Model is tested. This exercises the
+            # _flatten_sub_model recursion path where is_sequential=True and dst_label
+            # contains ".layers" — verifying child_dst construction and prev_label
+            # propagation work correctly for nested Sequential sub-models.
             assert name is not None
             prev_label = mapping.get(name)
             for layer in config["config"]["layers"]:
@@ -613,6 +624,10 @@ class KerasModel:  # pylint:disable=too-few-public-methods
             return collected
 
         if isinstance(entry, h5py.Group):
+            # TODO: Add test for empty h5py Group edge case (Gap 6).
+            # When an empty group is encountered, the comprehension iterates over
+            # nothing and collected is returned unchanged. This is unlikely with
+            # valid Keras models but worth documenting/verifying.
             collected |= {k: v
                           for e in entry
                           for k, v in self._get_weights(T.cast(h5py.Group | h5py.Dataset,

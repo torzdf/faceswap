@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import typing as T
 from collections import Counter
 
@@ -548,6 +549,31 @@ class KerasWeights:
         return name, weights
 
 
+def save_migrated_state_dict(state_dict: dict[str, T.Any], checkpoint_path: str) -> str:
+    """ Save a migrated state dict to disk, choosing the extension from its contents
+
+    A full checkpoint carries an "optimizer" key and is written as ``{base}.ckpt``; weights-only
+    state uses ``{base}.pth``. This rule is only guaranteed for legacy (Keras-era) migrations, so
+    it lives here rather than in general persistence
+
+    Parameters
+    ----------
+    state_dict
+        The prepared state dict to save
+    checkpoint_path
+        Base path for the standard ``{model_name}.ckpt`` checkpoint file
+
+    Returns
+    -------
+    The full path to the file that was written
+    """
+    ext = ".ckpt" if "optimizer" in state_dict else ".pth"
+    output_path = f"{os.path.splitext(checkpoint_path)[0]}{ext}"
+    logger.info("Saving migrated weights to '%s'", output_path)
+    torch.save(state_dict, output_path)
+    return output_path
+
+
 class KerasToTorch:
     """ Port weights from a keras trained Faceswap model to pyTorch format
 
@@ -822,22 +848,18 @@ class KerasToTorch:
         logger.debug("[KerasToTorch] Mapped weights: %s", len(retval))
         return retval
 
-    def _build_state_dict(self) -> None:
-        """ Load the model state information to the plugin, initialize the plugin and map keras
-        weights to the generated plugin's weights """
-        # Initialize empty model with loaded state settings
-        self._torch.load_state_dict({"state": self._state})
-        self._state_dict = {"version": 1.0,
-                            "state": self._torch.state.state_dict(),
-                            "model": self._map_weights(self._torch.plugin.state_dict(),
-                                                       self._keras.weights)}
-        if self._keras._optimizer:  # TODO
-            pass
-
     def state_dict(self) -> dict[str, T.Any]:
-        """ Get the migrated state_dict from the old keras model """
+        """ Assemble and return the migrated state_dict from the old keras model.
+
+        This performs no I/O; persisting the result is a separate concern handled by
+        save_migrated_state_dict once migration completes.
+        """
         if not self._state_dict:
-            self._build_state_dict()
+            self._state_dict = {"version": 1.0,
+                                "state": self._torch.state.state_dict(),
+                                "model": self._map_weights(self._torch.plugin.state_dict(),
+                                                           self._keras.weights)}
+            # TODO optimizer
         return self._state_dict
 
 

@@ -22,7 +22,7 @@ from lib.utils import get_folder, get_module_objects
 from plugins.plugin_loader import PluginLoader
 from plugins.train import train_config as mod_cfg
 
-from .legacy import KerasToTorch
+from .legacy import KerasToTorch, save_migrated_state_dict
 from .model_info import Info
 from .state import State
 
@@ -335,7 +335,7 @@ class _ModelLoader:
             state_dict = KerasToTorch(model,
                                       next(f for f in self._legacy_paths
                                            if os.path.exists(f))).state_dict()
-            # TODO we used to save here for migration, but have removed save functionality
+            save_migrated_state_dict(state_dict, model.checkpoint_path)
         else:
             state_dict = torch.load(filename, map_location="cpu", weights_only=True)
             logger.debug("Loaded model from disk: '%s'", filename)
