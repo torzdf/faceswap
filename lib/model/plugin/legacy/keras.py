@@ -1,5 +1,12 @@
 #! /usr/env/bin/python3
-""" Holds layer information and weights from a .keras model file """
+""" Load and prepare a legacy Keras (.keras) model for migration into the PyTorch framework
+
+This module reads a saved ``.keras`` checkpoint and extracts what is required to rebuild the model
+in Faceswap's current backend: it flattens the nested Keras config into standardized layer names
+that match the stored weights, re-orders those layers so the weight matcher can pair each Keras
+weight with its Torch counterpart by shape, and loads the model weights plus optimizer and training
+state
+"""
 from __future__ import annotations
 
 import io
@@ -45,7 +52,7 @@ class LayerSorter:
     """ Sorts keras layers when graph order does not correspond to Torch build order. Weights
     matcher works by finding the next available Keras weights of the same shape as the currently
     processing Torch weights, so the order does not need to be exact, but it needs to be good
-    enough for this algorhythm to select the correct weights
+    enough for this algorithm to select the correct weights
 
     Parameters
     ----------
@@ -205,7 +212,7 @@ class LayerSorter:
         return self._order_layers(layers, sorted_keys)
 
     def _phaze_a_shared_inter_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-        """ The 3 inters are built in order A, Shared, B in Keras but A, B, Shared in Torch
+        """ Re-order the 3 inters, Keras builds as A, Shared, B but Torch builds as A, B, Shared
 
         Parameters
         ----------
@@ -223,7 +230,7 @@ class LayerSorter:
         return self._order_layers(layers, ordered)
 
     def _phaze_a_reorder(self, layers: dict[str, LayerInfo]) -> dict[str, LayerInfo]:
-        """ Phaze-A has several configurations that require re-ordering
+        """ Re-order qualifying encoder and shared-inter layers for Phaze-A
 
         Parameters
         ----------
@@ -578,6 +585,11 @@ class KerasConfigParser:
 
 class KerasModel:  # pylint:disable=too-few-public-methods
     """ Loads data from a .keras model
+
+    Extracts everything needed to migrate a legacy Keras checkpoint into Faceswap's current
+    PyTorch backend: the flattened layer structure, the sorted weights (which the weight matcher
+    pairs by shape), and any stored optimizer and training state. Downstream migration steps then
+    consume these attributes to rebuild the model
 
     Parameters
     ----------

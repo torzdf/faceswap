@@ -14,7 +14,7 @@ import h5py
 import numpy as np
 import pytest
 
-from lib.model.plugin.legacy.keras_model import (  # pylint:disable=import-error
+from lib.model.plugin.legacy.keras import (  # pylint:disable=import-error
     LayerInfo,
     KerasConfigParser,
     KerasModel,

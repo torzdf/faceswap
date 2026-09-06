@@ -258,9 +258,42 @@ class _ModelLoader:
         return any(os.path.isfile(x) for x in (self._checkpoint_path, self._weights_path))
 
     @property
+    def needs_upgrade(self) -> bool:
+        """ ``True`` if a legacy Keras model exists but not a current torch model """
+        return self._legacy_exists and not self.file_exists
+
+    @property
     def checkpoint_path(self) -> str:
         """ The full path to the standard ``{model_name}.ckpt`` checkpoint file """
         return self._checkpoint_path
+
+    def upgrade_legacy(self, model: FaceswapModel) -> tuple[ModelPlugin, dict[str, T.Any]]:
+        """ Upgrade a legacy Keras model to a current Torch model and save to disk
+
+        Parameters
+        ----------
+        model
+            FaceswapModel instance required when migrating from Keras format. The converter needs
+            a reference to the target plugin structure to properly map weights during migration
+        """
+        logger.info("[%s] Migrating weights from Keras model", self._model_name)
+
+        migrator = KerasToTorch(next(f for f in self._legacy_paths if os.path.exists(f)))
+        state = migrator.state
+        model.state.load_state_dict(state)
+
+        plugin = PluginLoader.get_model(self._model_name)(num_identities=2,
+                                                          version=state["plugin_version"])
+        migrator.migrate(plugin)
+        # TODO optimizer/extra_state
+        extra_state = {}
+
+        model.plugin = plugin
+        converted = model.state_dict()
+        del model.plugin
+        save_migrated_state_dict(converted, model.checkpoint_path)
+
+        return plugin, extra_state
 
     def get_latest_save(self) -> str | None:
         """ Find and return path to most recently modified checkpoint file
@@ -289,24 +322,12 @@ class _ModelLoader:
         logger.debug("%s Latest save from %s: %s", self._name, file_list, retval)
         return retval
 
-    def load(self, model: FaceswapModel | None = None) -> dict[str, T.Any]:
+    def load(self) -> dict[str, T.Any]:
         """ Load state dictionary from checkpoint file or migrate legacy Keras weights
 
-        Retrieves the most recent save and handles three loading paths:
+        Retrieves the most recent save and handles 2 loading paths:
             1. Checkpoint exists: Direct torch.load() with CPU map_location for weight transfer
-            2. No torch save + Keras file exists: Migrate weights using KerasToTorch converter
-            3. Neither exists: Return empty dict to signal fresh model creation needed
-
-        The migrated state_dict includes plugin version metadata and architecture information
-        from the saved config, while direct checkpoint loads include full training history with
-        extra_state items if load_extra_state flag is set in FaceswapModel constructor
-
-        Parameters
-        ----------
-        model
-            FaceswapModel instance required when migrating from Keras format. The converter needs
-            a reference to the target plugin structure to properly map weights during migration.
-            When loading standard checkpoints, this parameter can be omitted or passed as None
+            3. Checkpoint doesn't exist: Return empty dict to signal fresh model creation needed
 
         Returns
         -------
@@ -323,22 +344,12 @@ class _ModelLoader:
             since migration requires knowing the target plugin architecture for weight mapping
         """
         filename = self.get_latest_save()
-        if filename is None and not self._legacy_exists:
+        if filename is None:
             logger.debug("%s No save files exist. Not loading", self._name)
             return {}
 
-        if filename is None and model is None:
-            raise RuntimeError("Legacy keras model found, but torch structure not provided.")
-        if filename is None:
-            logger.info("[%s] Migrating weights from Keras model", self._model_name)
-            assert model is not None
-            state_dict = KerasToTorch(model,
-                                      next(f for f in self._legacy_paths
-                                           if os.path.exists(f))).state_dict()
-            save_migrated_state_dict(state_dict, model.checkpoint_path)
-        else:
-            state_dict = torch.load(filename, map_location="cpu", weights_only=True)
-            logger.debug("Loaded model from disk: '%s'", filename)
+        state_dict = torch.load(filename, map_location="cpu", weights_only=True)
+        logger.debug("Loaded model from disk: '%s'", filename)
         logger.debug("%s Loaded state_dict version %s. Keys: %s",
                      self._name, state_dict.get("version", 0.0), list(state_dict))
         return state_dict
@@ -408,7 +419,7 @@ class FaceswapModel:
         logger.debug(parse_class_init(locals()))
 
         mod_cfg.load_config(config_file=config_file)  # Set global config
-
+        self._num_identities = num_identities
         self._load_extra_state = load_extra_state
         self._conf_file = config_file
         self._log_name = f"[{self.__class__.__name__}.{name}]"
@@ -426,7 +437,7 @@ class FaceswapModel:
         """ The instantiated neural network module ready for training or inference after
         configuration completes """
 
-        self.plugin, self._extra_state = self._load_plugin(num_identities)
+        self.plugin, self._extra_state = self._load_plugin()
 
         self._configure()
 
@@ -434,7 +445,7 @@ class FaceswapModel:
         """ Return a string representation for logging purposes """
         params = {"name": repr(self.name.replace("-", "_")),
                   "model_dir": repr(os.path.dirname(self.io.checkpoint_path)),
-                  "num_identities": repr(self.plugin.num_identities),
+                  "num_identities": repr(self._num_identities),
                   "load_extra_state": repr(self._load_extra_state),
                   "config_file": repr(self._conf_file)}
         s_params = ", ".join(f"{k}={v}" for k, v in params.items())
@@ -458,13 +469,8 @@ class FaceswapModel:
         """ The absolute path to the location where the checkpoint (.ckpt) may be saved """
         return self.io.checkpoint_path
 
-    def _create_new(self, num_identities: int) -> ModelPlugin:
+    def _create_new(self) -> ModelPlugin:
         """ Instantiate a fresh plugin without loading any saved state
-
-        Parameters
-        ----------
-        num_identities : int
-            Number of face encodings that this model is configured to support
 
         Returns
         -------
@@ -472,18 +478,13 @@ class FaceswapModel:
             Fresh plugin instance with random weights ready for training
         """
         logger.debug("[FaceswapModel] No state_dict to load. Creating new model")
-        plugin = PluginLoader.get_model(self.name)(num_identities=num_identities)
+        plugin = PluginLoader.get_model(self.name)(num_identities=self._num_identities)
         self.state.set_plugin_version(plugin.version)
         return plugin
 
-    def _load_existing(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any]]:
+    def _load_existing(self) -> tuple[ModelPlugin, dict[str, T.Any]]:
         """ Load existing plugin from checkpoint file including model weights and state
         dictionaries
-
-        Parameters
-        ----------
-        num_identities
-            Number of identities the model supports. must match what was used when model created
 
         Returns
         -------
@@ -496,27 +497,20 @@ class FaceswapModel:
         if "state" not in state_dict:
             logger.warning("%s No state found in saved config. Loading from model defaults.",
                            self._log_name)
-            return self._create_new(num_identities), {}
+            return self._create_new(), {}
 
         logger.info("%s Loading plugin from saved config", self._log_name)
         self.state.load_state_dict(T.cast(dict[str, T.Any], state_dict["state"]))
-        plugin = PluginLoader.get_model(self.name)(num_identities=num_identities,
+        plugin = PluginLoader.get_model(self.name)(num_identities=self._num_identities,
                                                    version=self.state.plugin_version)
         plugin.load_state_dict(state_dict["model"])
-        self.state.load_state_dict(state_dict["state"])
-
         extra_state = {k: v for k, v in state_dict.items()
                        if k not in ("state", "model", "version")} if self._load_extra_state else {}
 
         return plugin, extra_state
 
-    def _load_plugin(self, num_identities: int) -> tuple[ModelPlugin, dict[str, T.Any]]:
+    def _load_plugin(self) -> tuple[ModelPlugin, dict[str, T.Any]]:
         """ Determine whether to create new or load existing plugin based on file existence check
-
-        Parameters
-        ----------
-        num_identities : int
-            Number of identities model supports
 
         Returns
         -------
@@ -525,9 +519,12 @@ class FaceswapModel:
         extra_state
             Dictionary of items (training data loaded from checkpoint) if load_extra_state=True
         """
+        if self.io.needs_upgrade:
+            return self.io.upgrade_legacy(self)
+
         if not self.io.file_exists:
-            return self._create_new(num_identities), {}
-        return self._load_existing(num_identities)
+            return self._create_new(), {}
+        return self._load_existing()
 
     def _configure(self) -> None:
         """ Apply weight initializations and padding modifications after plugin instantiation """
