@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Handles collation of data for training faceswap models"""
+""" Collate batches of face images into the inputs and targets used to train FaceSwap models
+
+This module prepares each batch of extracted faces before it is fed to a training model. It stacks
+the loaded images and masks, applies optional colour and geometric augmentation, resizes inputs and
+outputs to the requested pixel sizes, and compiles the target images along with any face, eye or
+mouth masks required by the training loop. When Warp-to-Landmarks is enabled it also supplies
+matching landmark pairs for random warping
+"""
 from __future__ import annotations
 
 import logging
@@ -31,26 +38,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BatchMeta:
-    """Dataclass that holds meta information required for training a batch of images
+    """ Dataclass holding the mask tensors required to train a batch of images
 
-    All lists are of len(number model outputs per side) with tensors in shape (batch_size,
-    num_inputs, 1, H, W)
+    Holds optional per-output masks used by penalized loss or learn-mask. Each attribute is
+    ``None`` or a list with one entry per model output, containing tensors shaped ``(batch_size,
+    num_inputs, 1, H, W)`` in NCHW order
     """
     mask_face: list[torch.Tensor] | None = None
-    """The selected face mask for penalized loss/learn mask for each output in NCHW order"""
+    """ The selected face mask for penalized or learn-based loss, one per output, in NCHW order """
     mask_eye: list[torch.Tensor] | None = None
-    """The eye mask if eye loss multipliers > 1 for each output in NCHW order"""
+    """ The eye mask when eye loss multipliers exceed 1, one per output, in NCHW order """
     mask_mouth: list[torch.Tensor] | None = None
-    """The mouth mask if mouth loss multipliers > 1 for each output in NCHW order"""
+    """ The mouth mask when mouth loss multipliers exceed 1, one per output, in NCHW order """
 
     def __repr__(self) -> str:
-        """Pretty print for logging"""
+        """ Return a string representation for logging purposes """
         params = ", ".join(f"{k}={None if v is None else [(x.shape, x.dtype) for x in v]}"
                            for k, v in self.__dict__.items())
         return f"{self.__class__.__name__}({params})"
 
     def __getitem__(self, key: int) -> BatchMeta:
-        """Obtain a copy of the BatchMeta object for a specific model input index
+        """ Obtain a copy of the BatchMeta object for a specific model input index
 
         Parameters
         ----------
@@ -59,23 +67,23 @@ class BatchMeta:
 
         Returns
         -------
-        The meta data for a specific model input. Data will be populated in lists of
-        length num_outputs in shape (batch_size, 1, H, W)
+        A new BatchMeta holding the meta data for one model input. Data is populated in lists of
+        length num_outputs, with tensors shaped (batch_size, 1, H, W)
         """
         return BatchMeta(**{k: None if v is None else [x[:, key] for x in v]
                             for k, v in self.__dict__.items()})
 
     def to(self, device: str | torch.Device) -> T.Self:
-        """Place all contained tensors onto the given device
+        """ Place all contained tensors on the given device
 
         Parameters
         ----------
         device
-            The device to place the tensors on to
+            The device to move the tensors onto
 
         Returns
         -------
-        This object with the tensors placed on the requested device
+        This object with its tensors placed on the requested device
         """
         for k in list(self.__dict__):
             v = self.__dict__[k]
@@ -86,17 +94,15 @@ class BatchMeta:
 
 
 class LandmarkMatcher:
-    """Prepares landmarks when Warp-to-Landmarks is enabled.
+    """ Prepare landmarks when Warp-to-Landmarks is enabled
 
-    2 sides (A/B) only.
-
-    For each side, stores the aligned landmarks for each side and collates the 10 nearest matches
-    on the other side for random warping
+    Supports only two sides (A and B). It aligns and caches the landmarks of every face per side,
+    then finds the nearest opposite-side matches so random warping can sample a matching face
 
     Parameters
     ----------
     folders
-        Two training folders for sides A and B
+        The two training folders for sides A and B
     size
         The aligned face size to transform the landmarks to
     centering
@@ -105,7 +111,7 @@ class LandmarkMatcher:
         Additional coverage ratio to be applied
     y_offset
         Additional vertical offset to be applied
-    num_choices
+    num_choices, optional
         Number of choices from the opposite side to cache for each landmark. Default: 10
     """
     def __init__(self,
@@ -135,7 +141,7 @@ class LandmarkMatcher:
         self._closest_indices = self._get_closest_indices()
 
     def __repr__(self) -> str:
-        """Pretty print for logging"""
+        """ Return a string representation for logging purposes """
         params = {f"{k}"[1:]: v for k, v in self.__dict__.items()
                   if k in ("_folders", "_size", "_centering", "_coverage", "_y_offset",
                            "_num_choices")}
@@ -144,19 +150,23 @@ class LandmarkMatcher:
 
     def _landmarks_from_header(self, meta: dict[str, T.Any], filename: str
                                ) -> npt.NDArray[np.float32]:
-        """Extract the landmarks from the PNG metadata.
+        """ Extract the frame-space landmarks from a face image's metadata
+
+        Parameters
+        ----------
+        meta
+            The metadata dictionary read from the face image
+        filename
+            The name of the face image that landmarks are being loaded for
 
         Returns
         -------
-        landmarks
-            The frame space landmarks for a face
-        filename
-            The name of the face image that we are loading landmarks for
+        The frame space landmarks for a face, shaped (68, 2)
 
         Raises
         ------
         FaceswapError
-            If an invalid image is loaded or 68 point landmarks are not used
+            If an invalid image is loaded or 68-point landmarks are not used
         """
         if "itxt" not in meta or "alignments" not in meta["itxt"]:
             raise FaceswapError(f"Invalid face image found. Aborting: '{filename}'")
@@ -168,15 +178,16 @@ class LandmarkMatcher:
         return retval
 
     def _align_points(self, points: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
-        """Normalize and align the landmarks to model input size/coverage/offset
+        """ Normalize and align the landmarks to model input size, coverage and offset
 
+        Parameters
+        ----------
         points
-        ------
-        The (N, 68, 2) landmark points to align
+            The (N, 68, 2) landmark points to align
 
         Returns
         -------
-        The landmark points aligned to model input
+        The landmark points aligned to the model input
         """
         mats = batch_umeyama(points[:, 17:], MEAN_FACE[LandmarkType.LM_2D_51], True)
         norm_lms = batch_transform(mats, points)
@@ -191,14 +202,14 @@ class LandmarkMatcher:
         return norm_lms
 
     def _load_landmarks(self) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-        """For each input folder load and align the landmarks for each face
+        """ Load and align the landmarks for every face in both input folders
 
         Returns
         -------
         landmarks_a
-            The aligned landmarks for side A in shape (N, 68, 2)
+            The aligned landmarks for side A, shaped (N, 68, 2)
         landmarks_b
-            The aligned landmarks for side B in shape (N, 68, 2)
+            The aligned landmarks for side B, shaped (N, 68, 2)
         """
         landmarks: list[npt.NDArray[np.float32]] = []
         for i, folder in enumerate(self._folders):
@@ -216,14 +227,14 @@ class LandmarkMatcher:
         return landmarks[0], landmarks[1]
 
     def _get_closest_indices(self) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-        """Obtain the closest x number of landmarks from the opposite side
+        """ Find the nearest landmarks on the opposite side for every face's landmarks
 
         Returns
         -------
         indices_a
-            Array of size (len(landmarks_a), x) closest B landmarks for each A landmarks
+            Array of size (len(landmarks_a), x) giving the closest B landmarks for each A landmark
         indices_b
-            Array of size (len(landmarks_b), x) closest A landmarks for each B landmarks
+            Array of size (len(landmarks_b), x) giving the closest A landmarks for each B landmark
         """
         a_count = self._landmarks[0].shape[0]
         b_count = self._landmarks[1].shape[0]
@@ -242,18 +253,17 @@ class LandmarkMatcher:
         return matches_a, matches_b
 
     def get_close_landmarks(self, indices: npt.NDArray[np.int64]) -> npt.NDArray[np.float32]:
-        """For the given image indices, obtain a randomly selected close match landmarks from the
-        other side
+        """ Obtain a randomly selected close-match landmark from the opposite side for each index
 
         Parameters
         ----------
         indices
-            The (num_inputs, landmark_indices) image file indices to obtain the matches for
+            The (num_inputs, landmark_indices) image file indices to obtain matches for
 
         Returns
         -------
-        2 sets of landmarks in shape (num_sides * batch_size, num_sides, 68, 2) stacked to a batch
-        of landmark points for augmentation
+        Two sets of landmarks shaped (num_inputs * batch_size, 2, 68, 2), stacked as a batch of
+        landmark points for augmentation
         """
         matches = np.zeros((*indices.shape, 2, 68, 2), dtype=np.float32)
         for side_id, ind in enumerate(indices):
@@ -272,8 +282,11 @@ class LandmarkMatcher:
 
 
 class Collate:  # pylint:disable=too-many-instance-attributes
-    """Collation function for processing a batch of samples into input and output tensors applying
-    augmentation
+    """ Collate a batch of loaded face images into the inputs and targets for training
+
+    Wraps :class:`ImageAugmentation` to turn a batch of extracted faces into ready-to-feed tensors.
+    It applies optional colour, flip and warp augmentations, resizes inputs and outputs to the
+    requested pixel sizes, and compiles the target images along with any face, eye or mouth masks
 
     Parameters
     ----------
@@ -292,15 +305,15 @@ class Collate:  # pylint:disable=too-many-instance-attributes
     flip
         ``True`` to perform image flipping otherwise ``False``
     warp
-        ``False`` to disable warping ``True`` to enable warping
+        ``False`` to disable warping, ``True`` to enable warping
     cache_landmarks
-        ``True`` to cache landmarks from the other side for Warp to landmarks
+        ``True`` to cache landmarks from the other side for Warp-to-Landmarks
     landmarks
-        The landmark matching object for the (A and B) sides of the model if warp_to_landmarks is
-        enabled otherwise ``None``
+        The landmark matching object for the A and B sides of the model when Warp-to-Landmarks is
+        enabled, otherwise ``None``
     """
     _mask_types = ("mask_face", "mask_eye", "mask_mouth")
-    """The masks that are stacked to the end of the targets in the order they are stacked"""
+    """ The masks stacked to the end of the targets, in the order they are stacked """
 
     def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
                  num_inputs: int,
@@ -335,7 +348,7 @@ class Collate:  # pylint:disable=too-many-instance-attributes
                                       processing_size=self._process_size)
 
     def __repr__(self) -> str:
-        """Pretty print for logging"""
+        """ Return a string representation for logging purposes """
         params = {}
         for k, v in self.__dict__.items():
             if k == "_config":
@@ -348,14 +361,14 @@ class Collate:  # pylint:disable=too-many-instance-attributes
         return f"{self.__class__.__name__}({s_params})"
 
     def _batch_resize(self, batch: npt.NDArray[np.uint8], size: int) -> npt.NDArray[np.uint8]:
-        """ Resize a batch of images with arbitrary channel count
+        """ Resize a batch of images with an arbitrary channel count
 
         Parameters
         ----------
         batch
             The batch to resize
         size
-            The destination size
+            The destination pixel size
 
         Returns
         -------
@@ -377,24 +390,22 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
     def _create_targets(self, batch: npt.NDArray[np.uint8]
                         ) -> tuple[list[torch.Tensor], BatchMeta]:
-        """ Compile target images, with masks, for the model output sizes.
+        """ Compile the target images and masks for each model output size
 
         Parameters
         ----------
         batch
-            This should be a 4-dimensional array of training images in the format (`batch size`,
-            `height`, `width`, `channels`). Targets should be requested after performing image
-            transformations but prior to performing warps. The 4th channel should be the mask.
-            Any channels above the 4th should be any additional area masks (e.g. eye/mouth) that
-            are required.
+            A 4-dimensional array of training images shaped (`batch_size`, `height`, `width`,
+            `channels`). Gather targets after transformations but before warps. The 4th channel is
+            the mask; any channels beyond it are additional area masks such as eye or mouth
 
         Returns
         -------
         targets
-            List of len (num_outputs) of target images in shape (batch_size, num_inputs, height,
-            width, 3) at all model output sizes as float32 0.0 - 1.0 range
+            List of len (num_outputs) target images shaped (batch_size, num_inputs, height, width,
+            3) at all model output sizes, in the float32 0.0-1.0 range
         meta
-            Any additional Meta information relating to the batch required for training the model
+            The BatchMeta holding any additional masks required to train the model
         """
         logger.trace("[%s] Compiling targets: batch shape: %s",  # type:ignore[attr-defined]
                      self._name, batch.shape)
@@ -423,19 +434,17 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
     def _get_landmarks_pairs(self, indices: npt.NDArray[np.int64]
                              ) -> npt.NDArray[np.float32] | None:
-        """Get a pair of matching source landmarks and closely selected destination landmarks
-        for Warp to Landmarks for each of the inputs
+        """ Get a pair of matching source and selected destination landmarks per input
 
         Parameters
         ----------
         indices
-            The (num_inputs, batch_size) face file image indices to obtain the landmarks pairs for
+            The (num_inputs, batch_size) face file image indices to obtain landmark pairs for
 
         Returns
         -------
-        2 sets of landmarks in shape (num_inputs * batch_size, 2, 68, 2). On the 3rd dimension,
-        position 0 are the source points. position 1 the randomly selected closest match points.
-        ``None`` if Warp to Landmarks is disabled
+        Pairs of source and closely matched destination landmarks for Warp-to-Landmarks, shaped
+        ``(num_inputs * batch_size, 2, 68, 2)``. ``None`` when Warp-to-Landmarks is disabled
         """
         if not self._aug_config["warp"] or self._landmarks is None:
             return None
@@ -444,24 +453,23 @@ class Collate:  # pylint:disable=too-many-instance-attributes
 
     def __call__(self, data: list[tuple[tuple[npt.NDArray[np.uint8], int], ...]]
                  ) -> tuple[list[torch.Tensor], list[torch.Tensor], BatchMeta]:
-        """Prepare the loaded samples for feeding the model, creating targets and applying
-        augmentation
+        """ Prepare the loaded samples for feeding the model, creating targets and augmenting
 
         Parameters
         ----------
         data
-            Batch of data tuples with the loaded stacked image and masks from each loader in the
-            first position and the image file index for each item in the batch in the 2nd
+            A batch of data tuples. Each holds the loaded stacked image and masks in the first
+            position and the image file index for each item in the batch in the second
 
         Returns
         -------
         feed
-            list of len (num_inputs) tensors of shape(batch_size, H, W, C) inputs for the model
+            List of len (num_inputs) tensors shaped (batch_size, H, W, C) inputs for the model
         targets
-            List of len (num_outputs) of target images in shape (batch_size, num_inputs, height,
-            width, 3) at all model output sizes as float32 0.0 - 1.0 range
+            List of len (num_outputs) target images shaped (batch_size, num_inputs, height, width,
+            3) at all model output sizes, in the float32 0.0-1.0 range
         meta
-            The meta information for the batch
+            The BatchMeta holding the mask information for this batch
         """
         shape = data[0][0][0].shape
         batch = np.empty((self._num_inputs, self._batch_size, *shape), dtype=np.uint8)

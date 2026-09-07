@@ -1,5 +1,10 @@
-#! /usr/env/bin/python3
-"""Handles the loading of data for training and previews for faceswap models"""
+#! /usr/bin/env python3
+""" Handle loading and collating of data for training and previewing faceswap models
+
+Provides the loaders used by the training loop. It validates every configured folder and builds
+datasets per side before they are assembled into multi-input datasets. Results are wrapped in
+PyTorch data loaders that collate batches ready to feed the model with images for inference
+"""
 from __future__ import annotations
 
 import logging
@@ -84,8 +89,10 @@ def validate_faceswap_folders(training_folders: list[str]) -> list[str]:
 
 
 class TrainLoader():  # pylint:disable=too-many-instance-attributes
-    """Generator for feeding faceswap models with multiple inputs and outputs. Gets the next items
-    from each of the configured loaders and collates them for feeding into a model
+    """ Generator for feeding faceswap models with multiple inputs and outputs
+
+    Gets the next items from each of the configured loaders and collates them for feeding into a
+    model
 
     Parameters
     ----------
@@ -107,7 +114,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         ``False`` to disable warping ``True`` to enable warping
     cache_landmarks
         ``True`` to cache landmarks from the other side for Warp to landmarks
-    sampler
+    sampler, optional
         The sampler to use for the data loaders. Default: ``None`` (RandomSampler)
     """
     def __init__(self,  # pylint:disable=too-many-arguments,too-many-positional-arguments
@@ -154,11 +161,11 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         self._epoch = 0
 
     def __iter__(self) -> T.Self:
-        """This is an iterator"""
+        """ Return this object so that it can be iterated """
         return self
 
     def __repr__(self) -> str:
-        """Pretty print for logging"""
+        """ Return a string representation for logging purposes """
         # pylint:disable=duplicate-code
         params = {}
         for k, v in self.__dict__.items():
@@ -177,7 +184,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         return f"{self.__class__.__name__}({s_params})"
 
     def get_loader(self) -> DataLoader:
-        """Obtain the dataloaders for each input/output for the model
+        """ Obtain the dataloaders for each input/output for the model
 
         Returns
         -------
@@ -213,7 +220,7 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
         return retval
 
     def __next__(self) -> tuple[list[torch.Tensor], list[torch.Tensor], BatchMeta]:
-        """Obtain the next outputs from the loader
+        """ Obtain the next outputs from the loader
 
         Returns
         -------
@@ -251,8 +258,10 @@ class TrainLoader():  # pylint:disable=too-many-instance-attributes
 
 
 class PreviewLoader():
-    """Generator for feeding faceswap models input data for generating preview images. Gets the
-    next items from each of the configured loaders and collates them for feeding into a model
+    """ Generator for feeding faceswap models input data for generating preview images
+
+    Gets the next items from each of the configured loaders and collates them for feeding into a
+    model
 
     Parameters
     ----------
@@ -266,9 +275,9 @@ class PreviewLoader():
         list of folders to read images from for each side being trained
     batch_size
         The number of images being displayed in the preview
-    sampler
+    sampler, optional
         The sampler to use for the data loaders. Default: ``None`` (RandomSampler)
-    num_samples
+    num_samples, optional
         Set to 0 for random previews from the image folder. Set to a positive integer for this
         number of images to use for a static timelapse. Default: 0
     """
@@ -299,11 +308,11 @@ class PreviewLoader():
         return self._input_folders
 
     def __iter__(self) -> T.Self:
-        """This is an iterator"""
+        """ Return this object so that it can be iterated """
         return self
 
     def __repr__(self) -> str:
-        """Pretty print for logging"""
+        """ Return a string representation for logging purposes """
         params = ", ".join(f"{k[1:]}={repr(v)}" for k, v in self.__dict__.items()
                            if k in ("_input_size", "_output_size", "_color_order",
                                     "_input_folders", "_batch_size", "_sampler", "_num_samples"))
