@@ -270,6 +270,8 @@ class _ModelLoader:
     def upgrade_legacy(self, model: FaceswapModel) -> tuple[ModelPlugin, dict[str, T.Any]]:
         """ Upgrade a legacy Keras model to a current Torch model and save to disk
 
+        Handles the migration of layer weights, optimizer weights and model state
+
         Parameters
         ----------
         model
@@ -285,12 +287,14 @@ class _ModelLoader:
         plugin = PluginLoader.get_model(self._model_name)(num_identities=2,
                                                           version=state["plugin_version"])
         migrator.migrate(plugin)
-        # TODO optimizer/extra_state
-        extra_state = {}
 
         model.plugin = plugin
         converted = model.state_dict()
         del model.plugin
+
+        extra_state = migrator.get_optimizer(plugin)
+        if extra_state:
+            converted["optimizer"] = extra_state
         save_migrated_state_dict(converted, model.checkpoint_path)
 
         return plugin, extra_state

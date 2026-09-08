@@ -169,6 +169,7 @@ class KerasToTorch:
         self._pixel_shuffler_convs = get_pixel_shuffler_convs(self._keras.layers)
         self._dense_reshapes = get_dense_reshapes(self._keras.layers)
         self._state = _get_state(self._keras)
+        self._optimizer_map: dict[str, str] = {}
 
     @property
     def state(self) -> dict[str, T.Any]:
@@ -193,6 +194,34 @@ class KerasToTorch:
             name, w_type = lbl.rsplit(".", maxsplit=1)
             retval[name] = retval.get(name, {}) | {w_type: weight}
         return retval
+
+    def _get_source_weights(self,
+                            plugin: ModelPlugin) -> tuple[KerasWeights, dict[str, torch.Tensor]]:
+        """ Obtain the source keras and torch weights that are to be handled by the migration
+
+        Parameters
+        ----------
+        plugin
+            The torch model plugin whose weights are replaced with the migrated Keras weights
+
+        Returns
+        -------
+        keras_weights
+            The object that manages the Keras weights
+        torch_weights
+            The weights from the new Torch model's state_dict
+        """
+        is_clip = (self._state["plugin_name"] == "phaze-a" and
+                   self._state["config"].get("enc_architecture", "").startswith("clipv_"))
+        mask_layers = get_mask_layers({k: v.input_layers
+                                       for k, v in self._keras.layers.items()},
+                                      {k: v.shape
+                                       for k, v in self._keras.weights.items()
+                                       if k.endswith(".0") and ".conv2d" in k})
+
+        keras = KerasWeights(self._keras.weights, mask_layers, is_clip)
+        torch_weights = plugin.state_dict()
+        return keras, torch_weights
 
     def _group_weights(self,
                        torch_weights: dict[str, torch.Tensor],
@@ -239,35 +268,56 @@ class KerasToTorch:
 
         return torch_grouped
 
-    def _map_weights(self,
-                     torch_grouped: dict[str, dict[str, torch.Tensor]],
-                     keras_weights: KerasWeights) -> dict[str, torch.Tensor]:
-        """ Convert the loaded keras weights to the format provided by the pre-existing torch
-        weights and return as a compatible torch state_dict
+    def _build_layer_map(self, torch_weights: dict[str, torch.Tensor], keras_weights: KerasWeights
+                         ) -> dict[str, dict[str, tuple[str, dict[str, np.ndarray]]]]:
+        """ Map the keras layers to their torch counterparts
 
         Parameters
         ----------
-        torch_grouped
-            The torch weights grouped by layer, keyed by layer name.
+        torch_weights
+            The torch weights loaded from the plugin state_dict
         keras_weights
-            The Keras weights used to find matching tensors as each weight is mapped.
+            The Keras weights used to find matching tensors as each weight is mapped
 
         Returns
         -------
-        The imported keras weights for importing into a torch plugin
+        A mapping of torch layer names to keras weight names
         """
         # This logic goes through the loaded torch state_dict and searches forwards through the
         # keras model for where the first weight matches and pops it. This should be reasonably
         # robust as some tensors can drift a little, but not too far. Mask layer ordering is the
         # biggest barrier, so the search is filtered if learn_mask is enabled.
         # This will fail if match is not found.
-        mapped: dict[str, torch.Tensor] = {}
+        torch_grouped = self._group_weights(torch_weights, keras_weights)
+        retval: dict[str, dict[str, tuple[str, dict[str, np.ndarray]]]] = {}
         for lbl, weights in torch_grouped.items():
             weight_key = list(weights)[0]
             key, k_weights = keras_weights.get_next_weights("mask" in lbl, weight_key, weights)
+            retval[lbl] = {key: (list(weights)[0], k_weights)}
+        return retval
 
+    def _map_weights(self,
+                     mapping: dict[str, dict[str, tuple[str, dict[str, np.ndarray]]]],
+                     torch_weights: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """ Convert the loaded keras weights to the format provided by the pre-existing torch
+        weights and return as a compatible torch state_dict
+
+        Parameters
+        ----------
+        mapping
+            The mapping of torch layer names to keras layer names
+        torch_weights
+            The torch weights loaded from the plugin state_dict
+
+        Returns
+        -------
+        The imported keras weights for importing into a torch plugin
+        """
+        mapped: dict[str, torch.Tensor] = {}
+        for trc, ker in mapping.items():
+            key, (w_key, k_weights) = next(iter(ker.items()))
             if key.rsplit(".",
-                          maxsplit=1)[-1].startswith("dense") and k_weights[weight_key].ndim == 2:
+                          maxsplit=1)[-1].startswith("dense") and k_weights[w_key].ndim == 2:
                 dense_reorder(key,
                               T.cast(dict[T.Literal["weight", "bias"], np.ndarray],
                                      k_weights),
@@ -278,11 +328,33 @@ class KerasToTorch:
                                       self._pixel_shuffler_convs[key])
 
             logger.debug("[KerasToTorch] Mapped keras '%s' to torch '%s': %s",
-                         key, lbl, k_weights[weight_key].shape)
+                         key, trc, k_weights[w_key].shape)
 
             for k, v in k_weights.items():
-                mapped[f"{lbl}.{k}"] = torch.from_numpy(v)
-        return mapped
+                mapped[f"{trc}.{k}"] = torch.from_numpy(v)
+
+        # Re-insert non-existent batch norm tracking
+        retval = {k: v if k.endswith("num_batches_tracked") else mapped[k]
+                  for k, v in torch_weights.items()}
+        return retval
+
+    def _store_optimizer_mapping(self,
+                                 mapping: dict[str, dict[str, tuple[str, dict[str, np.ndarray]]]]
+                                 ) -> None:
+        """ Store optimizer layer mapping, if optimizer exists, for optimizer migration
+
+        Parameters
+        ----------
+        mapping
+            The mapping used to map Keras layer weights to Torch
+        """
+        if not self._keras.optimizer:
+            logger.debug("[KerasToTorch] Legacy model contains no optimizer weights")
+            return
+        for trc, val in mapping.items():  # TODO exclude non-optimizer weights
+            self._optimizer_map[trc] = next(iter(val.items()))[0]
+        logger.debug("[KerasToTorch] Storing layer mappings for optimizer: %s",
+                     len(self._optimizer_map))
 
     def migrate(self, plugin: ModelPlugin) -> None:
         """ Load a keras model's weights into a torch plugin, migrating then mapping each one
@@ -296,30 +368,56 @@ class KerasToTorch:
         plugin
             The torch model plugin whose weights are replaced with the migrated Keras weights
         """
-        is_clip = (self._state["plugin_name"] == "phaze-a" and
-                   self._state["config"].get("enc_architecture", "").startswith("clipv_"))
-        mask_layers = get_mask_layers({k: v.input_layers
-                                       for k, v in self._keras.layers.items()},
-                                      {k: v.shape
-                                       for k, v in self._keras.weights.items()
-                                       if k.endswith(".0") and ".conv2d" in k})
-
-        keras = KerasWeights(self._keras.weights, mask_layers, is_clip)
-        torch_weights = plugin.state_dict()
-        torch_grouped = self._group_weights(torch_weights, keras)
-
-        mapped = self._map_weights(torch_grouped, keras)
-
-        state: dict[str, torch.Tensor] = {}
-        for k, v in torch_weights.items():
-            if k.endswith("num_batches_tracked"):  # Re-insert non-existent batch norm tracking
-                state[k] = v
-                continue
-            state[k] = mapped[k]  # Fail on unmatched
-
+        keras_weights, torch_weights = self._get_source_weights(plugin)
+        mapping = self._build_layer_map(torch_weights, keras_weights)
+        state = self._map_weights(mapping, torch_weights)
         logger.debug("[KerasToTorch] Mapped weights: %s", len(state))
-        # TODO optimizer
+        self._store_optimizer_mapping(mapping)
         plugin.load_state_dict(state)
+
+    def get_optimizer(self, model: ModelPlugin) -> dict[str, T.Any]:
+        """ Map Keras model with Torch Optimizer weights to pure Torch
+
+        Maps a Keras saved Optimizer's weights to Torch's layer layout for loading into a newly
+        created optimizer
+
+        Parameters
+        ----------
+        plugin
+            The torch model plugin whose optimizer weights are to be updated
+
+        Returns
+        -------
+        The migrated optimizer weights state_dict
+        """
+        if not self._keras.optimizer:
+            return self._keras.optimizer
+
+        orig_order = list(dict.fromkeys(w_key.rsplit(".", maxsplit=2)[0]
+                                        for w_key in self._keras.weights))
+        param_ids = []
+        offset_id = 0
+        # TODO this needs thorough testing with:
+        #  - layers that do not have optimizer weights
+        #  - layers that actually get re-ordered
+        for grp in ("weight", "bias"):
+            names = [x[0].rsplit(".", maxsplit=1)[0] for x in model.named_parameters()
+                     if x[1].requires_grad and x[0].endswith(grp)]
+            mapping = {k: v for k, v in self._optimizer_map.items() if k in names}
+            orig = [x for x in orig_order if x in mapping.values()]
+            for name in names:
+                param_ids.append(orig.index(mapping[name]) + offset_id)
+            offset_id += len(names)
+
+        retval = self._keras.optimizer
+        old_state = retval["optimizer"]["state"]
+        assert len(old_state) == len(param_ids), "Not all optimizer weights mapped"
+
+        new_state = {}
+        for new_idx, old_idx in enumerate(param_ids):
+            new_state[new_idx] = old_state[old_idx]
+        retval["optimizer"]["state"] = new_state
+        return retval
 
 
 __all__ = get_module_objects(__name__)

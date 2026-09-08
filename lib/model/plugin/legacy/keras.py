@@ -608,9 +608,14 @@ class KerasModel:  # pylint:disable=too-few-public-methods
         self.weights = {}
         """ The stored layer name to numpy array for the loaded keras model in model creation
         order """
-        self._optimizer: dict[T.Literal["version", "optimizer", "scale"], T.Any] = {}
+        self._optimizer: dict[str, T.Any] = {}
 
         self._load_keras_model()
+
+    @property
+    def optimizer(self) -> dict[str, T.Any]:
+        """ The legacy optimizer weights, if any saved in the keras file """
+        return self._optimizer
 
     def _get_weights(self,
                      entry: h5py.Group | h5py.Dataset,
